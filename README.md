@@ -1,9 +1,7 @@
 <div align="center">
-  <img width="600" alt="ETHEREAL SOUNDS" src="public/ethereal-banner.svg" />
+  <img width="800" alt="ETHEREAL STUDIO" src="public/ethereal-banner.svg" />
   
   <br/>
-  
-  <h1>ETHEREAL STUDIO</h1>
   
   <p>
     <strong>The Harmonic Convergence of Code and Frequency</strong>
@@ -19,7 +17,7 @@
 
 <br/>
 
-## 🌌 The Ethereal Philosophy
+## The Ethereal Philosophy
 
 **ETHEREAL STUDIO** is not merely a Digital Audio Workstation; it is a **resonant environment** designed for the modern sound architect. 
 
@@ -27,20 +25,20 @@ Born from the belief that professional audio tools should be as inspiring as the
 
 At its heart lies a commitment to **local-first sovereignty**. Your sound, your instruments, and your processing power belong to you. No cloud dependencies for creativity. Just you and the Ether.
 
-## ⚡ The Engine
+## The Engine
 
 Underneath the glassmorphic surface beats a highly optimizing, low-latency audio heart built on **Web Audio API** and **Electron**.
 
-### 🎹 Polyphonic Scanner Support
+### Polyphonic Scanner Support
 A next-generation transcription layer using **Basic Pitch** combined with our proprietary harmonic refinement pass. It doesn't just "hear" notes; it perceives intention, converting raw audio into editable MIDI with nuanced velocity and timing.
 
-### 🧬 Granular & Spectral Core
+### Granular & Spectral Core
 Our custom `AudioEngine` is built for texture. With native support for granular synthesis and convolution reverb using mathematically generated impulse responses, you can construct soundscapes that defy standard topology.
 
-### 🤖 The Performer (ASCII Dock)
+### The Performer (ASCII Dock)
 The machine is watching. Our unique **AsciiPerformerDock** is a real-time reactive visual companion/visualizer that exists within the CLI and the GUI simultaneously, bridging the gap between the terminal underbelly and the high-fidelity surface.
 
-## 🛠️ Getting Started
+## Getting Started
 
 ### Prerequisites
 - **Node.js LTS** (v20+)
@@ -60,7 +58,7 @@ npm install
 npm run dev:electron
 ```
 
-## 🏗️ Architecture
+## Architecture
 
 - **Core**: React 19 + TypeScript + Vite
 - **Runtime**: Electron (Windows x64 Optimized)
