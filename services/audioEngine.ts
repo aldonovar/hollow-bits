@@ -95,6 +95,7 @@ class AudioEngine {
 
     // Playback State
     activeSources: Map<string, ActiveSource> = new Map();
+    exhaustedClipWindows: Map<string, number> = new Map();
 
     // Input State
     inputNodes: Map<string, MediaStreamAudioSourceNode> = new Map();
@@ -266,6 +267,35 @@ class AudioEngine {
         }
 
         return this.dbToLinear(this.clamp(value, -72, 12));
+    }
+
+
+    private getClipPlaybackProfile(track: Track, clip: Clip): {
+        clipOriginalBpm: number;
+        clipTransposeSemitones: number;
+        totalSemitones: number;
+        clipPlaybackRate: number;
+        transposeMult: number;
+        granularRate: number;
+        nativeRate: number;
+    } {
+        const clipOriginalBpm = Math.max(1, this.finiteOr(clip.originalBpm ?? 120, 120));
+        const clipTransposeSemitones = this.finiteOr(track.transpose, 0) + this.finiteOr(clip.transpose ?? 0, 0);
+        const totalSemitones = this.masterTransposeSemitones + clipTransposeSemitones;
+        const clipPlaybackRate = this.clamp(this.finiteOr(clip.playbackRate, 1), 0.25, 4);
+        const transposeMult = Math.pow(2, totalSemitones / 12);
+        const bpmRatio = this.currentBpm / clipOriginalBpm;
+        const granularRate = bpmRatio * clipPlaybackRate;
+
+        return {
+            clipOriginalBpm,
+            clipTransposeSemitones,
+            totalSemitones,
+            clipPlaybackRate,
+            transposeMult,
+            granularRate,
+            nativeRate: granularRate * transposeMult
+        };
     }
 
     private buildMixEvaluationContext(tracks: Track[]): MixEvaluationContext {
@@ -1596,7 +1626,7 @@ class AudioEngine {
     }
 
     async recoverPlaybackGraph(tracks: Track[]) {
-        if (!this.ctx || !this.masterGain || !this.masterOutput || !this.masterAnalyser) {
+        if (!this.ctx || !this.masterGain || !this.masterOutput || !this.masterAnalyser || !this.limiter || !this.cueGain) {
             await this.init(this.settings);
             this.updateTracks(tracks);
             return;
@@ -1614,8 +1644,39 @@ class AudioEngine {
             // already disconnected
         }
 
-        this.masterOutput.connect(this.ctx.destination);
+        try {
+            this.masterOutput.disconnect(this.limiter);
+        } catch {
+            // already disconnected
+        }
+
+        try {
+            this.limiter.disconnect(this.ctx.destination);
+        } catch {
+            // already disconnected
+        }
+
+        try {
+            this.cueGain.disconnect(this.ctx.destination);
+        } catch {
+            // already disconnected
+        }
+
+        try {
+            this.cueGain.disconnect(this.masterAnalyser);
+        } catch {
+            // already disconnected
+        }
+
+        // Restore canonical safe graph:
+        // Master -> Limiter -> Destination
+        // Master -> Analyser
+        // Cue -> Destination + Analyser
         this.masterOutput.connect(this.masterAnalyser);
+        this.masterOutput.connect(this.limiter);
+        this.limiter.connect(this.ctx.destination);
+        this.cueGain.connect(this.ctx.destination);
+        this.cueGain.connect(this.masterAnalyser);
 
         this.updateTracks(tracks);
         this.syncCueRouting();
@@ -1901,6 +1962,14 @@ class AudioEngine {
                 if (clipEndSec > projectTime && clipStartSec < lookAheadTime) {
                     const clipNodeId = `${track.id}-${clip.id}`;
 
+                    const exhaustedUntil = this.exhaustedClipWindows.get(clipNodeId);
+                    if (typeof exhaustedUntil === 'number') {
+                        if (projectTime < exhaustedUntil - 0.0001) {
+                            return;
+                        }
+                        this.exhaustedClipWindows.delete(clipNodeId);
+                    }
+
                     if (this.activeSources.has(clipNodeId)) return;
 
                     let startOffset = 0;
@@ -1917,8 +1986,36 @@ class AudioEngine {
                     }
 
                     const clipInternalOffsetSec = (clip.offset || 0) * secondsPerBar;
-                    const finalBufferOffset = startOffset + clipInternalOffsetSec;
 
+                    if (clip.buffer) {
+                        const playbackProfile = this.getClipPlaybackProfile(track, clip);
+                        const effectiveRate = clip.isWarped ? playbackProfile.granularRate : playbackProfile.nativeRate;
+                        const safeRate = Math.max(0.0001, Math.abs(this.finiteOr(effectiveRate, 1)));
+                        const timelineOffsetSeconds = startOffset + clipInternalOffsetSec;
+                        const finalBufferOffset = timelineOffsetSeconds * safeRate;
+                        const remainingBuffer = clip.buffer.duration - finalBufferOffset;
+
+                        if (!Number.isFinite(remainingBuffer) || remainingBuffer <= 0.0001) {
+                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
+                            return;
+                        }
+
+                        const maxPlayableTimelineDuration = remainingBuffer / safeRate;
+                        if (!Number.isFinite(maxPlayableTimelineDuration) || maxPlayableTimelineDuration <= 0.0001) {
+                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
+                            return;
+                        }
+
+                        if (maxPlayableTimelineDuration < durationToPlay - 0.0001) {
+                            durationToPlay = maxPlayableTimelineDuration;
+                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
+                        }
+
+                        this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId);
+                        return;
+                    }
+
+                    const finalBufferOffset = startOffset + clipInternalOffsetSec;
                     this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId);
                 }
             });
@@ -1936,18 +2033,20 @@ class AudioEngine {
 
         const clipGain = this.ctx.createGain();
         const safeClip = this.sanitizeClip(clip);
+        const playbackProfile = this.getClipPlaybackProfile(track, safeClip);
         const bufferDuration = clipBuffer.duration;
         const safeOffset = this.clamp(this.finiteOr(bufferOffset, 0), 0, Math.max(0, bufferDuration - 0.001));
-        const maxPlayableDuration = Math.max(0, bufferDuration - safeOffset);
-        const safeDuration = Math.min(this.finiteOr(duration, 0), maxPlayableDuration);
+        const remainingBufferDuration = Math.max(0, bufferDuration - safeOffset);
+        const shouldUseGranular = Boolean(safeClip.isWarped);
+        const effectiveRate = shouldUseGranular ? playbackProfile.granularRate : playbackProfile.nativeRate;
+        const safeRate = Math.max(0.0001, Math.abs(this.finiteOr(effectiveRate, 1)));
+        const maxPlayableTimelineDuration = remainingBufferDuration / safeRate;
+        const safeDuration = Math.min(this.finiteOr(duration, 0), maxPlayableTimelineDuration);
         if (safeDuration <= 0.0001) return;
 
         this.applyClipEnvelope(clipGain, safeClip, playAt, safeDuration, this.currentBpm);
-        const clipOriginalBpm = safeClip.originalBpm || 120;
-        const clipTransposeSemitones = (track.transpose || 0) + (safeClip.transpose || 0);
-        const totalSemitones = this.masterTransposeSemitones + clipTransposeSemitones;
-        const shouldUseGranular = Boolean(safeClip.isWarped);
-        const clipPlaybackRate = this.clamp(this.finiteOr(safeClip.playbackRate, 1), 0.25, 4);
+        const clipOriginalBpm = playbackProfile.clipOriginalBpm;
+        const clipTransposeSemitones = playbackProfile.clipTransposeSemitones;
 
         const scheduleNativePath = () => {
             try {
@@ -1956,11 +2055,11 @@ class AudioEngine {
                 source.connect(clipGain);
                 clipGain.connect(playbackTarget);
 
-                const bpmRatio = (this.currentBpm / clipOriginalBpm) * clipPlaybackRate;
-                const transposeMult = Math.pow(2, totalSemitones / 12);
-                source.playbackRate.value = bpmRatio * transposeMult;
+                const nativeRate = playbackProfile.nativeRate;
+                source.playbackRate.value = nativeRate;
 
-                source.start(playAt, safeOffset, safeDuration);
+                const bufferDurationToConsume = Math.max(0.0001, safeDuration * Math.max(0.0001, Math.abs(nativeRate)));
+                source.start(playAt, safeOffset, bufferDurationToConsume);
 
                 this.activeSources.set(nodeId, {
                     source,
@@ -1997,9 +2096,8 @@ class AudioEngine {
                 p.get('isPlaying')?.setValueAtTime(1, playAt);
                 p.get('isPlaying')?.setValueAtTime(0, playAt + safeDuration);
 
-                const bpmRatio = (this.currentBpm / clipOriginalBpm) * clipPlaybackRate;
-                p.get('playbackRate')?.setValueAtTime(bpmRatio, playAt);
-                p.get('pitch')?.setValueAtTime(Math.pow(2, totalSemitones / 12), playAt);
+                p.get('playbackRate')?.setValueAtTime(playbackProfile.granularRate, playAt);
+                p.get('pitch')?.setValueAtTime(playbackProfile.transposeMult, playAt);
 
                 this.activeSources.set(nodeId, {
                     granularNode: node,
@@ -2047,6 +2145,7 @@ class AudioEngine {
             }
         });
         this.activeSources.clear();
+        this.exhaustedClipWindows.clear();
     }
 
     // --- UTILS ---
