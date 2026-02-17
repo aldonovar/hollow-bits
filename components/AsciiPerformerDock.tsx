@@ -59,7 +59,6 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
     const viewportRef = useRef<HTMLDivElement>(null);
     const artRef = useRef<HTMLPreElement>(null);
     const [fitScale, setFitScale] = useState(1);
-    const [artFrame, setArtFrame] = useState(() => normalizeFrame(ANIME_ASCII_BASE));
 
     useLayoutEffect(() => {
         const measure = () => {
