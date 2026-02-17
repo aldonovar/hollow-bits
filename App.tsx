@@ -637,6 +637,13 @@ const App: React.FC = () => {
     const handlePlay = useCallback(async () => {
         if (isPlayingRef.current) return;
 
+        const ready = await audioEngine.ensurePlaybackReady();
+        if (!ready) {
+            isPlayingRef.current = false;
+            setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
+            return;
+        }
+
         const currentEngineTime = audioEngine.getCurrentTime();
         const projectEndBar = getProjectEndBar();
         const projectEndTime = barToSeconds(projectEndBar, transport.bpm);

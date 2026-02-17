@@ -1704,6 +1704,49 @@ class AudioEngine {
         return this.ctx;
     }
 
+    async ensurePlaybackReady(): Promise<boolean> {
+        const tryResume = async (context: AudioContext, label: string): Promise<boolean> => {
+            if (context.state === 'running') return true;
+            try {
+                await context.resume();
+                return true;
+            } catch (error) {
+                console.warn(`No se pudo reanudar AudioContext (${label}).`, error);
+                return false;
+            }
+        };
+
+        const ctx = this.getContext();
+        void tryResume(ctx, 'pre-init');
+
+        try {
+            await this.init(this.settings);
+        } catch (error) {
+            console.warn('No se pudo inicializar AudioContext al preparar reproduccion.', error);
+            return false;
+        }
+
+        if (!this.ctx) return false;
+
+        const resumed = await tryResume(this.ctx, 'post-init');
+        const graphReady = Boolean(this.masterGain && this.masterOutput);
+        if (resumed && graphReady) {
+            return true;
+        }
+
+        try {
+            await this.restartEngine(this.settings);
+        } catch (error) {
+            console.warn('No se pudo reiniciar motor de audio para recuperar reproduccion.', error);
+            return false;
+        }
+
+        if (!this.ctx) return false;
+
+        const resumedAfterRestart = await tryResume(this.ctx, 'post-restart');
+        return resumedAfterRestart && Boolean(this.masterGain && this.masterOutput);
+    }
+
     play(tracks: Track[], bpm: number, _pitch: number, offsetTime: number) {
         if (!this.ctx || !this.masterGain) {
             void this.init(this.settings)
