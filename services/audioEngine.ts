@@ -1705,6 +1705,16 @@ class AudioEngine {
     }
 
     async ensurePlaybackReady(): Promise<boolean> {
+        const ctx = this.getContext();
+
+        if (ctx.state !== 'running') {
+            try {
+                await ctx.resume();
+            } catch (error) {
+                console.warn('No se pudo reanudar AudioContext al preparar reproduccion (pre-init).', error);
+            }
+        }
+
         try {
             await this.init(this.settings);
         } catch (error) {
@@ -1725,7 +1735,7 @@ class AudioEngine {
             }
         }
 
-        return this.ctx.state === 'running' && Boolean(this.masterGain);
+        return this.ctx.state === 'running' && Boolean(this.masterGain) && Boolean(this.masterOutput);
     }
 
     play(tracks: Track[], bpm: number, _pitch: number, offsetTime: number) {
