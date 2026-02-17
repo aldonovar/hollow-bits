@@ -108,25 +108,45 @@ body {
   margin: 0;
   color: #f7e7ff;
   font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
-  font-size: 2px;
-  line-height: 2px;
+  font-size: 4px;
+  line-height: 4px;
   font-weight: 700;
-  letter-spacing: 0;
+  letter-spacing: 0.05px;
   white-space: pre;
   user-select: none;
   pointer-events: none;
   transform: translate(-50%, -50%);
   opacity: 0.94;
+  text-shadow: 0 0 4px rgba(244, 218, 255, 0.2), 0 0 11px rgba(244, 63, 94, 0.16);
   transition: opacity 220ms ease;
 }
 
 .anime-ascii-live {
-  animation: performerGlow 860ms cubic-bezier(0.28, 0.72, 0.35, 1) infinite;
+  animation: performerGlow 1100ms cubic-bezier(0.28, 0.72, 0.35, 1) infinite, asciiDepthPulse 900ms ease-in-out infinite;
   opacity: 1;
 }
 
 .anime-ascii-idle {
   opacity: 0.84;
+  filter: saturate(0.88) brightness(0.93);
+}
+
+
+@keyframes asciiDepthPulse {
+  0% {
+    transform: translateZ(0);
+    filter: brightness(1) saturate(1);
+  }
+
+  50% {
+    transform: translateZ(0);
+    filter: brightness(1.18) saturate(1.12);
+  }
+
+  100% {
+    transform: translateZ(0);
+    filter: brightness(1) saturate(1);
+  }
 }
 
 .ascii-dock-playing {
