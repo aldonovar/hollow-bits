@@ -4,7 +4,6 @@ interface AsciiPerformerDockProps {
     isPlaying: boolean;
 }
 
-// --- Sparkle animation config ---
 interface Sparkle {
     x: number;
     y: number;
@@ -24,10 +23,19 @@ const SPARKLE_POSITIONS: Sparkle[] = [
     { x: 0.12, y: 0.56, size: 5, phase: 2.0, speed: 2.2 },
 ];
 
-const BREATHING_AMPLITUDE = 2;     // px vertical shift
-const BREATHING_PERIOD = 3000;     // ms per full breath cycle
-const HAIR_SWAY_AMPLITUDE = 1.5;   // px horizontal shift
-const HAIR_SWAY_PERIOD = 4000;     // ms per full sway cycle
+const FPS = 12;
+const STEP_MS = 1000 / FPS;
+const BREATHING_AMPLITUDE = 1;
+const BREATHING_PERIOD = 3000;
+const HAIR_SWAY_AMPLITUDE = 1;
+const HAIR_SWAY_PERIOD = 4000;
+
+const MOTION_FRAMES = Array.from({ length: 24 }, (_, index) => {
+    const t = (Math.PI * 2 * index) / 24;
+    const x = Math.round(2.5 * Math.sin(t) + 0.9 * Math.sin(2 * t + 0.45));
+    const y = Math.round(2.5 * Math.cos(t + 0.3) + 0.7 * Math.sin(3 * t + 0.2));
+    return { x, y };
+});
 
 function drawSparkle(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, alpha: number) {
     ctx.save();
@@ -36,7 +44,6 @@ function drawSparkle(ctx: CanvasRenderingContext2D, x: number, y: number, size: 
     ctx.lineWidth = Math.max(1, size * 0.2);
     ctx.lineCap = 'round';
 
-    // Cross shape
     ctx.beginPath();
     ctx.moveTo(x - size, y);
     ctx.lineTo(x + size, y);
@@ -44,7 +51,6 @@ function drawSparkle(ctx: CanvasRenderingContext2D, x: number, y: number, size: 
     ctx.lineTo(x, y + size);
     ctx.stroke();
 
-    // Smaller diagonal cross
     const d = size * 0.5;
     ctx.lineWidth = Math.max(1, size * 0.12);
     ctx.beginPath();
@@ -54,7 +60,6 @@ function drawSparkle(ctx: CanvasRenderingContext2D, x: number, y: number, size: 
     ctx.lineTo(x - d, y + d);
     ctx.stroke();
 
-    // Center glow dot
     ctx.globalAlpha = alpha * 0.6;
     ctx.fillStyle = '#FFFFFF';
     ctx.beginPath();
@@ -66,93 +71,76 @@ function drawSparkle(ctx: CanvasRenderingContext2D, x: number, y: number, size: 
 
 const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const imgRef = useRef<HTMLImageElement | null>(null);
+    const imageRef = useRef<HTMLImageElement | null>(null);
     const animFrameRef = useRef<number>(0);
     const loadedRef = useRef(false);
 
     const draw = useCallback((realTime: number) => {
         const canvas = canvasRef.current;
-        const img = imgRef.current;
-        if (!canvas || !img || !loadedRef.current) return;
+        const image = imageRef.current;
+        if (!canvas || !loadedRef.current || !image) return;
 
-        // Quantize time to strictly simulate 12fps (approx 83ms per frame)
-        // This makes the movement look like distinct pixel art frames rather than smooth vector motion
-        const FPS = 12;
-        const STEP_MS = 1000 / FPS;
         const time = Math.floor(realTime / STEP_MS) * STEP_MS;
+        const frameIndex = Math.floor(time / STEP_MS) % MOTION_FRAMES.length;
 
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
         const W = canvas.width;
         const H = canvas.height;
+        const frameOffset = isPlaying ? MOTION_FRAMES[frameIndex] : { x: 0, y: 0 };
 
         ctx.clearRect(0, 0, W, H);
-        // Disable interpolation for crisp pixel look during transforms
         ctx.imageSmoothingEnabled = false;
 
+        const breathCycle = (time / BREATHING_PERIOD) * Math.PI * 2;
+        const breathOffsetY = isPlaying ? Math.round(Math.sin(breathCycle) * BREATHING_AMPLITUDE) : 0;
+
+        const swayCycle = (time / HAIR_SWAY_PERIOD) * Math.PI * 2;
+        const swayOffsetX = isPlaying ? Math.round(Math.sin(swayCycle) * HAIR_SWAY_AMPLITUDE) : 0;
+
+        ctx.save();
+        ctx.translate(frameOffset.x + swayOffsetX, frameOffset.y + breathOffsetY);
+        ctx.drawImage(image, 0, 0, W, H);
+        ctx.restore();
+
         if (isPlaying) {
-            // Breathing: subtle vertical oscillation, quantized
-            const breathCycle = (time / BREATHING_PERIOD) * Math.PI * 2;
-            // Use Math.round to snap to nearest pixel for authentic pixel art look
-            const breathOffset = Math.round(Math.sin(breathCycle) * BREATHING_AMPLITUDE);
-
-            // Hair sway: subtle horizontal oscillation, quantized
-            const swayCycle = (time / HAIR_SWAY_PERIOD) * Math.PI * 2;
-            const swayOffset = Math.round(Math.sin(swayCycle) * HAIR_SWAY_AMPLITUDE);
-
-            ctx.save();
-            ctx.translate(swayOffset, breathOffset);
-            ctx.drawImage(img, 0, 0, W, H);
-            ctx.restore();
-
-            // Draw animated sparkles with stepped phases
             for (const sp of SPARKLE_POSITIONS) {
-                // Quantize sparkle cycle too
                 const cycle = (time * sp.speed * 0.001 + sp.phase) % (Math.PI * 2);
-
-                // Stepped alpha: strictly 0, 0.5, or 1 for retro feel? 
-                // Or just keep smooth alpha but stepped position? 
-                // Let's keep alpha somewhat smooth but quantized steps
-                let alpha = Math.max(0, Math.sin(cycle));
-
-                // Hard threshold for "blink" effect
+                const alpha = Math.max(0, Math.sin(cycle));
                 if (alpha > 0.05) {
                     drawSparkle(ctx, sp.x * W, sp.y * H, sp.size * (W / 1024), alpha);
                 }
             }
-        } else {
-            // Static idle
-            ctx.drawImage(img, 0, 0, W, H);
         }
 
         animFrameRef.current = requestAnimationFrame(draw);
     }, [isPlaying]);
 
-    // Load image once
     useEffect(() => {
+        let cancelled = false;
         const img = new Image();
         img.src = '/performer/performer.png';
         img.onload = () => {
-            imgRef.current = img;
+            if (cancelled) return;
+            imageRef.current = img;
             loadedRef.current = true;
 
             const canvas = canvasRef.current;
             if (canvas) {
-                canvas.width = 1024;
-                canvas.height = 1024;
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
             }
 
-            // Start render loop
             animFrameRef.current = requestAnimationFrame(draw);
         };
 
         return () => {
+            cancelled = true;
             if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
         };
     }, [draw]);
 
-    // Restart animation loop when isPlaying changes
     useEffect(() => {
         if (loadedRef.current) {
             if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);

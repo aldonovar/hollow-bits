@@ -634,7 +634,7 @@ const App: React.FC = () => {
 
     // --- TRANSPORT HANDLERS ---
 
-    const handlePlay = useCallback(() => {
+    const handlePlay = useCallback(async () => {
         if (isPlayingRef.current) return;
 
         const currentEngineTime = audioEngine.getCurrentTime();
@@ -642,6 +642,27 @@ const App: React.FC = () => {
         const projectEndTime = barToSeconds(projectEndBar, transport.bpm);
         const shouldRestartFromBeginning = shouldRestartAtSongBoundary(currentEngineTime, projectEndTime);
         const playbackStartTime = shouldRestartFromBeginning ? 0 : currentEngineTime;
+
+        try {
+            await audioEngine.init();
+        } catch (error) {
+            console.warn('No se pudo inicializar motor de audio desde Play.', error);
+            isPlayingRef.current = false;
+            setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
+            return;
+        }
+
+        const ctx = audioEngine.getContext();
+        if (ctx.state !== 'running') {
+            try {
+                await ctx.resume();
+            } catch (error) {
+                console.warn('No se pudo reanudar AudioContext desde Play.', error);
+                isPlayingRef.current = false;
+                setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
+                return;
+            }
+        }
 
         if (playbackStartTime <= 0.0001) {
             loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
