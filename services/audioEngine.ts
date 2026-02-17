@@ -1986,13 +1986,14 @@ class AudioEngine {
                     }
 
                     const clipInternalOffsetSec = (clip.offset || 0) * secondsPerBar;
+                    let finalBufferOffset = startOffset + clipInternalOffsetSec;
 
                     if (clip.buffer) {
                         const playbackProfile = this.getClipPlaybackProfile(track, clip);
                         const effectiveRate = clip.isWarped ? playbackProfile.granularRate : playbackProfile.nativeRate;
                         const safeRate = Math.max(0.0001, Math.abs(this.finiteOr(effectiveRate, 1)));
                         const timelineOffsetSeconds = startOffset + clipInternalOffsetSec;
-                        const finalBufferOffset = timelineOffsetSeconds * safeRate;
+                        finalBufferOffset = timelineOffsetSeconds * safeRate;
                         const remainingBuffer = clip.buffer.duration - finalBufferOffset;
 
                         if (!Number.isFinite(remainingBuffer) || remainingBuffer <= 0.0001) {
@@ -2010,12 +2011,8 @@ class AudioEngine {
                             durationToPlay = maxPlayableTimelineDuration;
                             this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
                         }
-
-                        this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId);
-                        return;
                     }
 
-                    const finalBufferOffset = startOffset + clipInternalOffsetSec;
                     this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId);
                 }
             });
