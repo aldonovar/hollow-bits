@@ -1705,15 +1705,19 @@ class AudioEngine {
     }
 
     async ensurePlaybackReady(): Promise<boolean> {
-        const ctx = this.getContext();
-
-        if (ctx.state !== 'running') {
+        const tryResume = async (context: AudioContext, label: string): Promise<boolean> => {
+            if (context.state === 'running') return true;
             try {
-                await ctx.resume();
+                await context.resume();
+                return true;
             } catch (error) {
-                console.warn('No se pudo reanudar AudioContext al preparar reproduccion (pre-init).', error);
+                console.warn(`No se pudo reanudar AudioContext (${label}).`, error);
+                return false;
             }
-        }
+        };
+
+        const ctx = this.getContext();
+        void tryResume(ctx, 'pre-init');
 
         try {
             await this.init(this.settings);
@@ -1722,20 +1726,25 @@ class AudioEngine {
             return false;
         }
 
-        if (!this.ctx) {
+        if (!this.ctx) return false;
+
+        const resumed = await tryResume(this.ctx, 'post-init');
+        const graphReady = Boolean(this.masterGain && this.masterOutput);
+        if (resumed && graphReady) {
+            return true;
+        }
+
+        try {
+            await this.restartEngine(this.settings);
+        } catch (error) {
+            console.warn('No se pudo reiniciar motor de audio para recuperar reproduccion.', error);
             return false;
         }
 
-        if (this.ctx.state !== 'running') {
-            try {
-                await this.ctx.resume();
-            } catch (error) {
-                console.warn('No se pudo reanudar AudioContext al preparar reproduccion.', error);
-                return false;
-            }
-        }
+        if (!this.ctx) return false;
 
-        return this.ctx.state === 'running' && Boolean(this.masterGain) && Boolean(this.masterOutput);
+        const resumedAfterRestart = await tryResume(this.ctx, 'post-restart');
+        return resumedAfterRestart && Boolean(this.masterGain && this.masterOutput);
     }
 
     play(tracks: Track[], bpm: number, _pitch: number, offsetTime: number) {
