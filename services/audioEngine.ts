@@ -95,6 +95,7 @@ class AudioEngine {
 
     // Playback State
     activeSources: Map<string, ActiveSource> = new Map();
+    exhaustedClipWindows: Map<string, number> = new Map();
 
     // Input State
     inputNodes: Map<string, MediaStreamAudioSourceNode> = new Map();
@@ -1596,7 +1597,7 @@ class AudioEngine {
     }
 
     async recoverPlaybackGraph(tracks: Track[]) {
-        if (!this.ctx || !this.masterGain || !this.masterOutput || !this.masterAnalyser) {
+        if (!this.ctx || !this.masterGain || !this.masterOutput || !this.masterAnalyser || !this.limiter || !this.cueGain) {
             await this.init(this.settings);
             this.updateTracks(tracks);
             return;
@@ -1614,8 +1615,39 @@ class AudioEngine {
             // already disconnected
         }
 
-        this.masterOutput.connect(this.ctx.destination);
+        try {
+            this.masterOutput.disconnect(this.limiter);
+        } catch {
+            // already disconnected
+        }
+
+        try {
+            this.limiter.disconnect(this.ctx.destination);
+        } catch {
+            // already disconnected
+        }
+
+        try {
+            this.cueGain.disconnect(this.ctx.destination);
+        } catch {
+            // already disconnected
+        }
+
+        try {
+            this.cueGain.disconnect(this.masterAnalyser);
+        } catch {
+            // already disconnected
+        }
+
+        // Restore canonical safe graph:
+        // Master -> Limiter -> Destination
+        // Master -> Analyser
+        // Cue -> Destination + Analyser
         this.masterOutput.connect(this.masterAnalyser);
+        this.masterOutput.connect(this.limiter);
+        this.limiter.connect(this.ctx.destination);
+        this.cueGain.connect(this.ctx.destination);
+        this.cueGain.connect(this.masterAnalyser);
 
         this.updateTracks(tracks);
         this.syncCueRouting();
@@ -1901,6 +1933,14 @@ class AudioEngine {
                 if (clipEndSec > projectTime && clipStartSec < lookAheadTime) {
                     const clipNodeId = `${track.id}-${clip.id}`;
 
+                    const exhaustedUntil = this.exhaustedClipWindows.get(clipNodeId);
+                    if (typeof exhaustedUntil === 'number') {
+                        if (projectTime < exhaustedUntil - 0.0001) {
+                            return;
+                        }
+                        this.exhaustedClipWindows.delete(clipNodeId);
+                    }
+
                     if (this.activeSources.has(clipNodeId)) return;
 
                     let startOffset = 0;
@@ -1918,6 +1958,19 @@ class AudioEngine {
 
                     const clipInternalOffsetSec = (clip.offset || 0) * secondsPerBar;
                     const finalBufferOffset = startOffset + clipInternalOffsetSec;
+
+                    if (clip.buffer) {
+                        const remainingBuffer = clip.buffer.duration - finalBufferOffset;
+                        if (!Number.isFinite(remainingBuffer) || remainingBuffer <= 0.0001) {
+                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
+                            return;
+                        }
+
+                        if (remainingBuffer < durationToPlay - 0.0001) {
+                            durationToPlay = remainingBuffer;
+                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
+                        }
+                    }
 
                     this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId);
                 }
@@ -2047,6 +2100,7 @@ class AudioEngine {
             }
         });
         this.activeSources.clear();
+        this.exhaustedClipWindows.clear();
     }
 
     // --- UTILS ---
