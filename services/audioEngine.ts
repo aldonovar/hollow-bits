@@ -96,6 +96,10 @@ class AudioEngine {
     // Playback State
     activeSources: Map<string, ActiveSource> = new Map();
 
+    // Input State
+    inputNodes: Map<string, MediaStreamAudioSourceNode> = new Map();
+    inputStream: MediaStream | null = null;
+
     nextNoteTime: number = 0;
     isPlaying: boolean = false;
     currentBpm: number = 120;
@@ -843,6 +847,39 @@ class AudioEngine {
         }
     }
 
+    async requestMicAccess(deviceId?: string): Promise<boolean> {
+        if (this.inputStream) {
+            this.disableMicAccess();
+        }
+
+        try {
+            this.inputStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    deviceId: deviceId ? { exact: deviceId } : undefined,
+                    echoCancellation: false,
+                    autoGainControl: false,
+                    noiseSuppression: false
+                }
+            });
+            return true;
+        } catch (e) {
+            console.error("Failed to get mic access", e);
+            return false;
+        }
+    }
+
+    disableMicAccess() {
+        if (this.inputStream) {
+            this.inputStream.getTracks().forEach(t => t.stop());
+            this.inputStream = null;
+        }
+        // Disconnect all input nodes
+        this.inputNodes.forEach(node => {
+            try { node.disconnect(); } catch { }
+        });
+        this.inputNodes.clear();
+    }
+
     async getAvailableDevices(): Promise<{ inputs: MediaDeviceInfo[], outputs: MediaDeviceInfo[] }> {
         if (!navigator.mediaDevices?.enumerateDevices) {
             return { inputs: [], outputs: [] };
@@ -1213,6 +1250,24 @@ class AudioEngine {
             if (this.trackDeviceSignatures.get(track.id) !== nextSignature) {
                 this.rebuildTrackEffects(track.id, track.devices);
                 this.trackDeviceSignatures.set(track.id, nextSignature);
+            }
+
+            // Input Routing (Microphone)
+            if (this.inputStream && (track.monitor === 'in' || (track.monitor === 'auto' && track.isArmed))) {
+                let inputNode = this.inputNodes.get(track.id);
+                if (!inputNode) {
+                    inputNode = this.ctx!.createMediaStreamSource(this.inputStream);
+                    this.inputNodes.set(track.id, inputNode);
+                }
+
+                // Ensure fresh connection
+                try { inputNode.disconnect(); } catch { }
+                inputNode.connect(nodes.input);
+            } else {
+                const inputNode = this.inputNodes.get(track.id);
+                if (inputNode) {
+                    try { inputNode.disconnect(); } catch { }
+                }
             }
         });
 
@@ -2319,10 +2374,10 @@ class AudioEngine {
 
             const desiredGroupId =
                 track.type !== TrackType.RETURN
-                && track.type !== TrackType.GROUP
-                && track.groupId
-                && groupTrackIdSet.has(track.groupId)
-                && track.groupId !== track.id
+                    && track.type !== TrackType.GROUP
+                    && track.groupId
+                    && groupTrackIdSet.has(track.groupId)
+                    && track.groupId !== track.id
                     ? track.groupId
                     : null;
 
