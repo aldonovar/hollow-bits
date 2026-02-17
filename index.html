@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Estudio ETHEREAL</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              daw: {
+                bg: '#1a1a1a',
+                panel: '#222222',
+                light: '#2d2d2d',
+                border: '#444444',
+                ruby: '#f43f5e',
+                violet: '#a855f7',
+                cyan: '#3bf9f6',
+                text: '#f0f0f0',
+                muted: '#888888'
+              }
+            },
+            fontFamily: {
+              sans: ['Inter', 'system-ui', 'sans-serif'],
+              mono: ['JetBrains Mono', 'ui-monospace', 'monospace']
+            },
+            boxShadow: {
+              tech: '0 1px 0 rgba(255,255,255,0.1) inset'
+            },
+            backgroundImage: {
+              'meter-gradient': 'linear-gradient(to top, #a855f7 0%, #d946ef 40%, #f43f5e 100%)',
+              'brand-gradient': 'linear-gradient(90deg, #a855f7 0%, #f43f5e 100%)'
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+
+      ::-webkit-scrollbar-track {
+        background: #1a1a1a;
+      }
+
+      ::-webkit-scrollbar-thumb {
+        background: #444;
+        border-radius: 4px;
+      }
+
+      ::-webkit-scrollbar-thumb:hover {
+        background: #666;
+      }
+
+      body {
+        background-color: #1a1a1a;
+        color: #f0f0f0;
+        overflow: hidden;
+      }
+
+      * {
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        border-color: #444444;
+      }
+
+      .border-r, .border-l, .border-t, .border-b {
+        border-width: 1px;
+      }
+
+      .text-gradient-brand {
+        background: linear-gradient(90deg, #a855f7 0%, #f43f5e 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        color: transparent;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>

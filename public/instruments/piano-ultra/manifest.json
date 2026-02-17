@@ -1,0 +1,18 @@
+{
+  "name": "splendid-grand-piano-offline",
+  "sourceBaseUrl": "https://danigb.github.io/samples/splendid-grand-piano",
+  "outputDirectory": "public/instruments/piano-ultra/splendid-grand-piano",
+  "formats": [
+    "ogg",
+    "m4a"
+  ],
+  "sampleCount": 226,
+  "fileCount": 452,
+  "downloadedFiles": 226,
+  "skippedFiles": 226,
+  "downloadedBytes": 23824404,
+  "downloadedMegabytes": 22.72,
+  "generatedAt": "2026-02-13T00:57:54.497Z",
+  "elapsedMs": 3825,
+  "notes": "Pack generated for offline SMPLR SplendidGrandPiano playback."
+}
