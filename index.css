@@ -73,17 +73,14 @@ body {
 @keyframes performerGlow {
   0% {
     filter: drop-shadow(0 0 0 rgba(244, 218, 255, 0));
-    transform: translate3d(0, 0, 0);
   }
 
   50% {
     filter: drop-shadow(0 0 10px rgba(244, 218, 255, 0.46));
-    transform: translate3d(0, -1px, 0);
   }
 
   100% {
     filter: drop-shadow(0 0 0 rgba(244, 218, 255, 0));
-    transform: translate3d(0, 0, 0);
   }
 }
 
@@ -134,17 +131,14 @@ body {
 
 @keyframes asciiDepthPulse {
   0% {
-    transform: translateZ(0);
     filter: brightness(1) saturate(1);
   }
 
   50% {
-    transform: translateZ(0);
     filter: brightness(1.18) saturate(1.12);
   }
 
   100% {
-    transform: translateZ(0);
     filter: brightness(1) saturate(1);
   }
 }
@@ -262,6 +256,7 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   .animate-view-enter,
   .animate-fade-in-up,
   .animate-spin-slow,
