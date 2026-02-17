@@ -69,4 +69,4 @@ npm run dev:electron
 
 Proprietary & Confidential.
 
-**Developed by Aldonovar (with Vibe Coding) and ALLYX.**
+**Developed by [Aldonovar](https://github.com/aldonovar) (with Vibe Coding) and [ALLYX](https://allyxorb.com).**
