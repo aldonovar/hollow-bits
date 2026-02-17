@@ -1,5 +1,5 @@
 <div align="center">
-  <img width="100%" alt="ETHEREAL SOUNDS" src="public/ethereal-banner.svg" />
+  <img width="600" alt="ETHEREAL SOUNDS" src="public/ethereal-banner.svg" />
   
   <br/>
   
@@ -69,4 +69,6 @@ npm run dev:electron
 
 ## 📜 License
 
-Proprietary & Confidential. Built by **ETHEREAL STUDIO**.
+Proprietary & Confidential.
+
+**Developed by Aldonovar (with Vibe Coding) and ALLYX.**
