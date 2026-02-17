@@ -64,16 +64,22 @@ function drawSparkle(ctx: CanvasRenderingContext2D, x: number, y: number, size: 
     ctx.restore();
 }
 
+// --- Frame Animation Config ---
+const PERFORMER_FRAME_SOURCES = [
+    '/performer/performer_frame_1.png',
+    '/performer/performer_frame_2.png',
+];
+
 const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const imgRef = useRef<HTMLImageElement | null>(null);
+    const fallbackImgRef = useRef<HTMLImageElement | null>(null);
+    const frameImagesRef = useRef<HTMLImageElement[]>([]);
     const animFrameRef = useRef<number>(0);
     const loadedRef = useRef(false);
 
     const draw = useCallback((realTime: number) => {
         const canvas = canvasRef.current;
-        const img = imgRef.current;
-        if (!canvas || !img || !loadedRef.current) return;
+        if (!canvas || !loadedRef.current) return;
 
         // Quantize time to strictly simulate 12fps (approx 83ms per frame)
         // This makes the movement look like distinct pixel art frames rather than smooth vector motion
@@ -86,6 +92,15 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
 
         const W = canvas.width;
         const H = canvas.height;
+        const frameImages = frameImagesRef.current;
+        // Cycle through frames if we have them and are playing
+        const animatedImage = frameImages.length > 0
+            ? frameImages[Math.floor(time / STEP_MS) % frameImages.length]
+            : fallbackImgRef.current;
+        const idleImage = frameImages[0] || fallbackImgRef.current;
+        const activeImage = isPlaying ? animatedImage : idleImage;
+
+        if (!activeImage) return;
 
         ctx.clearRect(0, 0, W, H);
         // Disable interpolation for crisp pixel look during transforms
@@ -103,7 +118,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
 
             ctx.save();
             ctx.translate(swayOffset, breathOffset);
-            ctx.drawImage(img, 0, 0, W, H);
+            ctx.drawImage(activeImage, 0, 0, W, H);
             ctx.restore();
 
             // Draw animated sparkles with stepped phases
@@ -123,7 +138,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
             }
         } else {
             // Static idle
-            ctx.drawImage(img, 0, 0, W, H);
+            ctx.drawImage(activeImage, 0, 0, W, H);
         }
 
         animFrameRef.current = requestAnimationFrame(draw);
@@ -131,23 +146,38 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
 
     // Load image once
     useEffect(() => {
-        const img = new Image();
-        img.src = '/performer/performer.png';
-        img.onload = () => {
-            imgRef.current = img;
+        let cancelled = false;
+        const loadImage = (src: string) => new Promise<HTMLImageElement | null>((resolve) => {
+            const img = new Image();
+            img.src = src;
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(null);
+        });
+
+        const bootstrap = async () => {
+            const fallbackImage = await loadImage('/performer/performer.png');
+            if (!fallbackImage || cancelled) return;
+
+            const loadedFrames = await Promise.all(PERFORMER_FRAME_SOURCES.map(loadImage));
+            if (cancelled) return;
+
+            fallbackImgRef.current = fallbackImage;
+            frameImagesRef.current = loadedFrames.filter((frame): frame is HTMLImageElement => Boolean(frame));
             loadedRef.current = true;
 
             const canvas = canvasRef.current;
             if (canvas) {
-                canvas.width = 1024;
-                canvas.height = 1024;
+                canvas.width = fallbackImage.naturalWidth;
+                canvas.height = fallbackImage.naturalHeight;
             }
 
-            // Start render loop
             animFrameRef.current = requestAnimationFrame(draw);
         };
 
+        void bootstrap();
+
         return () => {
+            cancelled = true;
             if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
         };
     }, [draw]);
@@ -171,6 +201,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
                     ref={canvasRef}
                     aria-label="Pixel art performer"
                     className={`pixel-art-canvas ${isPlaying ? 'pixel-art-live' : 'pixel-art-idle'}`}
+                    style={{ imageRendering: 'pixelated' }}
                 />
             </div>
         </aside>

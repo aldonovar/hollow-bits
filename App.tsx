@@ -634,7 +634,7 @@ const App: React.FC = () => {
 
     // --- TRANSPORT HANDLERS ---
 
-    const handlePlay = useCallback(() => {
+    const handlePlay = useCallback(async () => {
         if (isPlayingRef.current) return;
 
         const currentEngineTime = audioEngine.getCurrentTime();
@@ -642,6 +642,27 @@ const App: React.FC = () => {
         const projectEndTime = barToSeconds(projectEndBar, transport.bpm);
         const shouldRestartFromBeginning = shouldRestartAtSongBoundary(currentEngineTime, projectEndTime);
         const playbackStartTime = shouldRestartFromBeginning ? 0 : currentEngineTime;
+
+        try {
+            await audioEngine.init();
+        } catch (error) {
+            console.warn('No se pudo inicializar motor de audio desde Play.', error);
+            isPlayingRef.current = false;
+            setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
+            return;
+        }
+
+        const ctx = audioEngine.getContext();
+        if (ctx.state !== 'running') {
+            try {
+                await ctx.resume();
+            } catch (error) {
+                console.warn('No se pudo reanudar AudioContext desde Play.', error);
+                isPlayingRef.current = false;
+                setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
+                return;
+            }
+        }
 
         if (playbackStartTime <= 0.0001) {
             loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
@@ -2644,9 +2665,9 @@ const App: React.FC = () => {
                     )}
                     <div className="h-[300px] bg-[#1a1a1a] border-t border-daw-border relative z-50 shadow-[0_-5px_30px_rgba(0,0,0,0.3)] shrink-0 flex flex-col">
                         <div className="h-7 bg-[#121212] border-b border-daw-border flex items-end px-2 gap-1">
-                                <button onClick={() => setBottomView('devices')} className={`text-[9px] font-bold px-4 py-1.5 rounded-t-sm transition-all uppercase tracking-wider flex items-center gap-2 ${bottomView === 'devices' ? 'bg-[#1a1a1a] text-white border-t border-l border-r border-daw-border relative top-[1px]' : 'text-gray-500 hover:text-white bg-[#0e0e0e]'}`}><Cpu size={10} /> Dispositivos</button>
-                                <button onClick={() => setBottomView('editor')} className={`text-[9px] font-bold px-4 py-1.5 rounded-t-sm transition-all uppercase tracking-wider flex items-center gap-2 ${bottomView === 'editor' ? 'bg-[#1a1a1a] text-white border-t border-l border-r border-daw-border relative top-[1px]' : 'text-gray-500 hover:text-white bg-[#0e0e0e]'}`}><Layers size={10} /> Editor</button>
-                            </div>
+                            <button onClick={() => setBottomView('devices')} className={`text-[9px] font-bold px-4 py-1.5 rounded-t-sm transition-all uppercase tracking-wider flex items-center gap-2 ${bottomView === 'devices' ? 'bg-[#1a1a1a] text-white border-t border-l border-r border-daw-border relative top-[1px]' : 'text-gray-500 hover:text-white bg-[#0e0e0e]'}`}><Cpu size={10} /> Dispositivos</button>
+                            <button onClick={() => setBottomView('editor')} className={`text-[9px] font-bold px-4 py-1.5 rounded-t-sm transition-all uppercase tracking-wider flex items-center gap-2 ${bottomView === 'editor' ? 'bg-[#1a1a1a] text-white border-t border-l border-r border-daw-border relative top-[1px]' : 'text-gray-500 hover:text-white bg-[#0e0e0e]'}`}><Layers size={10} /> Editor</button>
+                        </div>
                         <div className="flex-1 overflow-hidden relative bg-[#1a1a1a] flex">
                             <div className="min-w-0 flex-1 h-full">
                                 {bottomView === 'devices' ? (
