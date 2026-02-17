@@ -239,6 +239,20 @@ const App: React.FC = () => {
     const [lastAutosaveAt, setLastAutosaveAt] = useState<number | null>(null);
     const [lastAutosaveReason, setLastAutosaveReason] = useState<string>('initial-snapshot');
 
+    // Audio Engine State
+    const [isAudioContextRunning, setIsAudioContextRunning] = useState(false);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (audioEngine.ctx?.state === 'running') {
+                setIsAudioContextRunning(true);
+            } else {
+                setIsAudioContextRunning(false);
+            }
+        }, 500);
+        return () => clearInterval(interval);
+    }, []);
+
     const showBrowser = activeToolPanel === 'browser';
     const showAI = activeToolPanel === 'ai';
     const showNoteScanner = activeToolPanel === 'scanner';
@@ -2781,3 +2795,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

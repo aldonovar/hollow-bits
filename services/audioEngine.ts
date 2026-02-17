@@ -251,6 +251,9 @@ class AudioEngine {
     }
 
     private dbToLinear(db: number): number {
+        // Clamp to prevent exponential explosion
+        if (db < -100) return 0;
+        if (db > 24) db = 24;
         return Math.pow(10, db / 20);
     }
 
@@ -929,14 +932,28 @@ class AudioEngine {
             this.cueGain = this.ctx.createGain();
             this.cueGain.gain.value = 0;
 
-            this.limiter = null;
+            // 2. Initialize Safety Limiter
+            this.limiter = this.ctx.createDynamicsCompressor();
+            this.limiter.threshold.value = -1.0;
+            this.limiter.knee.value = 12;
+            this.limiter.ratio.value = 20;
+            this.limiter.attack.value = 0.002;
+            this.limiter.release.value = 0.25;
 
             // Reliable output path:
-            // Master -> Destination + Analyser
-            // Cue    -> Destination + Analyser
-            this.masterGain.connect(this.ctx.destination);
+            // Master -> Limiter -> Destination
+            // Cue    -> Destination (bypass limiter)
+
+            // Connect Master to Analyser for viz
             this.masterGain.connect(this.masterAnalyser);
+            // Connect Master to Limiter
+            this.masterGain.connect(this.limiter);
+            // Connect Limiter to Destination
+            this.limiter.connect(this.ctx.destination);
+
+            // Connect Cue directly to destination
             this.cueGain.connect(this.ctx.destination);
+            // Also visualize cue
             this.cueGain.connect(this.masterAnalyser);
 
             // 2. Load Worklets
@@ -1347,22 +1364,14 @@ class AudioEngine {
                     ? track.groupId
                     : null;
 
-            try {
-                nodes.panner.disconnect(this.masterGain!);
-            } catch {
-                // already disconnected
+            // Disconnect from EVERYTHING to prevent summing
+            try { nodes.panner.disconnect(); } catch { }
+
+            // Reconnect Analyser (Post-Panner Tap)
+            const analyser = this.analysers.get(track.id);
+            if (analyser) {
+                nodes.panner.connect(analyser);
             }
-
-            groupTrackIds.forEach((groupTrackId) => {
-                const groupNodes = this.trackNodes.get(groupTrackId);
-                if (!groupNodes) return;
-
-                try {
-                    nodes.panner.disconnect(groupNodes.input);
-                } catch {
-                    // already disconnected
-                }
-            });
 
             if (desiredGroupId) {
                 const groupNodes = this.trackNodes.get(desiredGroupId);
@@ -1431,7 +1440,8 @@ class AudioEngine {
             this.analyserBuffers.set(trackId, data);
         }
 
-        analyser.getFloatTimeDomainData(data);
+        // Cast to any to avoid ArrayBufferLike mismatch in strict TS
+        analyser.getFloatTimeDomainData(data as any);
 
         let sumSquares = 0;
         let peak = 0;
@@ -1504,7 +1514,8 @@ class AudioEngine {
             this.masterAnalyserBuffer = new Float32Array(this.masterAnalyser.fftSize);
         }
 
-        this.masterAnalyser.getFloatTimeDomainData(this.masterAnalyserBuffer);
+        // Cast to any to avoid ArrayBufferLike mismatch in strict TS
+        this.masterAnalyser.getFloatTimeDomainData(this.masterAnalyserBuffer as any);
 
         let sumSquares = 0;
         let peak = 0;
@@ -2682,6 +2693,20 @@ class AudioEngine {
         }
 
         return new Blob([arrayBuffer], { type: 'audio/wav' });
+    }
+
+    async playTestTone() {
+        if (!this.ctx) await this.init();
+        await this.ctx?.resume();
+        const osc = this.ctx!.createOscillator();
+        const gain = this.ctx!.createGain();
+        osc.frequency.value = 440;
+        gain.gain.value = 0.5;
+        osc.connect(gain);
+        gain.connect(this.ctx!.destination);
+        osc.start();
+        osc.stop(this.ctx!.currentTime + 2);
+        console.log("Test Tone Playing...");
     }
 
     private writeString(view: DataView, offset: number, string: string) {

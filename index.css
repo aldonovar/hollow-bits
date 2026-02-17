@@ -107,11 +107,9 @@ body {
   user-select: none;
   pointer-events: none;
   opacity: 0.94;
-  transition: opacity 220ms ease, filter 220ms ease;
 }
 
 .pixel-art-live {
-  animation: performerGlow 1250ms cubic-bezier(0.28, 0.72, 0.35, 1) infinite, asciiDepthPulse 1400ms ease-in-out infinite;
   opacity: 1;
 }
 
