@@ -1,52 +1,72 @@
 <div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+  <img width="100%" alt="ETHEREAL SOUNDS" src="public/ethereal-banner.svg" />
+  
+  <br/>
+  
+  <h1>ETHEREAL STUDIO</h1>
+  
+  <p>
+    <strong>The Harmonic Convergence of Code and Frequency</strong>
+  </p>
+  
+  <p>
+    <a href="#philosophy">Philosophy</a> •
+    <a href="#the-engine">The Engine</a> •
+    <a href="#getting-started">Getting Started</a> •
+    <a href="#roadmap">Roadmap</a>
+  </p>
 </div>
 
-# ETHEREAL STUDIO
+<br/>
 
-Desktop-first DAW project focused on pro-level reliability, workflow speed, and long-term feature depth.
+## 🌌 The Ethereal Philosophy
 
-## Local setup
+**ETHEREAL STUDIO** is not merely a Digital Audio Workstation; it is a **resonant environment** designed for the modern sound architect. 
 
-Prerequisites: Node.js LTS
+Born from the belief that professional audio tools should be as inspiring as they are rigorous, we have engineered a desktop-first experience that bridges the gap between **expression and precision**. We reject the sterile, gray interfaces of the past in favor of a "Crystal Pipeline" aesthetic—where every signal flow is visible, every vibration is felt, and the software itself feels alive.
 
-1. Install dependencies
-   - `npm install`
-2. Configure env
-   - set `GEMINI_API_KEY` in `.env.local`
-3. Run web dev server
-   - `npm run dev`
-4. Run desktop app (Electron + Vite)
-   - `npm run dev:electron`
+At its heart lies a commitment to **local-first sovereignty**. Your sound, your instruments, and your processing power belong to you. No cloud dependencies for creativity. Just you and the Ether.
 
-## Polyphonic scanner piano engine
+## ⚡ The Engine
 
-- Scanner preview now runs a fully local Concert Grand multi-layer engine (`public/instruments/piano-ultra/splendid-grand-piano`) via `services/proPianoEngine.ts`.
-- Polyphonic detection uses Basic Pitch plus postprocessing, and now includes a physical harmonic refinement pass via `workers/note-transcriber.worker.ts`.
-- No third-party piano import is required for playback quality.
+Underneath the glassmorphic surface beats a highly optimizing, low-latency audio heart built on **Web Audio API** and **Electron**.
 
-## Windows x64 packaging
+### 🎹 Polyphonic Scanner Support
+A next-generation transcription layer using **Basic Pitch** combined with our proprietary harmonic refinement pass. It doesn't just "hear" notes; it perceives intention, converting raw audio into editable MIDI with nuanced velocity and timing.
 
-- Development runtime remains Electron while we keep the desktop bridge runtime-agnostic.
-- Build Windows x64 installers/artifacts:
-  - `npm run dist:win:x64`
-  - `npm run dist:win:dir`
-- Electron Builder output directory: `release/`
+### 🧬 Granular & Spectral Core
+Our custom `AudioEngine` is built for texture. With native support for granular synthesis and convolution reverb using mathematically generated impulse responses, you can construct soundscapes that defy standard topology.
 
-## Build and verification
+### 🤖 The Performer (ASCII Dock)
+The machine is watching. Our unique **AsciiPerformerDock** is a real-time reactive visual companion/visualizer that exists within the CLI and the GUI simultaneously, bridging the gap between the terminal underbelly and the high-fidelity surface.
 
-- Typecheck: `npm exec tsc --noEmit`
-- Production build: `npm run build`
-- Desktop run: `npm run electron`
+## 🛠️ Getting Started
 
-## Execution planning docs
+### Prerequisites
+- **Node.js LTS** (v20+)
+- **Windows x64** (Primary target)
 
-- Master roadmap: `docs/MASTER_ROADMAP_DAW.md`
-- Foundation backlog (P0): `docs/P0_EXECUTION_BACKLOG.md`
-- Quality and release gates: `docs/QUALITY_AND_RELEASE_GATES.md`
+### Initialization
 
-## Current strategy
+```bash
+# 1. Summon the repository
+git clone https://github.com/aldonovar/ethereal-studio.git
+cd ethereal-studio
 
-- Stabilize core transport/audio/editing reliability first.
-- Convert all surfaced UI operations into fully functional production behavior.
-- Scale toward advanced routing, automation, session workflow, and differentiation layers (AI + collaboration).
+# 2. Install dependencies (The Ritual)
+npm install
+
+# 3. Ignite the development environment
+npm run dev:electron
+```
+
+## 🏗️ Architecture
+
+- **Core**: React 19 + TypeScript + Vite
+- **Runtime**: Electron (Windows x64 Optimized)
+- **Audio**: Web Audio API (Custom Graph Implementation)
+- **State**: Reactive Zustand Stores
+
+## 📜 License
+
+Proprietary & Confidential. Built by **ETHEREAL STUDIO**.
