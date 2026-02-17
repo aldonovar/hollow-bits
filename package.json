@@ -11,9 +11,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "electron": "electron electron/main.cjs --dev",
-    "dev:electron": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron\"",
-    "dist:win:x64": "npm run build && set CSC_IDENTITY_AUTO_DISCOVERY=false && electron-builder --win nsis portable --x64",
-    "dist:win:dir": "npm run build && set CSC_IDENTITY_AUTO_DISCOVERY=false && electron-builder --win dir --x64"
+    "dev:electron": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron\""
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -39,51 +37,4 @@
     "vite": "^6.2.0",
     "wait-on": "^9.0.3"
   },
-  "build": {
-    "appId": "studio.ethereal.desktop",
-    "productName": "Ethereal Studio",
-    "afterPack": "scripts/afterPack.cjs",
-    "directories": {
-      "output": "release"
-    },
-    "icon": "build/icon.png",
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "package.json"
-    ],
-    "asar": true,
-    "asarUnpack": [
-      "node_modules/ffmpeg-static/**/*"
-    ],
-    "win": {
-      "icon": "build/icon.ico",
-      "signAndEditExecutable": false,
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "perMachine": false,
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
-      "artifactName": "Ethereal-Studio-${version}-x64-Setup.${ext}"
-    },
-    "portable": {
-      "artifactName": "Ethereal-Studio-${version}-x64-Portable.${ext}"
-    }
-  }
 }
