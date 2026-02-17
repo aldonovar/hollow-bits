@@ -22,6 +22,18 @@ interface RecordingSession {
     stream: MediaStream;
 }
 
+interface MonitoringSession {
+    stream: MediaStream;
+    source: MediaStreamAudioSourceNode;
+    inputGain: GainNode;
+    monitorGate: GainNode;
+    reverbSend: GainNode;
+    reverbConvolver: ConvolverNode;
+    echoDelay: DelayNode;
+    echoFeedback: GainNode;
+    echoWet: GainNode;
+}
+
 interface TrackMeterState {
     rmsDb: number;
     peakDb: number;
@@ -101,6 +113,7 @@ class AudioEngine {
 
     // Recording
     recordingSessions: Map<string, RecordingSession> = new Map();
+    monitoringSessions: Map<string, MonitoringSession> = new Map();
 
     // Settings
     settings: AudioSettings = {
@@ -171,6 +184,15 @@ class AudioEngine {
     private sanitizeTrack(track: Track): Track {
         const safeType = Object.values(TrackType).includes(track.type) ? track.type : TrackType.AUDIO;
         const safeMonitor = track.monitor === 'in' || track.monitor === 'off' ? track.monitor : 'auto';
+        const safeMicSettings: NonNullable<Track['micSettings']> = {
+            profile: track.micSettings?.profile === 'podcast' || track.micSettings?.profile === 'raw'
+                ? track.micSettings.profile
+                : 'studio-voice',
+            inputGain: this.clamp(this.finiteOr(track.micSettings?.inputGain ?? 1, 1), 0, 2),
+            monitoringEnabled: Boolean(track.micSettings?.monitoringEnabled),
+            monitoringReverb: Boolean(track.micSettings?.monitoringReverb),
+            monitoringEcho: Boolean(track.micSettings?.monitoringEcho)
+        };
 
         const safeClips = Array.isArray(track.clips)
             ? track.clips
@@ -208,7 +230,8 @@ class AudioEngine {
             sessionClips: safeSessionClips,
             devices: this.sanitizeDevices(track.devices),
             sends: track.sends && typeof track.sends === 'object' ? track.sends : {},
-            sendModes: track.sendModes && typeof track.sendModes === 'object' ? track.sendModes : {}
+            sendModes: track.sendModes && typeof track.sendModes === 'object' ? track.sendModes : {},
+            micSettings: safeMicSettings
         };
     }
 
@@ -746,6 +769,20 @@ class AudioEngine {
 
         this.stopPlayback();
 
+        this.recordingSessions.forEach((session) => {
+            if (session.mediaRecorder.state !== 'inactive') {
+                try { session.mediaRecorder.stop(); } catch {
+                    // already stopping/stopped
+                }
+            }
+            session.stream.getTracks().forEach((track) => track.stop());
+        });
+        this.recordingSessions.clear();
+
+        this.monitoringSessions.forEach((_session, trackId) => {
+            this.stopMonitoring(trackId);
+        });
+
         this.trackNodes.forEach((nodes) => {
             nodes.deviceRuntimes.forEach((runtime) => {
                 runtime.cleanup?.();
@@ -887,6 +924,141 @@ class AudioEngine {
     }
 
     // --- TRACK MANAGEMENT ---
+
+    private applyMicMonitoringProfile(track: Track, session: MonitoringSession) {
+        const profile = track.micSettings?.profile || 'studio-voice';
+        const now = this.ctx!.currentTime;
+
+        const profileInputGain = profile === 'podcast' ? 1.1 : profile === 'raw' ? 1 : 1.25;
+        const profileReverb = profile === 'raw' ? 0.08 : profile === 'podcast' ? 0.14 : 0.2;
+        const profileEchoWet = profile === 'raw' ? 0.05 : profile === 'podcast' ? 0.12 : 0.09;
+        const profileEchoFeedback = profile === 'raw' ? 0.14 : profile === 'podcast' ? 0.2 : 0.16;
+
+        const userInputGain = this.clamp(this.finiteOr(track.micSettings?.inputGain ?? 1, 1), 0, 2);
+        const monitoringEnabled = Boolean(track.micSettings?.monitoringEnabled) && track.monitor !== 'off';
+        const monitorReverbOn = Boolean(track.micSettings?.monitoringReverb);
+        const monitorEchoOn = Boolean(track.micSettings?.monitoringEcho);
+
+        session.inputGain.gain.setTargetAtTime(profileInputGain * userInputGain, now, 0.015);
+        session.monitorGate.gain.setTargetAtTime(monitoringEnabled ? 1 : 0, now, 0.01);
+        session.reverbSend.gain.setTargetAtTime(monitoringEnabled && monitorReverbOn ? profileReverb : 0, now, 0.02);
+        session.echoWet.gain.setTargetAtTime(monitoringEnabled && monitorEchoOn ? profileEchoWet : 0, now, 0.02);
+        session.echoFeedback.gain.setTargetAtTime(monitoringEnabled && monitorEchoOn ? profileEchoFeedback : 0, now, 0.03);
+    }
+
+    private async startMonitoring(track: Track) {
+        if (!this.ctx || !this.masterGain) return;
+        if (this.monitoringSessions.has(track.id)) {
+            const session = this.monitoringSessions.get(track.id);
+            if (session) this.applyMicMonitoringProfile(track, session);
+            return;
+        }
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    deviceId: track.inputDeviceId ? { exact: track.inputDeviceId } : undefined,
+                    echoCancellation: false,
+                    autoGainControl: false,
+                    noiseSuppression: false
+                }
+            });
+
+            const source = this.ctx.createMediaStreamSource(stream);
+            const inputGain = this.ctx.createGain();
+            const monitorGate = this.ctx.createGain();
+            const reverbSend = this.ctx.createGain();
+            const reverbConvolver = this.ctx.createConvolver();
+            reverbConvolver.buffer = this.getDefaultReverbImpulse(this.ctx);
+            const echoDelay = this.ctx.createDelay(2.5);
+            echoDelay.delayTime.value = 0.22;
+            const echoFeedback = this.ctx.createGain();
+            const echoWet = this.ctx.createGain();
+
+            source.connect(inputGain);
+            inputGain.connect(monitorGate);
+            monitorGate.connect(this.masterGain);
+
+            monitorGate.connect(reverbSend);
+            reverbSend.connect(reverbConvolver);
+            reverbConvolver.connect(this.masterGain);
+
+            monitorGate.connect(echoDelay);
+            echoDelay.connect(echoFeedback);
+            echoFeedback.connect(echoDelay);
+            echoDelay.connect(echoWet);
+            echoWet.connect(this.masterGain);
+
+            const session: MonitoringSession = {
+                stream,
+                source,
+                inputGain,
+                monitorGate,
+                reverbSend,
+                reverbConvolver,
+                echoDelay,
+                echoFeedback,
+                echoWet
+            };
+
+            this.monitoringSessions.set(track.id, session);
+            this.applyMicMonitoringProfile(track, session);
+        } catch (error) {
+            console.error('Mic monitoring failed', error);
+        }
+    }
+
+    private stopMonitoring(trackId: string) {
+        const session = this.monitoringSessions.get(trackId);
+        if (!session) return;
+
+        if (!this.recordingSessions.has(trackId)) {
+            session.stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+        }
+
+        const nodes: AudioNode[] = [
+            session.source,
+            session.inputGain,
+            session.monitorGate,
+            session.reverbSend,
+            session.reverbConvolver,
+            session.echoDelay,
+            session.echoFeedback,
+            session.echoWet
+        ];
+
+        nodes.forEach((node) => {
+            try { node.disconnect(); } catch {
+                // already disconnected
+            }
+        });
+
+        this.monitoringSessions.delete(trackId);
+    }
+
+    private syncMonitoringSessions(tracks: Track[]) {
+        const eligibleTrackIds = new Set(
+            tracks
+                .filter((track) => track.type === TrackType.AUDIO && Boolean(track.micSettings?.monitoringEnabled) && track.monitor !== 'off')
+                .map((track) => track.id)
+        );
+
+        this.monitoringSessions.forEach((_session, trackId) => {
+            if (!eligibleTrackIds.has(trackId)) {
+                this.stopMonitoring(trackId);
+            }
+        });
+
+        tracks.forEach((track) => {
+            if (!eligibleTrackIds.has(track.id)) return;
+            if (this.monitoringSessions.has(track.id)) {
+                const existing = this.monitoringSessions.get(track.id);
+                if (existing) this.applyMicMonitoringProfile(track, existing);
+                return;
+            }
+            void this.startMonitoring(track);
+        });
+    }
 
     updateTracks(tracks: Track[]) {
         if (!this.ctx || !this.masterGain) return;
@@ -1153,6 +1325,7 @@ class AudioEngine {
         });
 
         this.syncCueRouting();
+        this.syncMonitoringSessions(safeTracks);
     }
 
     // --- TRANSPORT CONTROLS ---
@@ -1778,7 +1951,8 @@ class AudioEngine {
         if (this.recordingSessions.has(trackId)) return;
 
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
+            const existingMonitoring = this.monitoringSessions.get(trackId);
+            const stream = existingMonitoring?.stream || await navigator.mediaDevices.getUserMedia({
                 audio: {
                     deviceId: deviceId ? { exact: deviceId } : undefined,
                     echoCancellation: false,
@@ -1811,7 +1985,9 @@ class AudioEngine {
 
         return new Promise((resolve) => {
             const cleanup = () => {
-                session.stream.getTracks().forEach((track) => track.stop());
+                if (!this.monitoringSessions.has(trackId)) {
+                    session.stream.getTracks().forEach((track) => track.stop());
+                }
                 this.recordingSessions.delete(trackId);
             };
 

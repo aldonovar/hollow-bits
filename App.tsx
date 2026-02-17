@@ -1646,26 +1646,43 @@ const App: React.FC = () => {
     const handleRecordToggle = useCallback(async () => {
         if (transport.isRecording) {
             await finalizeActiveRecordings();
-        } else {
-            const armedTracks = tracks.filter(t => t.isArmed);
-            if (armedTracks.length === 0) {
-                alert("Debes armar al menos una pista (botón rojo circular) para grabar audio.");
-                return;
-            }
-
-            // Capture start bar immediately
-            recordingStartBarRef.current = transport.currentBar;
-
-            if (!transport.isPlaying) {
-                handlePlay();
-            }
-
-            setTransport((prev: TransportState) => ({ ...prev, isRecording: true }));
-            armedTracks.forEach(t => {
-                audioEngine.startRecording(t.id, t.inputDeviceId);
-            });
+            return;
         }
-    }, [transport.isRecording, transport.isPlaying, transport.currentBar, tracks, handlePlay, finalizeActiveRecordings]);
+
+        let armedTracks = tracks.filter((track) => track.isArmed && track.type === TrackType.AUDIO);
+
+        if (armedTracks.length === 0) {
+            const newTrack = createTrack({
+                id: `t-${Date.now()}`,
+                name: `REC VOCAL ${tracks.length + 1}`,
+                type: TrackType.AUDIO,
+                color: getTrackColorByPosition(tracks.length, tracks.length + 1),
+                isArmed: true,
+                monitor: 'in',
+                micSettings: {
+                    profile: 'studio-voice',
+                    inputGain: 1,
+                    monitoringEnabled: true,
+                    monitoringReverb: false,
+                    monitoringEcho: false
+                }
+            });
+
+            appendTracks([newTrack], { reason: 'record-auto-track' });
+            armedTracks = [newTrack];
+        }
+
+        recordingStartBarRef.current = transport.currentBar;
+
+        if (!transport.isPlaying) {
+            handlePlay();
+        }
+
+        setTransport((prev: TransportState) => ({ ...prev, isRecording: true }));
+        armedTracks.forEach((track) => {
+            void audioEngine.startRecording(track.id, track.inputDeviceId);
+        });
+    }, [transport.isRecording, transport.isPlaying, transport.currentBar, tracks, handlePlay, finalizeActiveRecordings, appendTracks]);
 
     const buildPersistedTracks = useCallback((sourceTracks: Track[]): Track[] => {
         return sourceTracks.map((track) => ({
