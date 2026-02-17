@@ -117,12 +117,20 @@ body {
   pointer-events: none;
   transform: translate(-50%, -50%);
   opacity: 0.94;
+<<<<<<< HEAD
   text-shadow: 0 0 5px rgba(244, 218, 255, 0.22), 0 0 14px rgba(244, 63, 94, 0.2);
+=======
+  text-shadow: 0 0 4px rgba(244, 218, 255, 0.2), 0 0 11px rgba(244, 63, 94, 0.16);
+>>>>>>> origin/codex/create-3d-ascii-animation-for-daw
   transition: opacity 220ms ease;
 }
 
 .anime-ascii-live {
+<<<<<<< HEAD
   animation: performerGlow 860ms cubic-bezier(0.28, 0.72, 0.35, 1) infinite, asciiDepthPulse 520ms ease-in-out infinite;
+=======
+  animation: performerGlow 1250ms cubic-bezier(0.28, 0.72, 0.35, 1) infinite, asciiDepthPulse 1400ms ease-in-out infinite;
+>>>>>>> origin/codex/create-3d-ascii-animation-for-daw
   opacity: 1;
 }
 

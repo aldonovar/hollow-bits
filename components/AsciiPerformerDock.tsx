@@ -1,102 +1,65 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
 
 interface AsciiPerformerDockProps {
     isPlaying: boolean;
 }
 
-const FACE_ZOOM = 1.2;
+const FACE_ZOOM = 1.03;
 const FACE_OFFSET_X = -50;
 const FACE_OFFSET_Y = -50;
-const FIT_MULTIPLIER = 1.08;
-const FRAME_WIDTH = 42;
-const FRAME_HEIGHT = 24;
-const SHADE_RAMP = '.,-~:;=!*#$@';
+const FIT_MULTIPLIER = 1.04;
 
-const renderDonutFrame = (rotationA: number, rotationB: number): string => {
-    const buffer = Array(FRAME_WIDTH * FRAME_HEIGHT).fill(' ');
-    const zBuffer = Array(FRAME_WIDTH * FRAME_HEIGHT).fill(0);
+const normalizeFrame = (frame: string): string => {
+    const lines = frame.replace(/^\n/, '').replace(/\n\s*$/, '').split('\n');
+    const nonEmpty = lines.filter((line) => line.trim().length > 0);
+    const minIndent = nonEmpty.length
+        ? Math.min(...nonEmpty.map((line) => line.match(/^\s*/)?.[0].length ?? 0))
+        : 0;
 
-    const cosA = Math.cos(rotationA);
-    const sinA = Math.sin(rotationA);
-    const cosB = Math.cos(rotationB);
-    const sinB = Math.sin(rotationB);
-
-    for (let theta = 0; theta < Math.PI * 2; theta += 0.07) {
-        const cosTheta = Math.cos(theta);
-        const sinTheta = Math.sin(theta);
-
-        for (let phi = 0; phi < Math.PI * 2; phi += 0.02) {
-            const cosPhi = Math.cos(phi);
-            const sinPhi = Math.sin(phi);
-
-            const ringRadius = 1;
-            const tubeRadius = 2;
-            const circleX = tubeRadius + ringRadius * cosTheta;
-            const circleY = ringRadius * sinTheta;
-
-            const x = circleX * (cosB * cosPhi + sinA * sinB * sinPhi) - circleY * cosA * sinB;
-            const y = circleX * (sinB * cosPhi - sinA * cosB * sinPhi) + circleY * cosA * cosB;
-            const z = 5 + cosA * circleX * sinPhi + circleY * sinA;
-            const depth = 1 / z;
-
-            const screenX = Math.floor(FRAME_WIDTH / 2 + 14 * depth * x);
-            const screenY = Math.floor(FRAME_HEIGHT / 2 - 8 * depth * y);
-
-            if (screenX < 0 || screenX >= FRAME_WIDTH || screenY < 0 || screenY >= FRAME_HEIGHT) {
-                continue;
-            }
-
-            const luminance =
-                cosPhi * cosTheta * sinB -
-                cosA * cosTheta * sinPhi -
-                sinA * sinTheta +
-                cosB * (cosA * sinTheta - cosTheta * sinA * sinPhi);
-
-            if (luminance <= 0) continue;
-
-            const index = screenX + FRAME_WIDTH * screenY;
-            if (depth > zBuffer[index]) {
-                zBuffer[index] = depth;
-                const rampIndex = Math.min(SHADE_RAMP.length - 1, Math.floor(luminance * 8));
-                buffer[index] = SHADE_RAMP[rampIndex];
-            }
-        }
-    }
-
-    const rows: string[] = [];
-    for (let row = 0; row < FRAME_HEIGHT; row += 1) {
-        rows.push(buffer.slice(row * FRAME_WIDTH, (row + 1) * FRAME_WIDTH).join(''));
-    }
-
-    return rows.join('\n');
+    return lines.map((line) => line.slice(minIndent)).join('\n');
 };
+
+const ANIME_ASCII_BASE = normalizeFrame(String.raw`
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠁⣰⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠿⣿⣿⣿⣿⣁⣭⣝⢿⡋⠽⢯⣝⡻⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣮⠻⣿⣿⣿⣷⡝⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⠏⢠⣾⣿⣿⣿⣿⣿⣿⣿⣿⡿⣫⢔⣫⣥⣾⣿⣿⣿⣏⠙⣿⣧⢻⣿⣿⣶⣭⣓⢬⡻⣿⣿⣿⣿⣿⣿⣿⣿⣷⡙⣿⣿⣿⣿⣌⢿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⠃⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⢔⣵⣿⣿⣿⣿⣿⣿⣿⣿⣧⡈⣿⣧⢻⣿⣿⣿⣿⣷⣄⡈⠻⣿⣿⣿⣿⣿⣿⣿⣷⡘⣿⣿⣿⣿⣆⢿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⡿⠃⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⠏⢢⣿⣿⣿⣿⣿⣿⣿⢛⣿⣿⣿⣿⢹⣿⡘⣿⣿⣿⣿⣿⣿⣿⣦⡙⢿⣿⣿⣿⣿⣿⣿⣷⡸⣿⣿⣿⣿⡎⢿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⢇⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⡏⣰⣿⣿⣿⣿⣿⡿⢻⠏⣾⣿⣿⣿⣿⡇⣿⡇⡹⣿⣿⣿⣿⣿⣿⣿⣿⣌⢿⡟⢻⣿⢈⢧⠙⣧⢹⡟⢿⣿⣿⡼⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⡏⣼⡟⢩⣿⣿⢛⣿⣿⣿⣿⣿⢡⣿⣿⣿⣿⣿⡟⢡⣿⣸⣿⣿⣿⣿⣿⣷⣿⣇⣳⡿⣿⣿⠻⣿⡉⢻⣿⣿⡎⢿⡴⣝⣋⡌⣎⠸⡏⢿⡌⣿⣿⣧⢹⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⡟⣈⣎⠆⢃⣿⢇⡾⢻⣿⣿⣿⡏⣾⡟⣿⠿⣿⡿⠁⣼⡇⣿⣿⣿⣿⣿⣿⣿⣿⣿⢰⡸⣌⣿⣦⢊⠧⢱⡹⣿⣿⡌⣷⣹⣿⡟⠘⡦⢹⡸⣿⡘⣿⣿⡞⣿⣿⣿⣿⣿
+⣿⣿⣿⡿⡘⣼⠘⡼⣼⡟⡞⣰⣿⣿⣿⣿⠸⣋⢶⡿⢰⣿⢣⣧⣿⢡⣿⢣⢻⢏⣿⣿⣿⣿⡇⣼⡇⡑⣎⠛⣧⡳⠺⣟⠜⣿⣿⡸⣧⢿⣏⣆⢱⡘⡧⣿⣿⣿⣿⡇⢻⣿⣿⣿⣿
+⣿⣿⣿⢡⢱⣇⣸⢣⣿⢰⣿⣿⣸⣿⣿⡏⣆⣿⢸⡇⢸⠏⡞⢸⣿⢸⣿⣼⢰⣾⣏⣿⡟⡿⠇⣿⣿⢰⠹⡨⡜⢷⡁⢬⣧⣸⣿⣇⢻⣼⣿⣿⣷⣿⣧⢸⣿⣿⣿⣿⢸⣿⣿⣿⣿
+⣿⣿⡟⣾⣿⣿⡟⣸⣿⢋⣿⣿⣿⣿⣿⢡⡏⡼⢸⡷⣿⠘⢸⢸⣿⣬⣿⣿⢘⣥⢻⡟⠇⣧⢳⣿⣿⠈⣷⠳⣿⣎⢿⣿⣿⣿⣿⣿⡜⣿⣿⣿⣿⣿⣷⡜⣿⣿⣿⣿⡎⣿⣿⣿⣿
+⣿⣿⢡⣿⣿⣿⡇⣿⣿⣼⣿⣿⣿⣿⣿⢸⣿⡇⣿⣷⠇⠀⡌⢸⣿⢻⣿⣿⢸⣿⡼⢡⢸⡟⣸⣿⣿⡎⣌⢷⡹⣿⣦⠻⣿⣿⣿⣿⣧⢿⣿⣿⣿⣿⣿⡇⣿⣿⣿⣿⡇⣿⣿⣿⣿
+⣿⣿⣾⣿⣿⣿⢷⣿⣿⣿⣿⣿⣿⣿⡿⣿⣿⠇⣿⣿⠀⣼⣇⢸⣿⢸⣿⣿⢸⣿⣷⡏⣿⢱⣿⢻⣿⡇⣎⢣⡱⡜⢿⣷⡈⠻⣿⣿⣿⢸⣿⣿⣿⣿⣿⣧⣿⣿⣿⣿⣷⣿⣿⣿⣿
+⣿⣟⣿⣿⣿⣏⣼⣿⣿⣿⣿⣿⣿⣿⡇⣿⡏⠀⣿⣿⠀⣿⣿⢸⣿⡆⣿⣿⣸⣿⡟⡼⢃⣿⣿⢸⣿⢱⣿⣷⡕⢌⠢⡻⣿⣮⡪⡙⢿⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣯⣿⣿⡿⢸⣿⣿⣿⣿⣿⣿⣿⣿⡇⣿⠉⣴⢹⣿⣸⣿⣿⡏⣿⣷⢿⣿⡏⡿⠑⠁⢸⣿⡿⢸⣿⢸⣿⣿⣿⣷⣕⠌⠪⣿⣿⡌⠳⡆⣿⣿⢻⣿⣿⣿⡙⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⠃⢳⣼⣿⣿⣿⣿⣿⣿⣿⡇⡏⢸⣿⢸⣿⣿⣿⣿⣷⣸⣿⠈⣿⠇⡀⢀⣾⢸⣿⡇⠼⠟⣸⠿⠿⠿⢛⣛⣥⣤⡀⠐⠶⣷⡄⣿⡿⣸⣿⣿⣿⣼⠸⣿⣿⣿⣿⣿⣿⣿
+⡏⢸⣿⣿⠀⠰⣾⣿⣿⣿⡇⣿⣿⣿⡇⠃⣾⣿⡆⢍⢛⠻⠿⣿⣧⢻⡌⡁⠞⠁⢿⣿⢸⣿⣧⢸⣆⣐⡤⢞⣛⠻⠿⠍⠉⠙⠁⠈⠀⠀⣚⡃⢿⣿⣿⣿⣿⡇⣿⣿⣿⣿⣿⣿⣿
+⣸⢸⣿⡇⠀⡗⣼⣿⣿⣿⣧⢹⣿⣿⣇⠀⣿⣿⣿⡘⠸⡿⢷⣶⣶⣦⠲⢲⡐⢷⡈⡻⣼⡿⣸⠘⣸⣿⣞⠉⢀⡀⡀⠀⠀⠀⢰⣾⣿⠂⢉⢀⣿⣿⣿⣿⣿⢣⣿⣿⣿⣿⣿⣿⣿
+⢧⢸⣿⡇⠃⡇⠟⣿⣿⣿⣿⡞⣿⣿⣿⠀⡿⠇⠉⢁⠀⢀⠀⣀⠀⠀⡀⠀⠈⢎⠳⡄⣿⢡⠇⣰⣿⣿⣧⣾⣿⣇⠑⠮⠔⣁⣾⣿⠛⣠⡾⢸⣿⣿⣿⡏⢣⣿⣿⣿⣿⢿⣿⣿⣿
+⣾⣾⣿⡇⠀⡇⠀⣯⡻⣿⣿⣷⡸⣿⣿⡆⣶⣄⠐⢿⣷⣿⡄⠱⣄⡠⠆⣼⣌⣿⡷⡰⠃⠋⣴⣿⣿⣿⣿⣿⣿⣿⣯⣭⣭⣤⣴⣿⢣⣿⢡⢸⣿⣿⣿⡇⣿⣿⣿⣿⣿⣸⣿⣿⣿
+⣿⡿⣿⡇⡇⡇⢀⢹⣇⣿⣿⣿⣷⡹⣿⣿⡸⣿⣷⣤⠛⣿⠿⠶⠶⢒⣺⣿⣿⡿⢁⣵⣿⣶⣬⣹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⢇⣾⢃⣸⣼⣿⣿⣿⢠⣿⣿⣿⣿⣿⢿⣿⣿⣿
+⣿⠁⣿⡇⠃⡇⢸⠌⡸⡘⣿⣿⣿⣷⡘⣿⣷⡹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡟⡼⣣⡟⡇⣿⣿⣿⢁⣸⣿⣿⣿⣿⣿⢸⣿⣿⣿
+⡛⢰⢻⣧⠀⡇⡸⢀⢣⣷⢻⣿⣿⣿⣿⡌⠻⣷⡽⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠏⢈⣴⣿⢃⢸⣿⢏⡇⡆⠋⣿⣿⣿⣿⢻⢸⣿⣿⣿
+⣬⠘⡌⣿⢀⡇⡇⢸⡆⡜⣧⢻⣿⣿⣿⣧⢢⣜⢻⣌⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣡⣶⣿⣿⡟⢄⣿⡟⡼⡙⣼⢸⣿⣿⣿⣿⢸⢸⣿⣿⣿
+⣿⡗⡆⠹⡇⢡⡇⢸⡇⡘⣽⣇⢻⣿⣿⣿⡌⢿⡇⢮⡓⠙⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣏⡸⠃⣼⣿⣱⠳⢱⣿⢸⣿⣿⣿⣿⢸⡆⣿⣿⣿
+⣿⡇⡄⣷⠹⡼⡇⢸⡇⣷⡙⣿⡄⠻⣿⣿⣿⡌⣿⢸⣷⢕⢦⣬⣛⣿⣿⣿⣿⣿⣿⣿⣿⣿⣟⣛⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⡅⣼⣿⢡⡇⣰⢸⣿⣸⣿⣿⣿⣿⠈⡇⣿⣿⣿
+⣿⢸⠇⣿⢰⠀⠁⣾⠃⣿⢱⡜⢷⡱⡹⣿⣿⣷⡸⢸⣿⢸⣷⣍⡻⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⢛⢡⡆⣸⡿⣡⢏⣾⣿⢸⣿⣿⣿⣿⣿⣿⠀⣧⣿⣿⣿
+⣿⢸⢰⣿⢸⢸⡆⡙⠀⣿⢸⣗⣌⢧⠱⣜⢿⣿⣷⡘⠟⣼⣿⣿⣿⣷⣮⣝⠻⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⣩⣶⣿⠘⣱⠟⢕⣵⣿⣯⢹⣼⣿⢹⢸⣿⣿⣿⠈⢻⢹⣿⣿
+⡟⣼⢸⣿⠸⣿⢻⡟⡇⣿⢸⠛⣿⣷⡁⠻⣦⡹⣿⣿⣄⢻⣿⢟⣿⣿⣿⣿⠀⢿⡄⣭⣟⡛⠿⣿⣿⣿⠿⣛⣵⣾⣿⣿⠟⡜⢁⡐⣿⣿⣿⣿⡸⡟⣿⢸⢸⣿⣿⣿⠀⡸⡸⣿⣿
+⡇⣿⢸⣿⡇⡏⣼⢡⠇⡿⡾⠀⣿⣿⡿⠆⠈⠵⢎⡻⣿⣦⡁⣾⣿⣿⣿⡏⣼⢸⣧⢻⣿⣿⣿⣶⣶⣶⣾⣿⣿⣿⡿⢋⣨⡆⢿⣇⢻⣿⣿⣿⣇⠃⢻⠘⡈⣿⣿⣿⡇⠃⡇⣿⣿
+⡇⣿⢸⣿⡇⢣⡏⣾⢸⡇⢇⡇⡟⡩⢊⠀⣠⣶⢸⣿⣦⠙⠷⣜⢻⣿⠟⣼⣿⢸⠟⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣯⣴⣿⢛⣼⢸⣿⡜⣿⣿⣿⣿⠎⠘⡇⡇⣿⣿⣿⡇⡈⢻⢹⣿
+⡇⣿⢸⣿⡇⡼⢹⠟⢾⣘⣘⡓⡘⠰⢁⣾⣿⣿⢸⡿⣿⢸⣿⣶⠅⣁⣚⣭⣵⣶⠏⡘⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⣡⣿⣿⣇⠻⣧⢹⣿⠏⢱⣿⣆⢧⢧⣿⣿⣿⣇⣧⡜⡎⣿
+⣷⢸⠸⡿⢘⣥⣶⣿⣿⣿⣿⡇⠇⢶⣾⢿⣿⣿⣸⡇⣿⢺⢏⡔⣹⣿⣿⣿⣿⣿⣿⣿⣮⡙⢿⣿⣿⣿⣿⣿⠟⣡⣾⣿⣿⣿⣿⣧⣌⠃⢿⣧⢃⢻⣿⣎⢸⢹⣿⣿⣿⢻⠰⢷⢹
+⣿⡦⢅⣴⣿⣿⣿⣿⣿⣿⣿⣿⡸⡌⢿⣇⣿⣿⡟⡇⢿⠠⡿⢱⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣮⣝⣛⣫⣵⣾⣿⣿⣿⣿⣿⣿⣿⣿⣷⡄⢿⣇⢸⣏⠿⡄⠜⣿⣿⣿⢸⣇⠘⡞
+`);
 
 const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) => {
     const viewportRef = useRef<HTMLDivElement>(null);
     const artRef = useRef<HTMLPreElement>(null);
     const [fitScale, setFitScale] = useState(1);
-    const [artFrame, setArtFrame] = useState(() => renderDonutFrame(0.8, 0.2));
-
-    useEffect(() => {
-        if (!isPlaying) {
-            setArtFrame(renderDonutFrame(0.8, 0.2));
-            return;
-        }
-
-        let animationFrame = 0;
-        let rotationA = 0.8;
-        let rotationB = 0.2;
-
-        const tick = () => {
-            rotationA += 0.06;
-            rotationB += 0.03;
-            setArtFrame(renderDonutFrame(rotationA, rotationB));
-            animationFrame = window.setTimeout(tick, 52);
-        };
-
-        tick();
-        return () => window.clearTimeout(animationFrame);
-    }, [isPlaying]);
+    const [artFrame, setArtFrame] = useState(() => normalizeFrame(ANIME_ASCII_BASE));
 
     useLayoutEffect(() => {
         const measure = () => {
@@ -113,7 +76,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
 
             const scaleX = availableWidth / naturalWidth;
             const scaleY = availableHeight / naturalHeight;
-            const nextScale = Math.max(0.72, Math.min(6.4, Math.min(scaleX, scaleY) * FIT_MULTIPLIER));
+            const nextScale = Math.max(0.5, Math.min(8, Math.min(scaleX, scaleY) * FIT_MULTIPLIER));
 
             setFitScale((prev) => (Math.abs(prev - nextScale) < 0.01 ? prev : nextScale));
         };
@@ -128,7 +91,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
             observer.disconnect();
             window.removeEventListener('resize', measure);
         };
-    }, [artFrame]);
+    }, []);
 
     return (
         <aside
@@ -143,7 +106,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
                     className={`anime-ascii-art ${isPlaying ? 'anime-ascii-live' : 'anime-ascii-idle'}`}
                     style={{ transform: `translate(${FACE_OFFSET_X}%, ${FACE_OFFSET_Y}%) scale(${fitScale * FACE_ZOOM})` }}
                 >
-                    {artFrame}
+                    {ANIME_ASCII_BASE}
                 </pre>
             </div>
         </aside>
