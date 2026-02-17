@@ -102,6 +102,7 @@ export interface Track {
   isSoloed: boolean;
   isArmed: boolean;
   inputDeviceId?: string;
+  micSettings?: MicSettings;
   sends?: Record<string, number>; // Map of Return Track ID -> Send Amount (linear 0-1, legacy dB accepted)
   sendModes?: Record<string, 'pre' | 'post'>;
   groupId?: string;
@@ -112,6 +113,16 @@ export interface Track {
   sessionClips: ClipSlot[];
   devices: Device[];
   automationLanes?: AutomationLane[];
+}
+
+export type MicInputProfile = 'studio-voice' | 'podcast' | 'raw';
+
+export interface MicSettings {
+  profile: MicInputProfile;
+  inputGain: number;
+  monitoringEnabled: boolean;
+  monitoringReverb: boolean;
+  monitoringEcho: boolean;
 }
 
 export type LoopMode = 'off' | 'once' | 'infinite';

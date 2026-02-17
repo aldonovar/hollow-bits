@@ -23,6 +23,7 @@ interface CreateTrackOptions {
     soloSafe?: boolean;
     automationMode?: Track['automationMode'];
     automationLanes?: Track['automationLanes'];
+    micSettings?: Track['micSettings'];
 }
 
 const cloneTracksCollection = <T>(source: T[] | undefined): T[] => {
@@ -53,7 +54,16 @@ export const createTrack = (options: CreateTrackOptions): Track => {
         vcaGroupId: options.vcaGroupId,
         soloSafe: options.soloSafe ?? false,
         automationMode: options.automationMode ?? 'read',
-        automationLanes: options.automationLanes ? [...options.automationLanes] : undefined
+        automationLanes: options.automationLanes ? [...options.automationLanes] : undefined,
+        micSettings: options.micSettings
+            ? { ...options.micSettings }
+            : {
+                profile: 'studio-voice',
+                inputGain: 1,
+                monitoringEnabled: false,
+                monitoringReverb: false,
+                monitoringEcho: false
+            }
     };
 };
 
@@ -63,7 +73,16 @@ export const withTrackRuntimeDefaults = (track: Track): Track => {
         sends: track.sends || {},
         sendModes: track.sendModes || {},
         soloSafe: track.soloSafe ?? false,
-        automationMode: track.automationMode ?? 'read'
+        automationMode: track.automationMode ?? 'read',
+        micSettings: track.micSettings
+            ? { ...track.micSettings }
+            : {
+                profile: 'studio-voice',
+                inputGain: 1,
+                monitoringEnabled: false,
+                monitoringReverb: false,
+                monitoringEcho: false
+            }
     };
 };
 
