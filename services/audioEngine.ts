@@ -1704,6 +1704,30 @@ class AudioEngine {
         return this.ctx;
     }
 
+    async ensurePlaybackReady(): Promise<boolean> {
+        try {
+            await this.init(this.settings);
+        } catch (error) {
+            console.warn('No se pudo inicializar AudioContext al preparar reproduccion.', error);
+            return false;
+        }
+
+        if (!this.ctx) {
+            return false;
+        }
+
+        if (this.ctx.state !== 'running') {
+            try {
+                await this.ctx.resume();
+            } catch (error) {
+                console.warn('No se pudo reanudar AudioContext al preparar reproduccion.', error);
+                return false;
+            }
+        }
+
+        return this.ctx.state === 'running' && Boolean(this.masterGain);
+    }
+
     play(tracks: Track[], bpm: number, _pitch: number, offsetTime: number) {
         if (!this.ctx || !this.masterGain) {
             void this.init(this.settings)
