@@ -109,6 +109,12 @@ class AudioEngine {
     schedulerTimer: number | null = null;
     lookahead: number = 25.0; // ms
     scheduleAheadTime: number = 0.1; // seconds
+    schedulerIntervalMs: number = 25;
+    effectiveBufferSize: number = 256;
+    effectiveLatencyHint: AudioContextLatencyCategory | number = 'interactive';
+    bufferStrategy: 'audio-context-latency-hint' | 'scheduler-window' | 'hybrid' = 'scheduler-window';
+    granularGrainSize: number = 0.05;
+    granularOverlap: number = 2;
     virtualStartTime: number = 0; // The AudioContext time when playback started
     offsetTime: number = 0; // The project time offset (for seek/resume)
 
@@ -142,6 +148,51 @@ class AudioEngine {
 
     private finiteOr(value: number, fallback: number): number {
         return Number.isFinite(value) ? value : fallback;
+    }
+
+    private resolveRequestedBufferSize(): number {
+        const requested = this.settings.bufferSize;
+        if (requested === 'auto') {
+            if (this.settings.latencyHint === 'playback') return 1024;
+            if (this.settings.latencyHint === 'balanced') return 512;
+            return 256;
+        }
+
+        return this.clamp(this.finiteOr(requested, 256), 128, 2048);
+    }
+
+    private resolveLatencyHintForContext(): AudioContextLatencyCategory | number {
+        const requested = this.settings.bufferSize;
+        if (requested === 'auto') {
+            return this.settings.latencyHint as AudioContextLatencyCategory;
+        }
+
+        const sampleRate = this.ctx?.sampleRate || this.settings.sampleRate || 48000;
+        return this.clamp(requested / sampleRate, 0.003, 0.2);
+    }
+
+    private applyRuntimeBufferStrategy() {
+        const sampleRate = this.ctx?.sampleRate || this.settings.sampleRate || 48000;
+        const effectiveBuffer = this.resolveRequestedBufferSize();
+        const frameDurationSec = effectiveBuffer / sampleRate;
+
+        this.effectiveBufferSize = Math.round(effectiveBuffer);
+        this.lookahead = this.clamp(frameDurationSec * 1000 * 1.5, 8, 120);
+        this.scheduleAheadTime = this.clamp(frameDurationSec * 3, 0.04, 0.35);
+        this.schedulerIntervalMs = Math.round(this.clamp(this.lookahead, 8, 120));
+        this.granularGrainSize = this.clamp(frameDurationSec * 4, 0.02, 0.14);
+        this.granularOverlap = Math.round(this.clamp(this.effectiveBufferSize <= 256 ? 4 : this.effectiveBufferSize <= 1024 ? 3 : 2, 2, 6));
+
+        const userLatencyHint = this.settings.latencyHint;
+        const usingContextLatencyHint = userLatencyHint === 'interactive' || userLatencyHint === 'balanced' || userLatencyHint === 'playback';
+        this.bufferStrategy = usingContextLatencyHint ? 'hybrid' : 'scheduler-window';
+
+        this.effectiveLatencyHint = this.resolveLatencyHintForContext();
+
+        if (this.schedulerTimer && this.isPlaying) {
+            window.clearInterval(this.schedulerTimer);
+            this.schedulerTimer = window.setInterval(() => this.schedulerLoop(), this.schedulerIntervalMs);
+        }
     }
 
     private sanitizeDevices(devices: Device[] | undefined): Device[] {
@@ -661,19 +712,28 @@ class AudioEngine {
     setAudioConfiguration(newSettings: AudioSettings) {
         const prevOutputDeviceId = this.settings.outputDeviceId;
         const prevSampleRate = this.ctx?.sampleRate ?? this.settings.sampleRate;
+        const prevBufferSize = this.settings.bufferSize;
         this.settings = { ...this.settings, ...newSettings };
 
-        // Sample rate can only be set at AudioContext creation time.
-        // If the requested rate differs from the current context's rate,
-        // we must close the old context and create a new one.
-        if (this.ctx && newSettings.sampleRate && newSettings.sampleRate !== prevSampleRate) {
+        const sampleRateChanged = Boolean(this.ctx && newSettings.sampleRate && newSettings.sampleRate !== prevSampleRate);
+        const bufferSizeChanged = typeof newSettings.bufferSize !== 'undefined' && newSettings.bufferSize !== prevBufferSize;
+
+        // Sample rate and numeric latency targets are creation-time settings for AudioContext.
+        if (this.ctx && (sampleRateChanged || bufferSizeChanged)) {
             if (this._isRestarting) {
                 console.log(`[AudioEngine.setAudioConfiguration] Engine already restarting — skipping duplicate restart.`);
                 return;
             }
-            console.log(`[AudioEngine.setAudioConfiguration] Sample rate changed: ${prevSampleRate}Hz → ${newSettings.sampleRate}Hz — restarting engine.`);
+            const restartReasons: string[] = [];
+            if (sampleRateChanged) restartReasons.push(`sampleRate ${prevSampleRate}Hz → ${this.settings.sampleRate}Hz`);
+            if (bufferSizeChanged) restartReasons.push(`bufferSize ${String(prevBufferSize)} → ${String(this.settings.bufferSize)}`);
+            console.log(`[AudioEngine.setAudioConfiguration] ${restartReasons.join(', ')} — restarting engine.`);
             void this.restartEngine(this.settings);
             return; // restartEngine handles everything including output device
+        }
+
+        if (bufferSizeChanged || typeof newSettings.latencyHint === 'string') {
+            this.applyRuntimeBufferStrategy();
         }
 
         if (prevOutputDeviceId !== this.settings.outputDeviceId) {
@@ -962,20 +1022,23 @@ class AudioEngine {
 
     async init(settings?: AudioSettings) {
         if (settings) this.settings = { ...this.settings, ...settings };
+        this.applyRuntimeBufferStrategy();
 
         // 0. Initialize Context if missing
         if (!this.ctx) {
             const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
             this.ctx = new AudioContextClass({
-                latencyHint: this.settings.latencyHint as AudioContextLatencyCategory,
+                latencyHint: this.effectiveLatencyHint,
                 sampleRate: this.settings.sampleRate
             });
             console.log(`[AudioEngine.init] Created AudioContext — requested: ${this.settings.sampleRate}Hz, actual: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
             if (this.ctx.sampleRate !== this.settings.sampleRate) {
                 console.warn(`[AudioEngine.init] ⚠ Browser did NOT honor requested sample rate. Requested ${this.settings.sampleRate}Hz, got ${this.ctx.sampleRate}Hz.`);
             }
+            this.applyRuntimeBufferStrategy();
         } else {
             console.log(`[AudioEngine.init] Context already exists — sampleRate: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
+            this.applyRuntimeBufferStrategy();
         }
 
         await this.applyOutputDevicePreference();
@@ -1651,7 +1714,14 @@ class AudioEngine {
         return {
             sampleRate: this.ctx?.sampleRate || 0,
             latency: this.ctx?.baseLatency || 0,
-            state: this.ctx?.state || 'closed'
+            state: this.ctx?.state || 'closed',
+            configuredBufferSize: this.settings.bufferSize,
+            effectiveBufferSize: this.effectiveBufferSize,
+            lookaheadMs: this.lookahead,
+            scheduleAheadTime: this.scheduleAheadTime,
+            schedulerIntervalMs: this.schedulerIntervalMs,
+            bufferStrategy: this.bufferStrategy,
+            latencyHintApplied: this.effectiveLatencyHint
         };
     }
 
@@ -1810,10 +1880,12 @@ class AudioEngine {
         if (!this.ctx) {
             // Auto-initialize if not yet created (for file decoding before user interaction)
             const AudioContextClass = (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext);
+            this.applyRuntimeBufferStrategy();
             this.ctx = new AudioContextClass({
-                latencyHint: this.settings.latencyHint as AudioContextLatencyCategory,
+                latencyHint: this.effectiveLatencyHint,
                 sampleRate: this.settings.sampleRate
             });
+            this.applyRuntimeBufferStrategy();
         }
         return this.ctx;
     }
@@ -1896,7 +1968,7 @@ class AudioEngine {
 
         // Start Scheduler
         if (this.schedulerTimer) window.clearInterval(this.schedulerTimer);
-        this.schedulerTimer = window.setInterval(() => this.schedulerLoop(), 25);
+        this.schedulerTimer = window.setInterval(() => this.schedulerLoop(), this.schedulerIntervalMs);
     }
 
     pause() {
@@ -1987,7 +2059,7 @@ class AudioEngine {
             .map((track) => this.sanitizeTrack(track));
         if (tracksToSchedule.length === 0) return;
 
-        const scheduleWindow = 0.1; // Look ahead 100ms
+        const scheduleWindow = this.scheduleAheadTime;
         const now = this.ctx.currentTime;
         const projectTime = now - this.virtualStartTime;
         const lookAheadTime = projectTime + scheduleWindow;
@@ -2152,6 +2224,8 @@ class AudioEngine {
 
                 p.get('playbackRate')?.setValueAtTime(playbackProfile.granularRate, playAt);
                 p.get('pitch')?.setValueAtTime(playbackProfile.transposeMult, playAt);
+                p.get('grainSize')?.setValueAtTime(this.granularGrainSize, playAt);
+                p.get('overlap')?.setValueAtTime(this.granularOverlap, playAt);
 
                 this.activeSources.set(nodeId, {
                     granularNode: node,

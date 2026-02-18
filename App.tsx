@@ -167,6 +167,20 @@ const isValidSampleRate = (sampleRate: unknown): sampleRate is AudioSettings['sa
     return sampleRate === 44100 || sampleRate === 48000 || sampleRate === 88200 || sampleRate === 96000 || sampleRate === 192000;
 };
 
+
+type EngineDiagnostics = {
+    sampleRate: number;
+    latency: number;
+    state: string;
+    configuredBufferSize?: AudioSettings['bufferSize'];
+    effectiveBufferSize?: number;
+    lookaheadMs?: number;
+    scheduleAheadTime?: number;
+    schedulerIntervalMs?: number;
+    bufferStrategy?: string;
+    latencyHintApplied?: AudioContextLatencyCategory | number;
+};
+
 const isValidBufferSize = (bufferSize: unknown): bufferSize is AudioSettings['bufferSize'] => {
     return bufferSize === 'auto' || bufferSize === 128 || bufferSize === 256 || bufferSize === 512 || bufferSize === 1024 || bufferSize === 2048;
 };
@@ -249,7 +263,7 @@ const App: React.FC = () => {
 
     // Engine State
     const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => loadAudioSettingsFromStorage());
-    const [engineStats, setEngineStats] = useState({ sampleRate: 0, latency: 0, state: 'closed' });
+    const [engineStats, setEngineStats] = useState<EngineDiagnostics>({ sampleRate: 0, latency: 0, state: 'closed' });
 
     // Refs
     const fileMenuRef = useRef<HTMLDivElement>(null);
