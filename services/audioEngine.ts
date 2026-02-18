@@ -1160,7 +1160,7 @@ class AudioEngine {
             // produce silence in some browser implementations. Use a simple
             // passthrough GainNode as a fallback to guarantee audio output.
             const sampleRate = this.ctx.sampleRate;
-            if (sampleRate >= 176400) {
+            if (sampleRate >= 88000) {
                 console.warn(`[AudioEngine] High sample rate (${sampleRate}Hz) detected — bypassing DynamicsCompressorNode limiter to prevent silence.`);
                 this.limiter = this.ctx.createGain();
                 (this.limiter as GainNode).gain.value = 1.0;
@@ -2127,11 +2127,13 @@ class AudioEngine {
     }
 
     setBpm(bpm: number) {
+        // console.log(`[AudioEngine] setBpm: ${bpm}`);
         this.currentBpm = bpm;
         this.updateActiveSourcesParams();
     }
 
     setMasterPitch(semitones: number) {
+        // console.log(`[AudioEngine] setMasterPitch: ${semitones} st`);
         this.masterTransposeSemitones = this.clamp(Math.round(semitones), -12, 12);
         this.updateActiveSourcesParams();
     }
@@ -2151,9 +2153,10 @@ class AudioEngine {
                 active.granularNode.parameters.get('playbackRate')?.setTargetAtTime(bpmRatio, now, 0.05);
                 active.granularNode.parameters.get('pitch')?.setTargetAtTime(pitchMult, now, 0.05);
             } else if (active.source) {
-                // NATIVE: Independent of BPM — only pitch transpose + user playbackRate
+                // NATIVE: Now reacts to BPM for Repitch behavior
                 const userRate = active.clipPlaybackRate ?? 1;
-                const finalRate = userRate * pitchMult;
+                const finalRate = userRate * pitchMult * bpmRatio;
+                // console.log(`[AudioEngine] Update Native Source: BPM=${this.currentBpm}, Ratio=${bpmRatio.toFixed(3)}, PitchMult=${pitchMult.toFixed(3)} -> Rate=${finalRate.toFixed(3)}`);
                 if (isFinite(finalRate)) {
                     active.source.playbackRate.setTargetAtTime(finalRate, now, 0.05);
                 }
