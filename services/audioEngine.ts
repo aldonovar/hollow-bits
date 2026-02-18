@@ -14,6 +14,7 @@ interface ActiveSource {
     offset: number;
     originalBpm: number;
     clipTransposeSemitones: number;
+    clipPlaybackRate: number;
 }
 
 interface RecordingSession {
@@ -80,7 +81,7 @@ class AudioEngine {
     cueSourceNode: AudioNode | null = null;
     cueTrackId: string | null = null;
     cueMode: 'pfl' | 'afl' | null = null;
-    limiter: DynamicsCompressorNode | null = null;
+    limiter: DynamicsCompressorNode | GainNode | null = null;
     analysers: Map<string, AnalyserNode> = new Map();
     analyserBuffers: Map<string, Float32Array> = new Map();
     trackMeterState: Map<string, TrackMeterState> = new Map();
@@ -129,6 +130,7 @@ class AudioEngine {
     private outputFallbackApplied: boolean = false;
     private currentTracksSnapshot: Track[] = [];
     private forceSystemOutput: boolean = true;
+    private _isRestarting: boolean = false;
 
     constructor() {
         // Singleton pattern usually managed by instance export
@@ -629,9 +631,21 @@ class AudioEngine {
 
     setAudioConfiguration(newSettings: AudioSettings) {
         const prevOutputDeviceId = this.settings.outputDeviceId;
+        const prevSampleRate = this.ctx?.sampleRate ?? this.settings.sampleRate;
         this.settings = { ...this.settings, ...newSettings };
-        // Note: For sample rate changes, a reload is typically required in web audio
-        // Input device ID is consumed by startRecording().
+
+        // Sample rate can only be set at AudioContext creation time.
+        // If the requested rate differs from the current context's rate,
+        // we must close the old context and create a new one.
+        if (this.ctx && newSettings.sampleRate && newSettings.sampleRate !== prevSampleRate) {
+            if (this._isRestarting) {
+                console.log(`[AudioEngine.setAudioConfiguration] Engine already restarting — skipping duplicate restart.`);
+                return;
+            }
+            console.log(`[AudioEngine.setAudioConfiguration] Sample rate changed: ${prevSampleRate}Hz → ${newSettings.sampleRate}Hz — restarting engine.`);
+            void this.restartEngine(this.settings);
+            return; // restartEngine handles everything including output device
+        }
 
         if (prevOutputDeviceId !== this.settings.outputDeviceId) {
             void this.applyOutputDevicePreference();
@@ -764,90 +778,101 @@ class AudioEngine {
     }
 
     async restartEngine(newSettings?: AudioSettings): Promise<void> {
-        if (newSettings) {
-            this.settings = { ...this.settings, ...newSettings };
+        if (this._isRestarting) {
+            console.warn('[AudioEngine.restartEngine] Already restarting — skipping concurrent call.');
+            return;
         }
+        this._isRestarting = true;
 
-        this.stop(true);
-
-        if (this.schedulerTimer) {
-            window.clearInterval(this.schedulerTimer);
-            this.schedulerTimer = null;
-        }
-
-        this.stopPlayback();
-
-        this.recordingSessions.forEach((session) => {
-            if (session.mediaRecorder.state !== 'inactive') {
-                try { session.mediaRecorder.stop(); } catch {
-                    // already stopping/stopped
-                }
+        try {
+            if (newSettings) {
+                this.settings = { ...this.settings, ...newSettings };
             }
-            session.stream.getTracks().forEach((track) => track.stop());
-        });
-        this.recordingSessions.clear();
 
-        this.monitoringSessions.forEach((_session, trackId) => {
-            this.stopMonitoring(trackId);
-        });
+            this.stop(true);
 
-        this.trackNodes.forEach((nodes) => {
-            nodes.deviceRuntimes.forEach((runtime) => {
-                runtime.cleanup?.();
+            if (this.schedulerTimer) {
+                window.clearInterval(this.schedulerTimer);
+                this.schedulerTimer = null;
+            }
+
+            this.stopPlayback();
+
+            this.recordingSessions.forEach((session) => {
+                if (session.mediaRecorder.state !== 'inactive') {
+                    try { session.mediaRecorder.stop(); } catch {
+                        // already stopping/stopped
+                    }
+                }
+                session.stream.getTracks().forEach((track) => track.stop());
             });
-            nodes.sendGains.forEach((sendGain) => {
-                try { sendGain.disconnect(); } catch {
+            this.recordingSessions.clear();
+
+            this.monitoringSessions.forEach((_session, trackId) => {
+                this.stopMonitoring(trackId);
+            });
+
+            this.trackNodes.forEach((nodes) => {
+                nodes.deviceRuntimes.forEach((runtime) => {
+                    runtime.cleanup?.();
+                });
+                nodes.sendGains.forEach((sendGain) => {
+                    try { sendGain.disconnect(); } catch {
+                        // already disconnected
+                    }
+                });
+                try { nodes.reverb.disconnect(); } catch { }
+                try { nodes.reverbGain.disconnect(); } catch { }
+                try { nodes.panner.disconnect(); } catch { }
+                try { nodes.gain.disconnect(); } catch { }
+                try { nodes.preSendTap.disconnect(); } catch { }
+                try { nodes.input.disconnect(); } catch { }
+            });
+
+            if (this.cueSourceNode && this.cueGain) {
+                try {
+                    this.cueSourceNode.disconnect(this.cueGain);
+                } catch {
                     // already disconnected
                 }
-            });
-            try { nodes.reverb.disconnect(); } catch { }
-            try { nodes.reverbGain.disconnect(); } catch { }
-            try { nodes.panner.disconnect(); } catch { }
-            try { nodes.gain.disconnect(); } catch { }
-            try { nodes.preSendTap.disconnect(); } catch { }
-            try { nodes.input.disconnect(); } catch { }
-        });
-
-        if (this.cueSourceNode && this.cueGain) {
-            try {
-                this.cueSourceNode.disconnect(this.cueGain);
-            } catch {
-                // already disconnected
             }
-        }
-        this.cueSourceNode = null;
-        this.cueTrackId = null;
-        this.cueMode = null;
+            this.cueSourceNode = null;
+            this.cueTrackId = null;
+            this.cueMode = null;
 
-        this.trackNodes.clear();
-        this.trackDeviceSignatures.clear();
-        this.analysers.clear();
-        this.analyserBuffers.clear();
-        this.trackMeterState.clear();
-        this.trackClipHoldState.clear();
-        this.masterMeterState = { rmsDb: -72, peakDb: -72 };
-        this.masterClipHold = false;
-        this.masterGain = null;
-        this.masterOutput = null;
-        this.masterAnalyser = null;
-        this.masterAnalyserBuffer = null;
-        this.cueGain = null;
-        this.limiter = null;
-        this.defaultReverbImpulse = null;
+            this.trackNodes.clear();
+            this.trackDeviceSignatures.clear();
+            this.analysers.clear();
+            this.analyserBuffers.clear();
+            this.trackMeterState.clear();
+            this.trackClipHoldState.clear();
+            this.masterMeterState = { rmsDb: -72, peakDb: -72 };
+            this.masterClipHold = false;
+            this.masterGain = null;
+            this.masterOutput = null;
+            this.masterAnalyser = null;
+            this.masterAnalyserBuffer = null;
+            this.cueGain = null;
+            this.limiter = null;
+            this.defaultReverbImpulse = null;
 
-        if (this.ctx) {
-            try {
-                await this.ctx.close();
-            } catch {
-                // context might already be closing/closed
+            if (this.ctx) {
+                try {
+                    await this.ctx.close();
+                } catch {
+                    // context might already be closing/closed
+                }
             }
-        }
 
-        this.ctx = null;
-        await this.init(this.settings);
+            this.ctx = null;
+            console.log(`[AudioEngine.restartEngine] Context closed + nulled. Calling init() with sampleRate: ${this.settings.sampleRate}Hz`);
+            await this.init(this.settings);
 
-        if (this.currentTracksSnapshot.length > 0) {
-            this.updateTracks(this.currentTracksSnapshot);
+            if (this.currentTracksSnapshot.length > 0) {
+                this.updateTracks(this.currentTracksSnapshot);
+            }
+        } finally {
+            this._isRestarting = false;
         }
     }
 
@@ -916,6 +941,12 @@ class AudioEngine {
                 latencyHint: this.settings.latencyHint as AudioContextLatencyCategory,
                 sampleRate: this.settings.sampleRate
             });
+            console.log(`[AudioEngine.init] Created AudioContext — requested: ${this.settings.sampleRate}Hz, actual: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
+            if (this.ctx.sampleRate !== this.settings.sampleRate) {
+                console.warn(`[AudioEngine.init] ⚠ Browser did NOT honor requested sample rate. Requested ${this.settings.sampleRate}Hz, got ${this.ctx.sampleRate}Hz.`);
+            }
+        } else {
+            console.log(`[AudioEngine.init] Context already exists — sampleRate: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
         }
 
         await this.applyOutputDevicePreference();
@@ -934,12 +965,23 @@ class AudioEngine {
             this.cueGain.gain.value = 0;
 
             // 2. Initialize Safety Limiter
-            this.limiter = this.ctx.createDynamicsCompressor();
-            this.limiter.threshold.value = -1.0;
-            this.limiter.knee.value = 12;
-            this.limiter.ratio.value = 20;
-            this.limiter.attack.value = 0.002;
-            this.limiter.release.value = 0.25;
+            // At very high sample rates (≥176.4kHz), DynamicsCompressorNode can
+            // produce silence in some browser implementations. Use a simple
+            // passthrough GainNode as a fallback to guarantee audio output.
+            const sampleRate = this.ctx.sampleRate;
+            if (sampleRate >= 176400) {
+                console.warn(`[AudioEngine] High sample rate (${sampleRate}Hz) detected — bypassing DynamicsCompressorNode limiter to prevent silence.`);
+                this.limiter = this.ctx.createGain();
+                (this.limiter as GainNode).gain.value = 1.0;
+            } else {
+                const compressor = this.ctx.createDynamicsCompressor();
+                compressor.threshold.value = -1.0;
+                compressor.knee.value = 12;
+                compressor.ratio.value = 20;
+                compressor.attack.value = 0.002;
+                compressor.release.value = 0.25;
+                this.limiter = compressor;
+            }
 
             // Reliable output path:
             // Master -> Limiter -> Destination
@@ -1893,12 +1935,13 @@ class AudioEngine {
             const pitchMult = Math.pow(2, totalSemitones / 12);
 
             if (active.granularNode) {
-                // WARPED: Independent
+                // WARPED: Independent time-stretch + pitch
                 active.granularNode.parameters.get('playbackRate')?.setTargetAtTime(bpmRatio, now, 0.05);
                 active.granularNode.parameters.get('pitch')?.setTargetAtTime(pitchMult, now, 0.05);
             } else if (active.source) {
-                // NATIVE: Coupled
-                const finalRate = bpmRatio * pitchMult;
+                // NATIVE: Independent of BPM — only pitch transpose + user playbackRate
+                const userRate = active.clipPlaybackRate ?? 1;
+                const finalRate = userRate * pitchMult;
                 if (isFinite(finalRate)) {
                     active.source.playbackRate.setTargetAtTime(finalRate, now, 0.05);
                 }
@@ -2009,9 +2052,9 @@ class AudioEngine {
                 source.connect(clipGain);
                 clipGain.connect(playbackTarget);
 
-                const bpmRatio = (this.currentBpm / clipOriginalBpm) * clipPlaybackRate;
+                // Non-warped: play at native speed, only apply transpose and user playbackRate
                 const transposeMult = Math.pow(2, totalSemitones / 12);
-                source.playbackRate.value = bpmRatio * transposeMult;
+                source.playbackRate.value = clipPlaybackRate * transposeMult;
 
                 source.start(playAt, safeOffset, safeDuration);
 
@@ -2021,7 +2064,8 @@ class AudioEngine {
                     startTime: playAt,
                     offset: safeOffset,
                     originalBpm: clipOriginalBpm,
-                    clipTransposeSemitones
+                    clipTransposeSemitones,
+                    clipPlaybackRate
                 });
 
                 source.onended = () => {
@@ -2060,7 +2104,8 @@ class AudioEngine {
                     startTime: playAt,
                     offset: safeOffset,
                     originalBpm: clipOriginalBpm,
-                    clipTransposeSemitones
+                    clipTransposeSemitones,
+                    clipPlaybackRate
                 });
 
                 node.onprocessorerror = (e) => console.error(e);
@@ -2294,7 +2339,8 @@ class AudioEngine {
                     startTime: startAt,
                     offset: 0,
                     originalBpm: clipOriginalBpm,
-                    clipTransposeSemitones
+                    clipTransposeSemitones,
+                    clipPlaybackRate: 1
                 });
             } catch (error) {
                 console.error('Session granular playback failed', error);
@@ -2309,7 +2355,8 @@ class AudioEngine {
         source.buffer = clip.buffer;
         source.connect(clipGain);
         source.loop = true;
-        source.playbackRate.value = (this.currentBpm / clipOriginalBpm) * Math.pow(2, totalSemitones / 12);
+        // Non-warped: play at native speed, only apply transpose
+        source.playbackRate.value = Math.pow(2, totalSemitones / 12);
         source.start(startAt);
 
         this.activeSources.set(sessionKey, {
@@ -2318,7 +2365,8 @@ class AudioEngine {
             startTime: startAt,
             offset: 0,
             originalBpm: clipOriginalBpm,
-            clipTransposeSemitones
+            clipTransposeSemitones,
+            clipPlaybackRate: 1
         });
 
         source.onended = () => {
@@ -2638,9 +2686,9 @@ class AudioEngine {
                 const source = offlineCtx.createBufferSource();
                 source.buffer = clip.buffer;
 
-                const bpmRatio = options.bpm / clipOriginalBpm;
+                // Non-warped: play at native speed, only apply transpose
                 const transposeMult = Math.pow(2, totalSemitones / 12);
-                source.playbackRate.value = bpmRatio * transposeMult;
+                source.playbackRate.value = transposeMult;
 
                 source.connect(clipGain);
                 source.start(startRes, clipOffsetSeconds, durRes);
