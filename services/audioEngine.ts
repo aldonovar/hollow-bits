@@ -71,13 +71,13 @@ type AudioContextWithSink = AudioContext & {
     sinkId?: string;
 };
 
-interface EngineProfileSuggestion {
+export interface EngineProfileSuggestion {
     latencyHint: AudioSettings['latencyHint'];
     bufferSize: AudioSettings['bufferSize'];
     reason: string;
 }
 
-interface EngineDiagnostics {
+export interface EngineDiagnostics {
     sampleRate: number;
     latency: number;
     state: AudioContextState | 'closed';
@@ -87,6 +87,11 @@ interface EngineDiagnostics {
     sampleRateMismatchMessage: string | null;
     highLoadDetected: boolean;
     profileSuggestion: EngineProfileSuggestion | null;
+    configuredBufferSize: AudioSettings['bufferSize'];
+    effectiveBufferSize: number;
+    bufferStrategy: string;
+    lookaheadMs: number;
+    scheduleAheadTimeMs: number;
 }
 
 class AudioEngine {
@@ -743,6 +748,7 @@ class AudioEngine {
 
         const prevOutputDeviceId = this.settings.outputDeviceId;
         const prevSampleRate = this.ctx?.sampleRate ?? this.settings.sampleRate;
+        const prevBufferSize = this.settings.bufferSize;
         const requestedSampleRate = newSettings.sampleRate ?? this.requestedSettings.sampleRate;
         this.settings = { ...this.settings, ...newSettings };
 
@@ -752,20 +758,20 @@ class AudioEngine {
             }
         }
 
-        // Sample rate can only be set at AudioContext creation time.
-        // If the requested rate differs from the current context's rate,
-        // we must close the old context and create a new one.
+        const sampleRateChanged = Boolean(this.ctx && newSettings.sampleRate && newSettings.sampleRate !== prevSampleRate);
+        const bufferSizeChanged = typeof newSettings.bufferSize !== 'undefined' && newSettings.bufferSize !== prevBufferSize;
+
+        // Sample rate and numeric latency targets are create-time settings for AudioContext.
         if (
             this.ctx &&
-            newSettings.sampleRate &&
-            newSettings.sampleRate !== prevSampleRate &&
-            (!this.sampleRateRestartGuard || this.sampleRateRestartGuard.requested !== newSettings.sampleRate || this.sampleRateRestartGuard.active !== this.ctx.sampleRate)
+            (sampleRateChanged || bufferSizeChanged) &&
+            (!sampleRateChanged || !this.sampleRateRestartGuard || this.sampleRateRestartGuard.requested !== newSettings.sampleRate || this.sampleRateRestartGuard.active !== this.ctx.sampleRate)
         ) {
             if (this._isRestarting) {
                 console.log(`[AudioEngine.setAudioConfiguration] Engine already restarting — skipping duplicate restart.`);
                 return;
             }
-            console.log(`[AudioEngine.setAudioConfiguration] Sample rate changed: ${prevSampleRate}Hz → ${newSettings.sampleRate}Hz — restarting engine.`);
+            console.log(`[AudioEngine.setAudioConfiguration] Context-level config changed (sampleRate/bufferSize). Restarting engine.`);
             void this.restartEngine(this.settings);
             return; // restartEngine handles everything including output device
         }
@@ -1748,6 +1754,10 @@ class AudioEngine {
         const activeSampleRate = this.ctx?.sampleRate || this.effectiveSampleRate || 0;
         const requestedSampleRate = this.requestedSettings.sampleRate;
         const profileSuggestion = this.evaluateProfileSuggestion();
+        const configuredBufferSize = this.settings.bufferSize;
+        const effectiveBufferSize = typeof configuredBufferSize === 'number'
+            ? configuredBufferSize
+            : Math.max(128, Math.round((this.ctx?.baseLatency || 0) * activeSampleRate));
 
         return {
             sampleRate: activeSampleRate,
@@ -1758,7 +1768,12 @@ class AudioEngine {
             sampleRateMismatch: requestedSampleRate !== activeSampleRate,
             sampleRateMismatchMessage: this.sampleRateMismatchState?.message ?? null,
             highLoadDetected: Boolean(profileSuggestion),
-            profileSuggestion
+            profileSuggestion,
+            configuredBufferSize,
+            effectiveBufferSize,
+            bufferStrategy: configuredBufferSize === 'auto' ? 'auto' : 'fixed',
+            lookaheadMs: this.lookahead,
+            scheduleAheadTimeMs: this.scheduleAheadTime * 1000
         };
     }
 

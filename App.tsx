@@ -17,7 +17,7 @@ import AsciiPerformerDock from './components/AsciiPerformerDock';
 import CollabPanel, { CollabActivityEntry } from './components/CollabPanel';
 import { INITIAL_TRACKS, getTrackColorByPosition } from './constants';
 import { LoopMode, Note, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry } from './types';
-import { audioEngine } from './services/audioEngine';
+import { audioEngine, type EngineDiagnostics } from './services/audioEngine';
 import { midiService, MidiDevice } from './services/MidiService';
 import { platformService } from './services/platformService';
 import { assetDb } from './services/db';
@@ -151,22 +151,6 @@ interface MixSnapshot {
     tracks: Record<string, TrackMixSnapshot>;
 }
 
-interface EngineStats {
-    sampleRate: number;
-    latency: number;
-    state: string;
-    requestedSampleRate: number;
-    activeSampleRate: number;
-    sampleRateMismatch: boolean;
-    sampleRateMismatchMessage: string | null;
-    highLoadDetected: boolean;
-    profileSuggestion: {
-        latencyHint: AudioSettings['latencyHint'];
-        bufferSize: AudioSettings['bufferSize'];
-        reason: string;
-    } | null;
-}
-
 type ToolPanel = 'browser' | 'ai' | 'scanner' | null;
 
 const AUDIO_SETTINGS_STORAGE_KEY = 'ethereal.audio-settings.v1';
@@ -266,7 +250,7 @@ const App: React.FC = () => {
 
     // Engine State
     const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => loadAudioSettingsFromStorage());
-    const [engineStats, setEngineStats] = useState<EngineStats>({
+    const [engineStats, setEngineStats] = useState<EngineDiagnostics>({
         sampleRate: 0,
         latency: 0,
         state: 'closed',
@@ -275,7 +259,12 @@ const App: React.FC = () => {
         sampleRateMismatch: false,
         sampleRateMismatchMessage: null,
         highLoadDetected: false,
-        profileSuggestion: null
+        profileSuggestion: null,
+        configuredBufferSize: audioSettings.bufferSize,
+        effectiveBufferSize: 0,
+        bufferStrategy: 'auto',
+        lookaheadMs: 25,
+        scheduleAheadTimeMs: 100
     });
 
     // Refs

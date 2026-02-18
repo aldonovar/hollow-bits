@@ -18,7 +18,7 @@ import {
     X
 } from 'lucide-react';
 import { AudioSettings, ScannedFileEntry } from '../types';
-import { audioEngine } from '../services/audioEngine';
+import { audioEngine, type EngineDiagnostics } from '../services/audioEngine';
 import { midiService, MidiDevice } from '../services/MidiService';
 import { platformService } from '../services/platformService';
 import { loadStudioSettings, saveStudioSettings } from '../services/studioSettingsService';
@@ -28,21 +28,7 @@ interface HardwareSettingsModalProps {
     onClose: () => void;
     audioSettings: AudioSettings;
     onAudioSettingsChange: (settings: AudioSettings) => void;
-    engineStats: {
-        sampleRate: number;
-        latency: number;
-        state: string;
-        requestedSampleRate: number;
-        activeSampleRate: number;
-        sampleRateMismatch: boolean;
-        sampleRateMismatchMessage: string | null;
-        highLoadDetected: boolean;
-        profileSuggestion: {
-            latencyHint: AudioSettings['latencyHint'];
-            bufferSize: AudioSettings['bufferSize'];
-            reason: string;
-        } | null;
-    };
+    engineStats: EngineDiagnostics;
 }
 
 type TabId = 'audio' | 'midi' | 'plugins' | 'library';
