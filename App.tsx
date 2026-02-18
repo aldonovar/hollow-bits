@@ -151,9 +151,26 @@ interface MixSnapshot {
     tracks: Record<string, TrackMixSnapshot>;
 }
 
+interface EngineStats {
+    sampleRate: number;
+    latency: number;
+    state: string;
+    requestedSampleRate: number;
+    activeSampleRate: number;
+    sampleRateMismatch: boolean;
+    sampleRateMismatchMessage: string | null;
+    highLoadDetected: boolean;
+    profileSuggestion: {
+        latencyHint: AudioSettings['latencyHint'];
+        bufferSize: AudioSettings['bufferSize'];
+        reason: string;
+    } | null;
+}
+
 type ToolPanel = 'browser' | 'ai' | 'scanner' | null;
 
 const AUDIO_SETTINGS_STORAGE_KEY = 'ethereal.audio-settings.v1';
+const AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY = 'ethereal.audio-effective-settings.v1';
 const MIN_CLIP_LENGTH_BARS = 0.0625;
 const AUTOSAVE_DEBOUNCE_MS = 1200;
 
@@ -249,7 +266,17 @@ const App: React.FC = () => {
 
     // Engine State
     const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => loadAudioSettingsFromStorage());
-    const [engineStats, setEngineStats] = useState({ sampleRate: 0, latency: 0, state: 'closed' });
+    const [engineStats, setEngineStats] = useState<EngineStats>({
+        sampleRate: 0,
+        latency: 0,
+        state: 'closed',
+        requestedSampleRate: audioSettings.sampleRate,
+        activeSampleRate: 0,
+        sampleRateMismatch: false,
+        sampleRateMismatchMessage: null,
+        highLoadDetected: false,
+        profileSuggestion: null
+    });
 
     // Refs
     const fileMenuRef = useRef<HTMLDivElement>(null);
@@ -435,6 +462,19 @@ const App: React.FC = () => {
             document.removeEventListener('mousedown', handleClickOutside);
         };
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY, JSON.stringify({
+                sampleRate: engineStats.activeSampleRate,
+                latencyHint: audioSettings.latencyHint,
+                bufferSize: audioSettings.bufferSize,
+                updatedAt: Date.now()
+            }));
+        } catch {
+            // Non-blocking diagnostics persistence.
+        }
+    }, [audioSettings.bufferSize, audioSettings.latencyHint, engineStats.activeSampleRate]);
 
     useEffect(() => {
         audioEngine.setAudioConfiguration(audioSettings);
@@ -2714,6 +2754,12 @@ const App: React.FC = () => {
                     </div>
 
                     <div className="flex items-center gap-3">
+                        {engineStats.sampleRateMismatch && (
+                            <div className="flex items-center gap-2 px-2.5 h-5 rounded-sm border border-amber-400/40 bg-amber-500/10" title={engineStats.sampleRateMismatchMessage || `Solicitado ${engineStats.requestedSampleRate}, activo ${engineStats.activeSampleRate}`}>
+                                <AlertTriangle size={11} className="text-amber-300" />
+                                <span className="text-[9px] font-mono text-amber-100">SR solicitado {engineStats.requestedSampleRate}, activo {engineStats.activeSampleRate}</span>
+                            </div>
+                        )}
                         <div className="flex items-center gap-2 px-2.5 h-5 rounded-sm border border-white/10 bg-white/[0.03]">
                             <span className="text-[9px] uppercase tracking-[0.14em] text-gray-500">View</span>
                             <span className="text-[9px] font-mono text-gray-200">{bottomView === 'devices' ? 'Devices' : 'Editor'}</span>
@@ -2782,4 +2828,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-
