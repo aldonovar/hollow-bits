@@ -180,7 +180,8 @@ const sanitizeAudioSettings = (candidate: Partial<AudioSettings> | null | undefi
         bufferSize: isValidBufferSize(candidate.bufferSize) ? candidate.bufferSize : defaults.bufferSize,
         latencyHint: typeof candidate.latencyHint === 'string' ? candidate.latencyHint : defaults.latencyHint,
         inputDeviceId: typeof candidate.inputDeviceId === 'string' ? candidate.inputDeviceId : undefined,
-        outputDeviceId: typeof candidate.outputDeviceId === 'string' ? candidate.outputDeviceId : undefined
+        outputDeviceId: typeof candidate.outputDeviceId === 'string' ? candidate.outputDeviceId : undefined,
+        lastFailedOutputDeviceId: typeof candidate.lastFailedOutputDeviceId === 'string' ? candidate.lastFailedOutputDeviceId : undefined
     };
 };
 

@@ -129,7 +129,6 @@ class AudioEngine {
     };
     private outputFallbackApplied: boolean = false;
     private currentTracksSnapshot: Track[] = [];
-    private forceSystemOutput: boolean = true;
     private _isRestarting: boolean = false;
 
     constructor() {
@@ -690,15 +689,14 @@ class AudioEngine {
         }
 
         const requestedOutput = (this.settings.outputDeviceId || '').trim();
-        const sinkId = this.forceSystemOutput ? '' : (requestedOutput || '');
+        const sinkId = requestedOutput || '';
 
         try {
             await sinkCapableContext.setSinkId(sinkId);
             this.outputFallbackApplied = false;
 
-            if (this.forceSystemOutput && requestedOutput) {
-                this.settings = { ...this.settings, outputDeviceId: undefined };
-                console.warn('Output device custom desactivado temporalmente para priorizar salida de sistema.');
+            if (this.settings.lastFailedOutputDeviceId) {
+                this.settings = { ...this.settings, lastFailedOutputDeviceId: undefined };
             }
         } catch (error) {
             console.warn(`No se pudo aplicar output device '${requestedOutput || 'default'}'.`, error);
@@ -715,7 +713,10 @@ class AudioEngine {
 
             try {
                 await sinkCapableContext.setSinkId('');
-                this.settings = { ...this.settings, outputDeviceId: undefined };
+                this.settings = {
+                    ...this.settings,
+                    lastFailedOutputDeviceId: requestedOutput
+                };
                 console.warn('Se aplico fallback al output de sistema por seguridad.');
             } catch (fallbackError) {
                 console.error('Fallback a output default tambien fallo.', fallbackError);

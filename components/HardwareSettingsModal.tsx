@@ -211,8 +211,22 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
         setDraftAudio((prev) => ({ ...prev, latencyHint: 'playback', bufferSize: 1024 }));
     };
 
+    const syncAudioSettingsFromEngine = () => {
+        const effectiveSettings = audioEngine.getSettings();
+        setDraftAudio(effectiveSettings);
+        onAudioSettingsChange(effectiveSettings);
+        return effectiveSettings;
+    };
+
     const applyAudioChanges = () => {
         onAudioSettingsChange(draftAudio);
+        audioEngine.setAudioConfiguration(draftAudio);
+        const effectiveSettings = syncAudioSettingsFromEngine();
+        if (effectiveSettings.lastFailedOutputDeviceId && effectiveSettings.lastFailedOutputDeviceId === effectiveSettings.outputDeviceId) {
+            setStatusTone('warn');
+            setStatusMessage('Configuracion aplicada con fallback al output de sistema.');
+            return;
+        }
         setStatusTone('ok');
         setStatusMessage('Configuracion de audio aplicada.');
     };
@@ -222,8 +236,14 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
         try {
             onAudioSettingsChange(draftAudio);
             await audioEngine.restartEngine(draftAudio);
-            setStatusTone('ok');
-            setStatusMessage('Motor de audio reiniciado con la configuracion actual.');
+            const effectiveSettings = syncAudioSettingsFromEngine();
+            if (effectiveSettings.lastFailedOutputDeviceId && effectiveSettings.lastFailedOutputDeviceId === effectiveSettings.outputDeviceId) {
+                setStatusTone('warn');
+                setStatusMessage('Motor reiniciado con fallback al output de sistema.');
+            } else {
+                setStatusTone('ok');
+                setStatusMessage('Motor de audio reiniciado con la configuracion actual.');
+            }
         } catch (error) {
             console.error('No se pudo reiniciar el motor de audio.', error);
             setStatusTone('error');
