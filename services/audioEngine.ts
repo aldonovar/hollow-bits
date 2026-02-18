@@ -81,17 +81,17 @@ export interface EngineDiagnostics {
     sampleRate: number;
     latency: number;
     state: AudioContextState | 'closed';
-    requestedSampleRate: number;
-    activeSampleRate: number;
-    sampleRateMismatch: boolean;
-    sampleRateMismatchMessage: string | null;
-    highLoadDetected: boolean;
-    profileSuggestion: EngineProfileSuggestion | null;
-    configuredBufferSize: AudioSettings['bufferSize'];
-    effectiveBufferSize: number;
-    bufferStrategy: string;
-    lookaheadMs: number;
-    scheduleAheadTimeMs: number;
+    requestedSampleRate?: number;
+    activeSampleRate?: number;
+    sampleRateMismatch?: boolean;
+    sampleRateMismatchMessage?: string | null;
+    highLoadDetected?: boolean;
+    profileSuggestion?: EngineProfileSuggestion | null;
+    configuredBufferSize?: AudioSettings['bufferSize'];
+    effectiveBufferSize?: number;
+    bufferStrategy?: string;
+    lookaheadMs?: number;
+    scheduleAheadTimeMs?: number;
 }
 
 class AudioEngine {
@@ -771,7 +771,10 @@ class AudioEngine {
                 console.log(`[AudioEngine.setAudioConfiguration] Engine already restarting — skipping duplicate restart.`);
                 return;
             }
-            console.log(`[AudioEngine.setAudioConfiguration] Context-level config changed (sampleRate/bufferSize). Restarting engine.`);
+            const restartReasons: string[] = [];
+            if (sampleRateChanged) restartReasons.push(`sampleRate ${prevSampleRate}Hz -> ${this.settings.sampleRate}Hz`);
+            if (bufferSizeChanged) restartReasons.push(`bufferSize ${String(prevBufferSize)} -> ${String(this.settings.bufferSize)}`);
+            console.log(`[AudioEngine.setAudioConfiguration] ${restartReasons.join(', ')} - restarting engine.`);
             void this.restartEngine(this.settings);
             return; // restartEngine handles everything including output device
         }
