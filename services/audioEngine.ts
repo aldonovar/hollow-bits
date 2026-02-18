@@ -52,7 +52,7 @@ interface TrackNodeGraph {
     preSendTap: GainNode;
     gain: GainNode;
     panner: StereoPannerNode;
-    reverb: ConvolverNode;
+    reverb: ConvolverNode | GainNode;
     reverbGain: GainNode;
     sendGains: Map<string, GainNode>;
     sendModes: Map<string, 'pre' | 'post'>;
@@ -152,12 +152,12 @@ class AudioEngine {
 
     // Settings
     settings: AudioSettings = {
-        sampleRate: 48000,
+        sampleRate: 192000, // User Request: Maximun Quality Default
         bufferSize: 256, // Latency hint
         latencyHint: 'interactive'
     };
     private requestedSettings: AudioSettings = {
-        sampleRate: 48000,
+        sampleRate: 192000,
         bufferSize: 256,
         latencyHint: 'interactive'
     };
@@ -188,7 +188,15 @@ class AudioEngine {
             return 256;
         }
 
-        return this.clamp(this.finiteOr(requested, 256), 128, 2048);
+        // Safety: If sample rate is high (>= 88.2kHz), force a minimum buffer of 256
+        // to prevent CPU starvation/silence on some interfaces.
+        const sampleRate = this.settings.sampleRate || 48000;
+        let effectiveMin = 128;
+        if (sampleRate >= 88000) {
+            effectiveMin = 256;
+        }
+
+        return this.clamp(this.finiteOr(requested, 256), effectiveMin, 2048);
     }
 
     private resolveLatencyHintForContext(): AudioContextLatencyCategory | number {
@@ -1129,14 +1137,61 @@ class AudioEngine {
         // 0. Initialize Context if missing
         if (!this.ctx) {
             const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-            this.ctx = new AudioContextClass({
-                latencyHint: this.settings.latencyHint as AudioContextLatencyCategory,
-                sampleRate: this.requestedSettings.sampleRate
-            });
-            console.log(`[AudioEngine.init] Created AudioContext — requested: ${this.requestedSettings.sampleRate}Hz, actual: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
+
+            // ATTEMPT 1: Try Requested Settings (e.g., 192kHz)
+            try {
+                this.ctx = new AudioContextClass({
+                    latencyHint: this.settings.latencyHint as AudioContextLatencyCategory,
+                    sampleRate: this.requestedSettings.sampleRate
+                });
+            } catch (err) {
+                console.warn(`[AudioEngine] Failed to init at ${this.requestedSettings.sampleRate}Hz. trying 48000Hz.`, err);
+                this.requestedSettings.sampleRate = 48000;
+                this.settings.sampleRate = 48000;
+                this.ctx = new AudioContextClass({
+                    latencyHint: this.settings.latencyHint as AudioContextLatencyCategory,
+                    sampleRate: 48000
+                });
+            }
+
+            console.log(`[AudioEngine.init] Created Context. State: ${this.ctx.state}. Rate: ${this.ctx.sampleRate}Hz`);
+
+            // WATCHDOG: Check for "Zombie" context (Driver Locked but Silent)
+            // Common with 192kHz on some Windows drivers where context says "running" but clock is 0.
+            setTimeout(() => {
+                if (this.ctx && this.ctx.state === 'running' && this.ctx.currentTime < 0.001) {
+                    console.error("[AudioEngine] WATCHDOG TRIGGERED: Context is running but time is stuck! (Driver Lockup?). Forcing downgrade to 48kHz.");
+
+                    // Force Downgrade
+                    this.ctx.close().then(() => {
+                        this.ctx = null;
+                        this.requestedSettings.sampleRate = 48000;
+                        this.settings.sampleRate = 48000;
+                        this.masterGain = null; // Force graph rebuild
+                        this.trackNodes.clear();
+
+                        // Restart
+                        this.init().then(() => {
+                            // Re-mount the graph? 
+                            // Ideally we should reload the page or trigger a full restart, 
+                            // but stepping down to 48k is the priority.
+                            window.location.reload(); // Simplest way to ensure clean state after driver crash
+                        });
+                    });
+                }
+            }, 1000);
+
+            // DIAGNOSTICS
+            this.ctx.onstatechange = () => {
+                console.log(`[AudioEngine] Context state changed to: ${this.ctx?.state}`);
+            };
+
             this.reconcileContextSampleRate();
         } else {
-            console.log(`[AudioEngine.init] Context already exists — sampleRate: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
+            // ... existing context handling
+            if (this.ctx.state === 'suspended') {
+                this.ctx.resume();
+            }
             this.reconcileContextSampleRate();
         }
 
@@ -1163,7 +1218,11 @@ class AudioEngine {
             if (sampleRate >= 88000) {
                 console.warn(`[AudioEngine] High sample rate (${sampleRate}Hz) detected — bypassing DynamicsCompressorNode limiter to prevent silence.`);
                 this.limiter = this.ctx.createGain();
-                (this.limiter as GainNode).gain.value = 1.0;
+                this.limiter.connect(this.ctx.destination); // Early connection to verify graph
+                // Force gain to 1 explicitly with time
+                const now = this.ctx.currentTime;
+                (this.limiter as GainNode).gain.setValueAtTime(1.0, now);
+                console.log(`[AudioEngine] Limiter (GainNode) created and set to unity gain. Connected to destination.`);
             } else {
                 const compressor = this.ctx.createDynamicsCompressor();
                 compressor.threshold.value = -1.0;
@@ -1182,8 +1241,19 @@ class AudioEngine {
             this.masterGain.connect(this.masterAnalyser);
             // Connect Master to Limiter
             this.masterGain.connect(this.limiter);
-            // Connect Limiter to Destination
-            this.limiter.connect(this.ctx.destination);
+
+            // If limiter is Compressor, connect it. If it's Gain (bypass), it's already connected above?
+            // Let's connect it again to be safe/consistent, AudioNode connection is idempotent-ish or we can check.
+            if (sampleRate < 88000) {
+                this.limiter.connect(this.ctx.destination);
+                console.log(`[AudioEngine] Compressor connected to destination.`);
+            } else {
+                // For high sample mode, we already connected it above for safety, but let's just log.
+                // If we connect again, it might sum? No, fan-in to destination is summation, fan-out from node is multicast.
+                // Providing multiple connections between same A and B? audio spec says "If the connection already exists, do nothing."
+                this.limiter.connect(this.ctx.destination);
+                console.log(`[AudioEngine] Limiter (Bypass) verified connection to destination.`);
+            }
 
             // Connect Cue directly to destination
             this.cueGain.connect(this.ctx.destination);
@@ -1435,8 +1505,19 @@ class AudioEngine {
                 // Reverb Send (Parallel Chain)
                 // Post-fader: Gain -> ReverbGain -> ReverbConvolver -> Master
                 const reverbGain = this.ctx!.createGain();
-                const reverb = this.ctx!.createConvolver();
-                reverb.buffer = this.getDefaultReverbImpulse(this.ctx!);
+                const sampleRateForReverb = this.ctx?.sampleRate || 48000;
+                let reverb: ConvolverNode | GainNode;
+
+                if (sampleRateForReverb >= 88000) {
+                    // Optimization: At high sample rates, per-track convolution is too CPU intensive
+                    // and causes the entire engine to silence/fail. Use a simple Gain (bypass) instead.
+                    reverb = this.ctx!.createGain();
+                    (reverb as GainNode).gain.value = 1.0;
+                } else {
+                    const conv = this.ctx!.createConvolver();
+                    conv.buffer = this.getDefaultReverbImpulse(this.ctx!);
+                    reverb = conv;
+                }
 
                 // Wiring
                 input.connect(preSendTap);

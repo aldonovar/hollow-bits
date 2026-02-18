@@ -1,0 +1,11 @@
+﻿* main
+  remotes/origin/HEAD -> origin/main
+  remotes/origin/codex/add-sample-rate-reconciliation-mechanism
+  remotes/origin/codex/add-sample-rate-reconciliation-mechanism-fpem0d
+  remotes/origin/codex/corregir-audio-en-reproduccion-de-pista
+  remotes/origin/codex/corregir-audio-en-reproduccion-de-pista-it4rq7
+  remotes/origin/codex/implement-effective-audiosettings.buffersize-usage
+  remotes/origin/codex/plan-deep-learning-for-png-animation
+  remotes/origin/codex/plan-deep-learning-for-png-animation-erwnde
+  remotes/origin/codex/remove-permanent-override-of-outputdeviceid
+  remotes/origin/main

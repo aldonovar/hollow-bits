@@ -41,7 +41,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
     // Load image once
     useEffect(() => {
         const img = new Image();
-        img.src = '/performer/performer.png';
+        img.src = 'performer/performer.png';
         img.onload = () => {
             imgRef.current = img;
             loadedRef.current = true;
@@ -71,7 +71,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
 
     return (
         <aside
-            className={`h-full aspect-square shrink-0 performer-shell relative overflow-hidden ${isPlaying ? 'ascii-dock-playing' : 'ascii-dock-idle'}`}
+            className={`h-full aspect-square shrink-0 relative overflow-hidden transition-all duration-300 border-2 ${isPlaying ? 'border-purple-500/40 shadow-[0_0_10px_rgba(168,85,247,0.2)]' : 'border-white/20'} ${isPlaying ? 'ascii-dock-playing' : 'ascii-dock-idle'}`}
         >
             <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_55%_20%,rgba(244,218,255,0.22),transparent_58%)]" />
 
