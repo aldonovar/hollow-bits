@@ -150,6 +150,7 @@ export interface AudioSettings {
   latencyHint: 'interactive' | 'balanced' | 'playback' | string;
   inputDeviceId?: string;
   outputDeviceId?: string;
+  lastFailedOutputDeviceId?: string;
 }
 
 // LIGHTWEIGHT PROJECT MANIFEST
