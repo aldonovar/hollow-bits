@@ -28,7 +28,16 @@ interface HardwareSettingsModalProps {
     onClose: () => void;
     audioSettings: AudioSettings;
     onAudioSettingsChange: (settings: AudioSettings) => void;
-    engineStats: { sampleRate: number; latency: number; state: string };
+    engineStats: {
+        sampleRate: number;
+        latency: number;
+        state: string;
+        configuredBufferSize?: AudioSettings['bufferSize'];
+        effectiveBufferSize?: number;
+        bufferStrategy?: string;
+        lookaheadMs?: number;
+        scheduleAheadTime?: number;
+    };
 }
 
 type TabId = 'audio' | 'midi' | 'plugins' | 'library';
@@ -483,10 +492,20 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                     />
                                 </div>
 
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
                                     <MetricCard label="Engine Rate" value={`${Math.round(engineStats.sampleRate)} Hz`} icon={AudioLines} />
                                     <MetricCard label="Current Latency" value={formatLatencyMs(engineStats.latency)} icon={Clock3} />
                                     <MetricCard label="Engine State" value={engineStats.state.toUpperCase()} icon={Gauge} />
+                                    <MetricCard
+                                        label="Buffer (Req→Eff)"
+                                        value={`${String(engineStats.configuredBufferSize ?? 'auto')} → ${Math.round(engineStats.effectiveBufferSize || 0)} smp`}
+                                        icon={Cpu}
+                                    />
+                                    <MetricCard
+                                        label="Buffer Strategy"
+                                        value={(engineStats.bufferStrategy || 'n/a').toUpperCase()}
+                                        icon={Activity}
+                                    />
                                 </div>
 
                                 <div className="flex flex-wrap items-center gap-2">
