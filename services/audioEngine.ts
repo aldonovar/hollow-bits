@@ -71,6 +71,29 @@ type AudioContextWithSink = AudioContext & {
     sinkId?: string;
 };
 
+export interface EngineProfileSuggestion {
+    latencyHint: AudioSettings['latencyHint'];
+    bufferSize: AudioSettings['bufferSize'];
+    reason: string;
+}
+
+export interface EngineDiagnostics {
+    sampleRate: number;
+    latency: number;
+    state: AudioContextState | 'closed';
+    requestedSampleRate?: number;
+    activeSampleRate?: number;
+    sampleRateMismatch?: boolean;
+    sampleRateMismatchMessage?: string | null;
+    highLoadDetected?: boolean;
+    profileSuggestion?: EngineProfileSuggestion | null;
+    configuredBufferSize?: AudioSettings['bufferSize'];
+    effectiveBufferSize?: number;
+    bufferStrategy?: string;
+    lookaheadMs?: number;
+    scheduleAheadTimeMs?: number;
+}
+
 class AudioEngine {
     ctx: AudioContext | null = null;
     masterGain: GainNode | null = null;
@@ -133,6 +156,14 @@ class AudioEngine {
         bufferSize: 256, // Latency hint
         latencyHint: 'interactive'
     };
+    private requestedSettings: AudioSettings = {
+        sampleRate: 48000,
+        bufferSize: 256,
+        latencyHint: 'interactive'
+    };
+    private effectiveSampleRate: number = 48000;
+    private sampleRateMismatchState: { requested: number; active: number; message: string } | null = null;
+    private sampleRateRestartGuard: { requested: number; active: number } | null = null;
     private outputFallbackApplied: boolean = false;
     private currentTracksSnapshot: Track[] = [];
     private _isRestarting: boolean = false;
@@ -708,25 +739,92 @@ class AudioEngine {
         return { ...this.settings };
     }
 
+    getRequestedSettings(): AudioSettings {
+        return { ...this.requestedSettings };
+    }
+
+    private evaluateProfileSuggestion(): EngineProfileSuggestion | null {
+        const activeSampleRate = this.ctx?.sampleRate ?? this.effectiveSampleRate;
+        const highSampleRate = activeSampleRate >= 96000;
+        const highLoad = this.activeSources.size >= 18 || this.trackNodes.size >= 12;
+
+        if (!highSampleRate || !highLoad) {
+            return null;
+        }
+
+        if (this.settings.latencyHint === 'playback' && (this.settings.bufferSize === 1024 || this.settings.bufferSize === 2048)) {
+            return null;
+        }
+
+        return {
+            latencyHint: 'playback',
+            bufferSize: 1024,
+            reason: `High-load session detected at ${activeSampleRate}Hz. Consider playback latency profile with larger buffer.`
+        };
+    }
+
+    private reconcileContextSampleRate(): void {
+        if (!this.ctx) return;
+
+        const requestedSampleRate = this.requestedSettings.sampleRate;
+        const activeSampleRate = this.ctx.sampleRate;
+
+        if (requestedSampleRate === activeSampleRate) {
+            this.sampleRateMismatchState = null;
+            this.sampleRateRestartGuard = null;
+            this.effectiveSampleRate = activeSampleRate;
+            return;
+        }
+
+        const mismatchMessage = `Sample rate no soportado por el sistema. solicitado ${requestedSampleRate}, activo ${activeSampleRate}.`;
+        this.sampleRateMismatchState = {
+            requested: requestedSampleRate,
+            active: activeSampleRate,
+            message: mismatchMessage
+        };
+
+        this.effectiveSampleRate = activeSampleRate;
+
+        this.sampleRateRestartGuard = {
+            requested: requestedSampleRate,
+            active: activeSampleRate
+        };
+
+        console.warn(`[AudioEngine] ${mismatchMessage} Se conserva preferencia del usuario sin reinicios en bucle.`);
+    }
+
     setAudioConfiguration(newSettings: AudioSettings) {
+        this.requestedSettings = { ...this.requestedSettings, ...newSettings };
+
         const prevOutputDeviceId = this.settings.outputDeviceId;
         const prevSampleRate = this.ctx?.sampleRate ?? this.settings.sampleRate;
         const prevBufferSize = this.settings.bufferSize;
+        const requestedSampleRate = newSettings.sampleRate ?? this.requestedSettings.sampleRate;
         this.settings = { ...this.settings, ...newSettings };
+
+        if (this.sampleRateRestartGuard && this.sampleRateRestartGuard.requested === requestedSampleRate) {
+            if (this.ctx && this.ctx.sampleRate === this.sampleRateRestartGuard.active) {
+                console.log(`[AudioEngine.setAudioConfiguration] Sample-rate mismatch persists (${requestedSampleRate}Hz requested, ${this.sampleRateRestartGuard.active}Hz active). Skip restart loop.`);
+            }
+        }
 
         const sampleRateChanged = Boolean(this.ctx && newSettings.sampleRate && newSettings.sampleRate !== prevSampleRate);
         const bufferSizeChanged = typeof newSettings.bufferSize !== 'undefined' && newSettings.bufferSize !== prevBufferSize;
 
-        // Sample rate and numeric latency targets are creation-time settings for AudioContext.
-        if (this.ctx && (sampleRateChanged || bufferSizeChanged)) {
+        // Sample rate and numeric latency targets are create-time settings for AudioContext.
+        if (
+            this.ctx &&
+            (sampleRateChanged || bufferSizeChanged) &&
+            (!sampleRateChanged || !this.sampleRateRestartGuard || this.sampleRateRestartGuard.requested !== newSettings.sampleRate || this.sampleRateRestartGuard.active !== this.ctx.sampleRate)
+        ) {
             if (this._isRestarting) {
                 console.log(`[AudioEngine.setAudioConfiguration] Engine already restarting — skipping duplicate restart.`);
                 return;
             }
             const restartReasons: string[] = [];
-            if (sampleRateChanged) restartReasons.push(`sampleRate ${prevSampleRate}Hz → ${this.settings.sampleRate}Hz`);
-            if (bufferSizeChanged) restartReasons.push(`bufferSize ${String(prevBufferSize)} → ${String(this.settings.bufferSize)}`);
-            console.log(`[AudioEngine.setAudioConfiguration] ${restartReasons.join(', ')} — restarting engine.`);
+            if (sampleRateChanged) restartReasons.push(`sampleRate ${prevSampleRate}Hz -> ${this.settings.sampleRate}Hz`);
+            if (bufferSizeChanged) restartReasons.push(`bufferSize ${String(prevBufferSize)} -> ${String(this.settings.bufferSize)}`);
+            console.log(`[AudioEngine.setAudioConfiguration] ${restartReasons.join(', ')} - restarting engine.`);
             void this.restartEngine(this.settings);
             return; // restartEngine handles everything including output device
         }
@@ -876,6 +974,7 @@ class AudioEngine {
 
         try {
             if (newSettings) {
+                this.requestedSettings = { ...this.requestedSettings, ...newSettings };
                 this.settings = { ...this.settings, ...newSettings };
             }
 
@@ -956,7 +1055,7 @@ class AudioEngine {
 
             this.ctx = null;
             console.log(`[AudioEngine.restartEngine] Context closed + nulled. Calling init() with sampleRate: ${this.settings.sampleRate}Hz`);
-            await this.init(this.settings);
+            await this.init(this.requestedSettings);
 
             if (this.currentTracksSnapshot.length > 0) {
                 this.updateTracks(this.currentTracksSnapshot);
@@ -1022,24 +1121,23 @@ class AudioEngine {
     }
 
     async init(settings?: AudioSettings) {
-        if (settings) this.settings = { ...this.settings, ...settings };
-        this.applyRuntimeBufferStrategy();
+        if (settings) {
+            this.requestedSettings = { ...this.requestedSettings, ...settings };
+            this.settings = { ...this.settings, ...settings };
+        }
 
         // 0. Initialize Context if missing
         if (!this.ctx) {
             const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
             this.ctx = new AudioContextClass({
-                latencyHint: this.effectiveLatencyHint,
-                sampleRate: this.settings.sampleRate
+                latencyHint: this.settings.latencyHint as AudioContextLatencyCategory,
+                sampleRate: this.requestedSettings.sampleRate
             });
-            console.log(`[AudioEngine.init] Created AudioContext — requested: ${this.settings.sampleRate}Hz, actual: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
-            if (this.ctx.sampleRate !== this.settings.sampleRate) {
-                console.warn(`[AudioEngine.init] ⚠ Browser did NOT honor requested sample rate. Requested ${this.settings.sampleRate}Hz, got ${this.ctx.sampleRate}Hz.`);
-            }
-            this.applyRuntimeBufferStrategy();
+            console.log(`[AudioEngine.init] Created AudioContext — requested: ${this.requestedSettings.sampleRate}Hz, actual: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
+            this.reconcileContextSampleRate();
         } else {
             console.log(`[AudioEngine.init] Context already exists — sampleRate: ${this.ctx.sampleRate}Hz, state: ${this.ctx.state}`);
-            this.applyRuntimeBufferStrategy();
+            this.reconcileContextSampleRate();
         }
 
         await this.applyOutputDevicePreference();
@@ -1711,18 +1809,30 @@ class AudioEngine {
         return data;
     }
 
-    getDiagnostics() {
+    getDiagnostics(): EngineDiagnostics {
+        const activeSampleRate = this.ctx?.sampleRate || this.effectiveSampleRate || 0;
+        const requestedSampleRate = this.requestedSettings.sampleRate;
+        const profileSuggestion = this.evaluateProfileSuggestion();
+        const configuredBufferSize = this.settings.bufferSize;
+        const effectiveBufferSize = typeof configuredBufferSize === 'number'
+            ? configuredBufferSize
+            : Math.max(128, Math.round((this.ctx?.baseLatency || 0) * activeSampleRate));
+
         return {
-            sampleRate: this.ctx?.sampleRate || 0,
+            sampleRate: activeSampleRate,
             latency: this.ctx?.baseLatency || 0,
             state: this.ctx?.state || 'closed',
-            configuredBufferSize: this.settings.bufferSize,
-            effectiveBufferSize: this.effectiveBufferSize,
+            requestedSampleRate,
+            activeSampleRate,
+            sampleRateMismatch: requestedSampleRate !== activeSampleRate,
+            sampleRateMismatchMessage: this.sampleRateMismatchState?.message ?? null,
+            highLoadDetected: Boolean(profileSuggestion),
+            profileSuggestion,
+            configuredBufferSize,
+            effectiveBufferSize,
+            bufferStrategy: configuredBufferSize === 'auto' ? 'auto' : 'fixed',
             lookaheadMs: this.lookahead,
-            scheduleAheadTime: this.scheduleAheadTime,
-            schedulerIntervalMs: this.schedulerIntervalMs,
-            bufferStrategy: this.bufferStrategy,
-            latencyHintApplied: this.effectiveLatencyHint
+            scheduleAheadTimeMs: this.scheduleAheadTime * 1000
         };
     }
 

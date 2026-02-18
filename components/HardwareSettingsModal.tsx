@@ -18,7 +18,7 @@ import {
     X
 } from 'lucide-react';
 import { AudioSettings, ScannedFileEntry } from '../types';
-import { audioEngine } from '../services/audioEngine';
+import { audioEngine, type EngineDiagnostics } from '../services/audioEngine';
 import { midiService, MidiDevice } from '../services/MidiService';
 import { platformService } from '../services/platformService';
 import { loadStudioSettings, saveStudioSettings } from '../services/studioSettingsService';
@@ -28,16 +28,7 @@ interface HardwareSettingsModalProps {
     onClose: () => void;
     audioSettings: AudioSettings;
     onAudioSettingsChange: (settings: AudioSettings) => void;
-    engineStats: {
-        sampleRate: number;
-        latency: number;
-        state: string;
-        configuredBufferSize?: AudioSettings['bufferSize'];
-        effectiveBufferSize?: number;
-        bufferStrategy?: string;
-        lookaheadMs?: number;
-        scheduleAheadTime?: number;
-    };
+    engineStats: EngineDiagnostics;
 }
 
 type TabId = 'audio' | 'midi' | 'plugins' | 'library';
@@ -238,6 +229,18 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
         }
         setStatusTone('ok');
         setStatusMessage('Configuracion de audio aplicada.');
+    };
+
+    const applySuggestedHighLoadProfile = () => {
+        const suggestion = engineStats.profileSuggestion;
+        if (!suggestion) return;
+        setDraftAudio((prev) => ({
+            ...prev,
+            latencyHint: suggestion.latencyHint,
+            bufferSize: suggestion.bufferSize
+        }));
+        setStatusTone('warn');
+        setStatusMessage('Sugerencia aplicada en borrador: perfil playback + buffer alto para alta carga.');
     };
 
     const restartAudioEngine = async () => {
@@ -507,6 +510,28 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                         icon={Activity}
                                     />
                                 </div>
+
+                                {engineStats.sampleRateMismatch && (
+                                    <div className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                                        <div className="font-semibold uppercase tracking-wider text-[10px] text-amber-200">Advertencia de compatibilidad</div>
+                                        <div className="mt-1">Sample rate solicitado {engineStats.requestedSampleRate}, activo {engineStats.activeSampleRate}. El sistema no soporta el valor elegido y se usa el activo para reproduccion.</div>
+                                    </div>
+                                )}
+
+                                {engineStats.profileSuggestion && (
+                                    <div className="rounded-sm border border-daw-violet/40 bg-daw-violet/10 px-3 py-2 text-xs text-violet-100 flex items-start justify-between gap-3">
+                                        <div>
+                                            <div className="font-semibold uppercase tracking-wider text-[10px] text-violet-200">Sugerencia de alta carga</div>
+                                            <div className="mt-1">{engineStats.profileSuggestion.reason}</div>
+                                        </div>
+                                        <button
+                                            onClick={applySuggestedHighLoadProfile}
+                                            className="h-8 px-3 rounded-sm border border-daw-violet/55 bg-daw-violet/20 text-[10px] font-bold uppercase tracking-wider text-violet-100 hover:bg-daw-violet/30"
+                                        >
+                                            Aplicar sugerencia
+                                        </button>
+                                    </div>
+                                )}
 
                                 <div className="flex flex-wrap items-center gap-2">
                                     <button
