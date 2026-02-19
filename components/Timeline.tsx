@@ -4,6 +4,8 @@ import { Track, TrackType, Clip, AutomationPoint } from '../types';
 import TrackHeader from './TrackHeader';
 import AutomationLane from './AutomationLane';
 import { audioEngine } from '../services/audioEngine';
+import { trackHeaderMeterStore } from '../services/trackHeaderMeterStore';
+import type { TrackHeaderMeterSnapshot } from '../services/trackHeaderMeterStore';
 import { Scissors, FileAudio, Copy, ArrowRightLeft, AlignLeft, Grid, Magnet } from 'lucide-react';
 import { BROWSER_DRAG_MIME, BrowserDragPayload, parseBrowserDragPayload } from '../services/browserDragService';
 
@@ -35,6 +37,49 @@ interface TrackLaneProps {
 
 
 const HEADER_WIDTH = 300;
+const VISIBLE_RECT_SCROLL_QUANTUM = 16;
+const VISIBLE_RECT_WIDTH_QUANTUM = 16;
+const VISIBLE_RECT_TOP_QUANTUM = 12;
+const VISIBLE_RECT_HEIGHT_QUANTUM = 12;
+const TRACK_VIRTUALIZATION_OVERSCAN_PX = 480;
+const MAX_ACTIVE_METER_TRACKS = 128;
+const WAVEFORM_CACHE_LIMIT = 320;
+const MIDI_DECORATION_CACHE_LIMIT = 640;
+
+interface TimelineViewportRect {
+    left: number;
+    width: number;
+    top: number;
+    height: number;
+}
+
+interface TrackLayoutRow {
+    track: Track;
+    top: number;
+    totalHeight: number;
+    automationRows: {
+        lane: NonNullable<Track['automationLanes']>[number];
+        height: number;
+    }[];
+}
+
+interface CachedWaveformShape {
+    pathData: string;
+    crestPath: string;
+    troughPath: string;
+    centerY: number;
+}
+
+interface MidiDecorationBar {
+    leftPercent: number;
+    topPercent: number;
+    widthPercent: number;
+}
+
+const seededRatio = (seed: number): number => {
+    const value = Math.sin(seed * 12.9898) * 43758.5453;
+    return value - Math.floor(value);
+};
 
 type DragAction = {
     type: 'trim-left' | 'trim-right' | 'fade-in' | 'fade-out' | 'stretch';
@@ -65,6 +110,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     // Local State for Smart Tool Dragging
     const [dragAction, setDragAction] = useState<DragAction | null>(null);
     const dragPreviewRef = useRef<Partial<Clip> | null>(null);
+    const waveformCacheRef = useRef<Map<string, CachedWaveformShape>>(new Map());
+    const midiDecorationCacheRef = useRef<Map<string, MidiDecorationBar[]>>(new Map());
 
     // --- SMART TOOL LOGIC (TRIM & FADE) ---
     useEffect(() => {
@@ -159,46 +206,78 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     const showDetailGrid = zoom > 50;
     const showBeatGrid = zoom > 20;
 
-    const getWaveformPath = (buffer: AudioBuffer, width: number, height: number) => {
+    const getWaveformPath = (clip: Clip, width: number, height: number) => {
+        const buffer = clip.buffer;
+        if (!buffer) return null;
+
+        const widthBucket = Math.max(64, Math.round(width / 24) * 24);
+        const heightBucket = Math.max(24, Math.round(height / 6) * 6);
+        const zoomBucket = zoom < 35 ? 1 : zoom < 90 ? 2 : 3;
+        const cacheKey = `${clip.id}:${buffer.length}:${buffer.sampleRate}:${widthBucket}:${heightBucket}:${zoomBucket}`;
+
+        let cached = waveformCacheRef.current.get(cacheKey);
+
+        if (!cached) {
+            // LOD Optimization: increase density for clearer transients/highs-lows.
+            const quality = zoom < 35 ? 1.0 : zoom < 90 ? 1.4 : 1.9;
+            const maxSteps = Math.max(1200, Math.floor(6000 * quality));
+            const steps = Math.min(Math.max(64, Math.ceil(widthBucket * quality)), maxSteps);
+
+            const envelope = audioEngine.getWaveformEnvelopeData(buffer, steps);
+            const pointCount = Math.min(envelope.max.length, envelope.min.length);
+            const centerY = heightBucket / 2;
+            const amp = heightBucket * 0.92;
+
+            if (pointCount === 0) {
+                return null;
+            }
+
+            let pathData = `M 0 ${centerY}`;
+            let crestPath = `M 0 ${centerY}`;
+            let troughPath = `M 0 ${centerY}`;
+
+            for (let i = 0; i < pointCount; i++) {
+                const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
+                const yMax = centerY - (envelope.max[i] * (amp / 2));
+                pathData += ` L ${x} ${yMax}`;
+                crestPath += ` L ${x} ${yMax}`;
+            }
+
+            for (let i = pointCount - 1; i >= 0; i--) {
+                const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
+                const yMin = centerY - (envelope.min[i] * (amp / 2));
+                pathData += ` L ${x} ${yMin}`;
+                troughPath += ` L ${x} ${yMin}`;
+            }
+
+            pathData += ' Z';
+
+            cached = {
+                pathData,
+                crestPath,
+                troughPath,
+                centerY
+            };
+
+            waveformCacheRef.current.set(cacheKey, cached);
+
+            if (waveformCacheRef.current.size > WAVEFORM_CACHE_LIMIT) {
+                const oldestKey = waveformCacheRef.current.keys().next().value;
+                if (oldestKey) {
+                    waveformCacheRef.current.delete(oldestKey);
+                }
+            }
+        }
+
+        const scaleX = Math.max(0.0001, width / Math.max(1, widthBucket));
+        const scaleY = Math.max(0.0001, height / Math.max(1, heightBucket));
+
         // LOD Optimization: increase density for clearer transients/highs-lows.
-        const quality = zoom < 35 ? 1.0 : zoom < 90 ? 1.4 : 1.9;
-        const maxSteps = Math.max(1200, Math.floor(6000 * quality));
-        const steps = Math.min(Math.max(64, Math.ceil(width * quality)), maxSteps);
-
-        const envelope = audioEngine.getWaveformEnvelopeData(buffer, steps);
-        const pointCount = Math.min(envelope.max.length, envelope.min.length);
-        const centerY = height / 2;
-        const amp = height * 0.92;
-
-        if (pointCount === 0) {
-            return null;
-        }
-
-        let pathData = `M 0 ${centerY}`;
-        let crestPath = `M 0 ${centerY}`;
-        let troughPath = `M 0 ${centerY}`;
-
-        for (let i = 0; i < pointCount; i++) {
-            const x = (i / Math.max(1, pointCount - 1)) * width;
-            const yMax = centerY - (envelope.max[i] * (amp / 2));
-            pathData += ` L ${x} ${yMax}`;
-            crestPath += ` L ${x} ${yMax}`;
-        }
-
-        for (let i = pointCount - 1; i >= 0; i--) {
-            const x = (i / Math.max(1, pointCount - 1)) * width;
-            const yMin = centerY - (envelope.min[i] * (amp / 2));
-            pathData += ` L ${x} ${yMin}`;
-            troughPath += ` L ${x} ${yMin}`;
-        }
-
-        pathData += " Z";
-
         return (
-            <g>
-                <line x1="0" y1={centerY} x2={width} y2={centerY} stroke={track.color} strokeOpacity="0.3" strokeWidth="1" />
+            <g transform={`scale(${scaleX}, ${scaleY})`}>
+                <line x1="0" y1={cached.centerY} x2={widthBucket} y2={cached.centerY} stroke={track.color} strokeOpacity="0.3" strokeWidth="1" />
                 <path
-                    d={pathData}
+                    d={cached.pathData}
                     fill={track.color}
                     fillOpacity="0.72"
                     stroke={track.color}
@@ -207,7 +286,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                     shapeRendering="geometricPrecision"
                 />
                 <path
-                    d={crestPath}
+                    d={cached.crestPath}
                     fill="none"
                     stroke={track.color}
                     strokeOpacity="0.85"
@@ -216,7 +295,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                     shapeRendering="geometricPrecision"
                 />
                 <path
-                    d={troughPath}
+                    d={cached.troughPath}
                     fill="none"
                     stroke={track.color}
                     strokeOpacity="0.78"
@@ -226,6 +305,34 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 />
             </g>
         );
+    };
+
+    const getMidiDecorationBars = (clip: Clip): MidiDecorationBar[] => {
+        const count = Math.max(1, Math.min(30, Math.round(clip.length * 4)));
+        const widthBucket = Math.max(1, Math.round((clip.length * zoom) / 24));
+        const cacheKey = `${clip.id}:${count}:${widthBucket}`;
+        const cached = midiDecorationCacheRef.current.get(cacheKey);
+        if (cached) return cached;
+
+        const seedBase = clip.id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+        const bars: MidiDecorationBar[] = [];
+
+        for (let i = 0; i < count; i++) {
+            const leftPercent = (i / count) * 100;
+            const topPercent = 28 + (seededRatio(seedBase + i * 17.13) * 44);
+            const widthPercent = 5 + (seededRatio(seedBase + i * 29.71) * 10);
+            bars.push({ leftPercent, topPercent, widthPercent });
+        }
+
+        midiDecorationCacheRef.current.set(cacheKey, bars);
+        if (midiDecorationCacheRef.current.size > MIDI_DECORATION_CACHE_LIMIT) {
+            const oldestKey = midiDecorationCacheRef.current.keys().next().value;
+            if (oldestKey) {
+                midiDecorationCacheRef.current.delete(oldestKey);
+            }
+        }
+
+        return bars;
     };
 
     const handleLaneClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -541,20 +648,20 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                                 preserveAspectRatio="none"
                                                 className="w-full h-full overflow-visible"
                                             >
-                                                {getWaveformPath(clip.buffer, clip.length * 4 * zoom, trackHeight)}
+                                                {getWaveformPath(clip, clip.length * 4 * zoom, trackHeight)}
                                             </svg>
                                         </div>
                                     ) : track.type === TrackType.MIDI ? (
                                         <div className="w-full h-full relative opacity-80">
-                                            {[...Array(Math.min(30, clip.length * 4))].map((_, i) => (
+                                            {getMidiDecorationBars(clip).map((bar, i) => (
                                                 <div
                                                     key={i}
                                                     className="absolute h-[3px] rounded-full"
                                                     style={{
                                                         backgroundColor: track.color,
-                                                        left: `${(i / (clip.length * 4)) * 100}%`,
-                                                        top: `${30 + Math.random() * 40}%`,
-                                                        width: `${Math.random() * 10 + 5}%`,
+                                                        left: `${bar.leftPercent}%`,
+                                                        top: `${bar.topPercent}%`,
+                                                        width: `${bar.widthPercent}%`
                                                     }}
                                                 ></div>
                                             ))}
@@ -685,30 +792,188 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     const playheadRef = useRef<HTMLDivElement>(null);
 
     // [NEW] Virtualization State
-    const [visibleRect, setVisibleRect] = useState({ left: 0, width: window.innerWidth });
+    const [visibleRect, setVisibleRect] = useState<TimelineViewportRect>(() => ({
+        left: 0,
+        width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+        top: 0,
+        height: typeof window !== 'undefined' ? window.innerHeight : 720
+    }));
 
     useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
 
-        const handleScroll = () => {
-            setVisibleRect({
-                left: container.scrollLeft,
-                width: container.clientWidth
+        let animationFrameId = 0;
+        let hasPendingCommit = false;
+
+        const commitVisibleRect = () => {
+            hasPendingCommit = false;
+            const left = Math.max(0, Math.round(container.scrollLeft / VISIBLE_RECT_SCROLL_QUANTUM) * VISIBLE_RECT_SCROLL_QUANTUM);
+            const width = Math.max(1, Math.round(container.clientWidth / VISIBLE_RECT_WIDTH_QUANTUM) * VISIBLE_RECT_WIDTH_QUANTUM);
+            const top = Math.max(0, Math.round(container.scrollTop / VISIBLE_RECT_TOP_QUANTUM) * VISIBLE_RECT_TOP_QUANTUM);
+            const height = Math.max(1, Math.round(container.clientHeight / VISIBLE_RECT_HEIGHT_QUANTUM) * VISIBLE_RECT_HEIGHT_QUANTUM);
+            setVisibleRect((prev) => {
+                if (prev.left === left && prev.width === width && prev.top === top && prev.height === height) {
+                    return prev;
+                }
+
+                return { left, width, top, height };
             });
         };
 
+        const scheduleCommit = () => {
+            if (hasPendingCommit) return;
+            hasPendingCommit = true;
+            animationFrameId = requestAnimationFrame(commitVisibleRect);
+        };
+
+        const handleScroll = () => {
+            scheduleCommit();
+        };
+
         // Initial Read
-        handleScroll();
+        scheduleCommit();
 
         container.addEventListener('scroll', handleScroll, { passive: true });
         window.addEventListener('resize', handleScroll);
 
         return () => {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
             container.removeEventListener('scroll', handleScroll);
             window.removeEventListener('resize', handleScroll);
         };
     }, [containerRef]);
+
+    const horizontalVisibleRect = useMemo(
+        () => ({ left: visibleRect.left, width: visibleRect.width }),
+        [visibleRect.left, visibleRect.width]
+    );
+
+    const trackRows = useMemo<TrackLayoutRow[]>(() => {
+        let nextTop = 0;
+
+        return tracks.map((track) => {
+            const automationRows = (track.automationLanes || []).map((lane) => ({
+                lane,
+                height: lane.isExpanded ? 60 : 24
+            }));
+
+            const totalHeight = trackHeight + automationRows.reduce((sum, row) => sum + row.height, 0);
+
+            const row: TrackLayoutRow = {
+                track,
+                top: nextTop,
+                totalHeight,
+                automationRows
+            };
+
+            nextTop += totalHeight;
+            return row;
+        });
+    }, [tracks, trackHeight]);
+
+    const totalTracksHeight = useMemo(
+        () => trackRows.reduce((max, row) => Math.max(max, row.top + row.totalHeight), 0),
+        [trackRows]
+    );
+    const totalTimelineHeight = totalTracksHeight + trackHeight;
+
+    const visibleTrackRows = useMemo(() => {
+        const start = Math.max(0, visibleRect.top - TRACK_VIRTUALIZATION_OVERSCAN_PX);
+        const end = visibleRect.top + visibleRect.height + TRACK_VIRTUALIZATION_OVERSCAN_PX;
+
+        return trackRows.filter((row) => {
+            const rowBottom = row.top + row.totalHeight;
+            return rowBottom > start && row.top < end;
+        });
+    }, [trackRows, visibleRect.top, visibleRect.height]);
+
+    const trackTopById = useMemo(() => {
+        const index = new Map<string, number>();
+        trackRows.forEach((row) => {
+            index.set(row.track.id, row.top);
+        });
+        return index;
+    }, [trackRows]);
+
+    const allTrackIds = useMemo(() => trackRows.map((row) => row.track.id), [trackRows]);
+    const visibleTrackIds = useMemo(() => visibleTrackRows.map((row) => row.track.id), [visibleTrackRows]);
+
+    const activeMeterTrackIds = useMemo(() => {
+        const ids = [...visibleTrackIds].slice(0, MAX_ACTIVE_METER_TRACKS);
+
+        if (selectedTrackId && !ids.includes(selectedTrackId)) {
+            if (ids.length >= MAX_ACTIVE_METER_TRACKS) {
+                ids[ids.length - 1] = selectedTrackId;
+            } else {
+                ids.push(selectedTrackId);
+            }
+        }
+
+        if (ids.length > 0) {
+            return ids;
+        }
+
+        return allTrackIds.slice(0, Math.min(12, allTrackIds.length));
+    }, [allTrackIds, selectedTrackId, visibleTrackIds]);
+
+    const activeMeterTrackIdsKey = useMemo(() => activeMeterTrackIds.join('|'), [activeMeterTrackIds]);
+    const allTrackIdsKey = useMemo(() => allTrackIds.join('|'), [allTrackIds]);
+    const clipHoldUntilRef = useRef<Map<string, number>>(new Map());
+
+    useEffect(() => {
+        const validTrackIds = new Set(allTrackIds);
+        trackHeaderMeterStore.prune(validTrackIds);
+
+        if (activeMeterTrackIds.length === 0) {
+            return;
+        }
+
+        let rafId = 0;
+        let lastFrameTime = 0;
+
+        const updateMeters = (timestamp: number) => {
+            const trackLoad = activeMeterTrackIds.length;
+            const playingFps = trackLoad > 96 ? 12 : trackLoad > 48 ? 18 : 24;
+            const idleFps = trackLoad > 96 ? 5 : 8;
+            const minFrameDelta = audioEngine.getIsPlaying() ? (1000 / playingFps) : (1000 / idleFps);
+            if ((timestamp - lastFrameTime) >= minFrameDelta) {
+                lastFrameTime = timestamp;
+                const meterSnapshot = audioEngine.getMeterSnapshot(activeMeterTrackIds);
+                const holdNow = performance.now();
+                const nextBatch: Record<string, TrackHeaderMeterSnapshot> = {};
+
+                activeMeterTrackIds.forEach((trackId) => {
+                    const meter = meterSnapshot.tracks[trackId] || { rmsDb: -72, peakDb: -72 };
+                    const prevHold = clipHoldUntilRef.current.get(trackId) || 0;
+                    const nextHold = meter.peakDb >= -0.3 ? holdNow + 1000 : prevHold;
+
+                    if (nextHold > holdNow) {
+                        clipHoldUntilRef.current.set(trackId, nextHold);
+                    } else {
+                        clipHoldUntilRef.current.delete(trackId);
+                    }
+
+                    nextBatch[trackId] = {
+                        rmsDb: meter.rmsDb,
+                        peakDb: meter.peakDb,
+                        clipped: nextHold > holdNow
+                    };
+                });
+
+                trackHeaderMeterStore.publishBatch(nextBatch);
+            }
+
+            rafId = requestAnimationFrame(updateMeters);
+        };
+
+        rafId = requestAnimationFrame(updateMeters);
+        return () => {
+            cancelAnimationFrame(rafId);
+        };
+    }, [activeMeterTrackIds, activeMeterTrackIdsKey, allTrackIds, allTrackIdsKey]);
 
     // Drag State with Ghost Preview
     const [dragging, setDragging] = useState<{
@@ -1005,7 +1270,14 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
             </div>
 
             {/* Track Rows Container */}
-            <div className="relative bg-[#121212]" >
+            <div
+                className="relative bg-[#121212]"
+                style={{
+                    width: totalLayoutWidth,
+                    minWidth: totalLayoutWidth,
+                    height: totalTimelineHeight
+                }}
+            >
                 <div
                     className="absolute inset-y-0 pointer-events-none z-0"
                     style={{
@@ -1037,95 +1309,110 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
                 </div>
 
                 {
-                    tracks.map(track => (
-                        <React.Fragment key={track.id}>
-                            <TrackLane
-                                track={track}
-                                trackHeight={trackHeight}
-                                zoom={zoom}
-                                totalWidth={totalGridWidth}
-                                isSelected={track.id === selectedTrackId}
-                                onSelect={onTrackSelect}
-                                onUpdate={onTrackUpdate}
-                                onClipUpdate={onClipUpdate}
-                                onDelete={onTrackDelete}
-                                onSeek={onSeek}
-                                onClipSelect={onClipSelect}
-                                onClipMouseDown={handleClipMouseDown}
-                                onContextMenu={handleContextMenu}
-                                onExternalDrop={onExternalDrop}
-                                visibleRect={visibleRect}
-                                gridSize={gridSize}
-                                snapToGrid={snapToGrid}
-                            />
-                            {/* Automation Lanes for this track */}
-                            {track.automationLanes?.map(lane => (
-                                <AutomationLane
-                                    key={lane.id}
-                                    lane={lane}
-                                    trackId={track.id}
-                                    width={totalGridWidth}
-                                    height={lane.isExpanded ? 60 : 24}
+                    visibleTrackRows.map((row) => {
+                        const { track } = row;
+
+                        return (
+                            <div
+                                key={track.id}
+                                className="absolute left-0"
+                                style={{
+                                    top: row.top,
+                                    width: totalLayoutWidth
+                                }}
+                            >
+                                <TrackLane
+                                    track={track}
+                                    trackHeight={trackHeight}
                                     zoom={zoom}
-                                    bars={bars}
-                                    onPointAdd={(laneId, time, value) => {
-                                        const newPoint: AutomationPoint = {
-                                            id: `ap-${Date.now()}`,
-                                            time,
-                                            value,
-                                            curveType: 'linear'
-                                        };
-                                        const updatedLanes = track.automationLanes?.map(l =>
-                                            l.id === laneId
-                                                ? { ...l, points: [...l.points, newPoint].sort((a, b) => a.time - b.time) }
-                                                : l
-                                        );
-                                        onTrackUpdate(track.id, { automationLanes: updatedLanes });
-                                    }}
-                                    onPointMove={(laneId, pointId, time, value) => {
-                                        const updatedLanes = track.automationLanes?.map(l =>
-                                            l.id === laneId
-                                                ? {
-                                                    ...l,
-                                                    points: l.points.map(p =>
-                                                        p.id === pointId ? { ...p, time, value } : p
-                                                    ).sort((a, b) => a.time - b.time)
-                                                }
-                                                : l
-                                        );
-                                        onTrackUpdate(track.id, { automationLanes: updatedLanes });
-                                    }}
-                                    onPointDelete={(laneId, pointId) => {
-                                        const updatedLanes = track.automationLanes?.map(l =>
-                                            l.id === laneId
-                                                ? { ...l, points: l.points.filter(p => p.id !== pointId) }
-                                                : l
-                                        );
-                                        onTrackUpdate(track.id, { automationLanes: updatedLanes });
-                                    }}
-                                    onCurveTypeChange={(laneId, pointId, curveType) => {
-                                        const updatedLanes = track.automationLanes?.map(l =>
-                                            l.id === laneId
-                                                ? {
-                                                    ...l,
-                                                    points: l.points.map(p =>
-                                                        p.id === pointId ? { ...p, curveType } : p
-                                                    )
-                                                }
-                                                : l
-                                        );
-                                        onTrackUpdate(track.id, { automationLanes: updatedLanes });
-                                    }}
-                                    onToggleExpand={(laneId) => {
-                                        const updatedLanes = track.automationLanes?.map(l =>
-                                            l.id === laneId ? { ...l, isExpanded: !l.isExpanded } : l
-                                        );
-                                        onTrackUpdate(track.id, { automationLanes: updatedLanes });
-                                    }}
+                                    totalWidth={totalGridWidth}
+                                    isSelected={track.id === selectedTrackId}
+                                    onSelect={onTrackSelect}
+                                    onUpdate={onTrackUpdate}
+                                    onClipUpdate={onClipUpdate}
+                                    onDelete={onTrackDelete}
+                                    onSeek={onSeek}
+                                    onClipSelect={onClipSelect}
+                                    onClipMouseDown={handleClipMouseDown}
+                                    onContextMenu={handleContextMenu}
+                                    onExternalDrop={onExternalDrop}
+                                    visibleRect={horizontalVisibleRect}
+                                    gridSize={gridSize}
+                                    snapToGrid={snapToGrid}
                                 />
-                            ))}
-                        </React.Fragment>
-                    ))
+
+                                {row.automationRows.map((automationRow) => {
+                                    const lane = automationRow.lane;
+
+                                    return (
+                                        <AutomationLane
+                                            key={lane.id}
+                                            lane={lane}
+                                            trackId={track.id}
+                                            width={totalGridWidth}
+                                            height={automationRow.height}
+                                            zoom={zoom}
+                                            bars={bars}
+                                            onPointAdd={(laneId, time, value) => {
+                                                const newPoint: AutomationPoint = {
+                                                    id: `ap-${Date.now()}`,
+                                                    time,
+                                                    value,
+                                                    curveType: 'linear'
+                                                };
+                                                const updatedLanes = track.automationLanes?.map(l =>
+                                                    l.id === laneId
+                                                        ? { ...l, points: [...l.points, newPoint].sort((a, b) => a.time - b.time) }
+                                                        : l
+                                                );
+                                                onTrackUpdate(track.id, { automationLanes: updatedLanes });
+                                            }}
+                                            onPointMove={(laneId, pointId, time, value) => {
+                                                const updatedLanes = track.automationLanes?.map(l =>
+                                                    l.id === laneId
+                                                        ? {
+                                                            ...l,
+                                                            points: l.points.map(p =>
+                                                                p.id === pointId ? { ...p, time, value } : p
+                                                            ).sort((a, b) => a.time - b.time)
+                                                        }
+                                                        : l
+                                                );
+                                                onTrackUpdate(track.id, { automationLanes: updatedLanes });
+                                            }}
+                                            onPointDelete={(laneId, pointId) => {
+                                                const updatedLanes = track.automationLanes?.map(l =>
+                                                    l.id === laneId
+                                                        ? { ...l, points: l.points.filter(p => p.id !== pointId) }
+                                                        : l
+                                                );
+                                                onTrackUpdate(track.id, { automationLanes: updatedLanes });
+                                            }}
+                                            onCurveTypeChange={(laneId, pointId, curveType) => {
+                                                const updatedLanes = track.automationLanes?.map(l =>
+                                                    l.id === laneId
+                                                        ? {
+                                                            ...l,
+                                                            points: l.points.map(p =>
+                                                                p.id === pointId ? { ...p, curveType } : p
+                                                            )
+                                                        }
+                                                        : l
+                                                );
+                                                onTrackUpdate(track.id, { automationLanes: updatedLanes });
+                                            }}
+                                            onToggleExpand={(laneId) => {
+                                                const updatedLanes = track.automationLanes?.map(l =>
+                                                    l.id === laneId ? { ...l, isExpanded: !l.isExpanded } : l
+                                                );
+                                                onTrackUpdate(track.id, { automationLanes: updatedLanes });
+                                            }}
+                                        />
+                                    );
+                                })}
+                            </div>
+                        );
+                    })
                 }
 
                 {/* === GHOST SNAPPING PREVIEW === */}
@@ -1136,7 +1423,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
                             left: HEADER_WIDTH + ((ghostPosition.bar - 1) * 4 * zoom),
                             width: ghostPosition.clipLength * 4 * zoom,
                             height: trackHeight,
-                            top: tracks.findIndex(t => t.id === ghostPosition.trackId) * trackHeight,
+                            top: trackTopById.get(ghostPosition.trackId) ?? 0,
                         }}
                     >
                         {/* Ghost Clip Visual */}
@@ -1158,7 +1445,14 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
                     </div>
                 )}
 
-                <div className="flex min-w-max" style={{ height: trackHeight, width: totalLayoutWidth }}>
+                <div
+                    className="flex min-w-max absolute left-0"
+                    style={{
+                        top: totalTracksHeight,
+                        height: trackHeight,
+                        width: totalLayoutWidth
+                    }}
+                >
                     <div
                         className="shrink-0 sticky left-0 z-[100] bg-[#1a1a1a] border-r border-daw-border flex flex-col items-center justify-center opacity-60 hover:opacity-100 transition-opacity group shadow-[4px_0_15px_-4px_rgba(0,0,0,0.8)] gap-2 py-4"
                         style={{ width: HEADER_WIDTH }}

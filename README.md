@@ -1,72 +1,106 @@
 <div align="center">
   <img width="800" alt="ETHEREAL STUDIO" src="public/ethereal-banner.svg" />
-  
+
   <br/>
-  
+
   <p>
-    <strong>The Harmonic Convergence of Code and Frequency</strong>
+    <strong>Desktop-first DAW focused on reliability, speed, and pro workflow depth.</strong>
   </p>
-  
+
   <p>
     <a href="#philosophy">Philosophy</a> •
-    <a href="#the-engine">The Engine</a> •
+    <a href="#core-capabilities">Core Capabilities</a> •
     <a href="#getting-started">Getting Started</a> •
-    <a href="#roadmap">Roadmap</a>
+    <a href="#quality-and-performance-gates">Quality and Performance Gates</a>
   </p>
 </div>
 
 <br/>
 
-## The Ethereal Philosophy
+## Philosophy
 
-**ETHEREAL STUDIO** is not merely a Digital Audio Workstation; it is a **resonant environment** designed for the modern sound architect. 
+**ETHEREAL STUDIO** is built as a local-first, desktop-first production environment where stability is a product feature, not an afterthought.
 
-Born from the belief that professional audio tools should be as inspiring as they are rigorous, we have engineered a desktop-first experience that bridges the gap between **expression and precision**. We reject the sterile, gray interfaces of the past in favor of a "Crystal Pipeline" aesthetic—where every signal flow is visible, every vibration is felt, and the software itself feels alive.
+The goal is to feel as immediate as top-tier DAWs while exposing deeper engineering diagnostics for faster iteration and stricter release control.
 
-At its heart lies a commitment to **local-first sovereignty**. Your sound, your instruments, and your processing power belong to you. No cloud dependencies for creativity. Just you and the Ether.
+## Core Capabilities
 
-## The Engine
+### Audio Engine
+- Custom `AudioEngine` on Web Audio + Electron.
+- Dual scheduler modes: `worklet-clock` (AudioWorklet-driven) and `interval` fallback.
+- Incremental graph patching (routing, sends, mix params) to reduce reconnect churn.
+- Granular playback path for warped clips + native path for standard playback.
 
-Underneath the glassmorphic surface beats a highly optimizing, low-latency audio heart built on **Web Audio API** and **Electron**.
+### Performance and Reliability Tooling
+- SR x Buffer reliability matrix in-app (40 cases) with PASS/WARN/FAIL report.
+- Extreme A/B performance benchmark in-app (`interval` vs `worklet-clock`).
+- Performance gate with explicit budgets (drift p95/p99, loop p99, lag p95, win-rate).
+- JSON report export/copy and benchmark history persistence.
 
-### Polyphonic Scanner Support
-A next-generation transcription layer using **Basic Pitch** combined with our proprietary harmonic refinement pass. It doesn't just "hear" notes; it perceives intention, converting raw audio into editable MIDI with nuanced velocity and timing.
+### UI and Session Scale
+- Timeline horizontal and vertical virtualization for large sessions.
+- Centralized metering flow with lower per-track UI overhead.
+- Progressive import pipeline with concurrency control and feedback.
 
-### Granular & Spectral Core
-Our custom `AudioEngine` is built for texture. With native support for granular synthesis and convolution reverb using mathematically generated impulse responses, you can construct soundscapes that defy standard topology.
+## Tech Stack
 
-### The Performer (ASCII Dock)
-The machine is watching. Our unique **AsciiPerformerDock** is a real-time reactive visual companion/visualizer that exists within the CLI and the GUI simultaneously, bridging the gap between the terminal underbelly and the high-fidelity surface.
+- **Core**: React 19 + TypeScript + Vite
+- **Desktop Runtime**: Electron
+- **Audio**: Web Audio API + AudioWorklet
+- **Testing**: Vitest + jsdom
+- **CI**: GitHub Actions quality gates
 
 ## Getting Started
 
 ### Prerequisites
 - **Node.js LTS** (v20+)
-- **Windows x64** (Primary target)
+- **Windows x64** (primary target)
 
-### Initialization
+### Install and Run
 
 ```bash
-# 1. Summon the repository
-git clone https://github.com/aldonovar/ethereal-studio.git
-cd ethereal-studio
-
-# 2. Install dependencies (The Ritual)
 npm install
-
-# 3. Ignite the development environment
 npm run dev:electron
 ```
 
-## Architecture
+### Build
 
-- **Core**: React 19 + TypeScript + Vite
-- **Runtime**: Electron (Windows x64 Optimized)
-- **Audio**: Web Audio API (Custom Graph Implementation)
-- **State**: Reactive Zustand Stores
+```bash
+npm run build
+```
 
-## 📜 License
+## Quality and Performance Gates
+
+Run the core engineering gates locally:
+
+```bash
+npm run typecheck
+npm run test:unit
+npm run build
+```
+
+or all at once:
+
+```bash
+npm run quality:gates
+```
+
+Run performance gate against a benchmark report:
+
+```bash
+npm run perf:gate -- --report benchmarks/audio-performance/latest-report.json
+```
+
+Optional strict mode (treat warnings as failure):
+
+```bash
+npm run perf:gate -- --report benchmarks/audio-performance/latest-report.json --strict-warn
+```
+
+Detailed release/quality protocols are documented in `docs/QUALITY_AND_RELEASE_GATES.md`.
+
+## License
 
 Proprietary & Confidential.
 
-**Developed by [Aldonovar](https://github.com/aldonovar) (with Vibe Coding) and [ALLYX](https://allyxorb.com).**
+Developed by [Aldonovar](https://github.com/aldonovar) and [ALLYX](https://allyxorb.com).

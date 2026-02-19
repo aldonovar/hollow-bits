@@ -1,0 +1,50 @@
+name: Quality Gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  reliability-gates:
+    name: Reliability Gates
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type safety gate
+        run: npm run typecheck
+
+      - name: Unit reliability gate
+        run: npm run test:unit
+
+      - name: Production build gate
+        run: npm run build
+
+      - name: Performance gate (report-driven)
+        if: ${{ hashFiles('benchmarks/audio-performance/latest-report.json') != '' }}
+        run: npm run perf:gate -- --report benchmarks/audio-performance/latest-report.json --out benchmarks/audio-performance/latest-gate.json
+
+      - name: Upload performance gate artifacts
+        if: ${{ always() && hashFiles('benchmarks/audio-performance/latest-report.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-performance-gate
+          path: |
+            benchmarks/audio-performance/latest-report.json
+            benchmarks/audio-performance/latest-gate.json

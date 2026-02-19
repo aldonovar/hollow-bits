@@ -291,7 +291,7 @@ const Browser: React.FC<BrowserProps> = ({ onImport, onImportFromLibrary, onCrea
                         {filteredLibraryFiles.length === 0 ? (
                             <div className="p-4 text-center border border-dashed border-gray-800 rounded-sm mx-2">
                                 <div className="text-[10px] text-gray-500">No hay archivos en el indice.</div>
-                                <div className="text-[9px] text-gray-600 mt-1">Configuralo en Audio/MIDI Settings -&gt; Library</div>
+                                <div className="text-[9px] text-gray-600 mt-1">Configuralo en Configuracion -&gt; Contenido.</div>
                             </div>
                         ) : (
                             <div className="space-y-1">

@@ -8,6 +8,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "perf:gate": "node scripts/audio-performance-gate.mjs",
+    "quality:gates": "npm run typecheck && npm run test:unit && npm run build",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "electron": "electron electron/main.cjs --dev",
@@ -33,8 +38,10 @@
     "concurrently": "^9.2.1",
     "electron": "^40.1.0",
     "electron-builder": "^26.7.0",
+    "jsdom": "^24.1.3",
     "typescript": "~5.8.2",
     "vite": "^6.2.0",
+    "vitest": "^4.0.18",
     "wait-on": "^9.0.3"
   }
 }

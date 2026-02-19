@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     Activity,
     AlertCircle,
@@ -6,12 +6,13 @@ import {
     CheckCircle2,
     ChevronDown,
     Clock3,
+    Copy,
     Cpu,
     FolderOpen,
     Gauge,
     HardDrive,
+    Headphones,
     Piano,
-    Plug,
     RefreshCcw,
     Search,
     SlidersHorizontal,
@@ -21,7 +22,23 @@ import { AudioSettings, ScannedFileEntry } from '../types';
 import { audioEngine, type EngineDiagnostics } from '../services/audioEngine';
 import { midiService, MidiDevice } from '../services/MidiService';
 import { platformService } from '../services/platformService';
-import { loadStudioSettings, saveStudioSettings } from '../services/studioSettingsService';
+import {
+    AudioPerformanceBenchmarkHistoryRecord,
+    DefaultListenMode,
+    loadStudioSettings,
+    saveStudioSettings
+} from '../services/studioSettingsService';
+import {
+    AudioReliabilityMatrixReport,
+    runAudioReliabilityMatrix
+} from '../services/audioReliabilityMatrixService';
+import {
+    createAudioPerformanceBenchmarkHistoryEntry,
+    evaluateAudioPerformanceGate,
+    type AudioPerformanceGateResult,
+    AudioPerformanceBenchmarkReport,
+    runAudioPerformanceBenchmark
+} from '../services/audioPerformanceBenchmarkService';
 
 interface HardwareSettingsModalProps {
     isOpen: boolean;
@@ -31,9 +48,15 @@ interface HardwareSettingsModalProps {
     engineStats: EngineDiagnostics;
 }
 
-type TabId = 'audio' | 'midi' | 'plugins' | 'library';
+type TabId = 'audio' | 'midi' | 'content';
 
-const SAMPLE_RATE_OPTIONS: Array<AudioSettings['sampleRate']> = [44100, 48000, 88200, 96000, 192000];
+const SAMPLE_RATE_OPTIONS: Array<{ value: AudioSettings['sampleRate']; label: string }> = [
+    { value: 44100, label: '44 kHz (44.1k real)' },
+    { value: 48000, label: '48 kHz' },
+    { value: 88200, label: '88 kHz (88.2k real)' },
+    { value: 96000, label: '92 kHz (96k real)' },
+    { value: 192000, label: '196 kHz (192k real)' }
+];
 const BUFFER_OPTIONS: Array<AudioSettings['bufferSize']> = ['auto', 128, 256, 512, 1024, 2048];
 const LATENCY_HINT_OPTIONS: Array<AudioSettings['latencyHint']> = ['interactive', 'balanced', 'playback'];
 
@@ -65,6 +88,28 @@ const prettyBytes = (bytes: number): string => {
 
 const formatLatencyMs = (seconds: number): string => `${(seconds * 1000).toFixed(1)} ms`;
 
+const DEFAULT_LISTENING_OPTIONS: Array<{
+    id: DefaultListenMode;
+    label: string;
+    description: string;
+}> = [
+    {
+        id: 'manual',
+        label: 'Manual',
+        description: 'Las pistas nuevas nacen en Auto sin monitor activo.'
+    },
+    {
+        id: 'armed',
+        label: 'Al armar',
+        description: 'Monitor activo solo cuando la pista esta armada.'
+    },
+    {
+        id: 'always',
+        label: 'Siempre',
+        description: 'Monitor activo permanente en pistas nuevas.'
+    }
+];
+
 const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
     isOpen,
     onClose,
@@ -82,6 +127,7 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
     const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([]);
     const [isRefreshingAudioDevices, setIsRefreshingAudioDevices] = useState(false);
     const [isRestartingAudio, setIsRestartingAudio] = useState(false);
+    const [schedulerModeDraft, setSchedulerModeDraft] = useState<'interval' | 'worklet-clock'>(() => audioEngine.getSchedulerMode());
 
     const [midiDevices, setMidiDevices] = useState<MidiDevice[]>([]);
     const [midiActivity, setMidiActivity] = useState<Record<string, number>>({});
@@ -92,6 +138,21 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
     const [libraryIndex, setLibraryIndex] = useState<ScannedFileEntry[]>([]);
     const [isScanningPlugins, setIsScanningPlugins] = useState(false);
     const [isScanningLibrary, setIsScanningLibrary] = useState(false);
+    const [defaultListenMode, setDefaultListenMode] = useState<DefaultListenMode>('manual');
+    const [isRunningReliabilityMatrix, setIsRunningReliabilityMatrix] = useState(false);
+    const [matrixProgressTotal, setMatrixProgressTotal] = useState(0);
+    const [matrixProgressCompleted, setMatrixProgressCompleted] = useState(0);
+    const [matrixCurrentCaseLabel, setMatrixCurrentCaseLabel] = useState<string | null>(null);
+    const [matrixReport, setMatrixReport] = useState<AudioReliabilityMatrixReport | null>(null);
+    const matrixAbortRef = useRef<AbortController | null>(null);
+    const [isRunningPerformanceBenchmark, setIsRunningPerformanceBenchmark] = useState(false);
+    const [benchmarkProgressTotal, setBenchmarkProgressTotal] = useState(0);
+    const [benchmarkProgressCompleted, setBenchmarkProgressCompleted] = useState(0);
+    const [benchmarkCurrentCaseLabel, setBenchmarkCurrentCaseLabel] = useState<string | null>(null);
+    const [benchmarkReport, setBenchmarkReport] = useState<AudioPerformanceBenchmarkReport | null>(null);
+    const [benchmarkGate, setBenchmarkGate] = useState<AudioPerformanceGateResult | null>(null);
+    const [benchmarkHistory, setBenchmarkHistory] = useState<AudioPerformanceBenchmarkHistoryRecord[]>([]);
+    const benchmarkAbortRef = useRef<AbortController | null>(null);
 
     const [statusTone, setStatusTone] = useState<'ok' | 'warn' | 'error' | null>(null);
     const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -125,7 +186,9 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
 
         setIsRendered(true);
         setDraftAudio(audioSettings);
+        setSchedulerModeDraft(audioEngine.getSchedulerMode());
         setActiveTab('audio');
+        setBenchmarkGate(null);
         setStatusTone(null);
         setStatusMessage(null);
 
@@ -134,6 +197,8 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
         setLibraryFolders(studioSettings.libraryFolders);
         setPluginIndex(studioSettings.pluginIndex);
         setLibraryIndex(studioSettings.libraryIndex);
+        setBenchmarkHistory(studioSettings.benchmarkHistory);
+        setDefaultListenMode(studioSettings.defaultListenMode);
 
         const showTimer = window.setTimeout(() => setIsVisible(true), 24);
         return () => clearTimeout(showTimer);
@@ -146,9 +211,28 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
             libraryFolders,
             pluginIndex,
             libraryIndex,
+            benchmarkHistory,
+            defaultListenMode,
             updatedAt: Date.now()
         });
-    }, [isRendered, libraryFolders, libraryIndex, pluginFolders, pluginIndex]);
+    }, [benchmarkHistory, defaultListenMode, isRendered, libraryFolders, libraryIndex, pluginFolders, pluginIndex]);
+
+    useEffect(() => {
+        return () => {
+            matrixAbortRef.current?.abort();
+            benchmarkAbortRef.current?.abort();
+        };
+    }, []);
+
+    const matrixProgressPercent = useMemo(() => {
+        if (matrixProgressTotal <= 0) return 0;
+        return Math.round((matrixProgressCompleted / matrixProgressTotal) * 100);
+    }, [matrixProgressCompleted, matrixProgressTotal]);
+
+    const benchmarkProgressPercent = useMemo(() => {
+        if (benchmarkProgressTotal <= 0) return 0;
+        return Math.round((benchmarkProgressCompleted / benchmarkProgressTotal) * 100);
+    }, [benchmarkProgressCompleted, benchmarkProgressTotal]);
 
     const refreshAudioDevices = async () => {
         setIsRefreshingAudioDevices(true);
@@ -265,6 +349,179 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
         }
     };
 
+    const runReliabilityMatrix = async () => {
+        if (isRunningReliabilityMatrix) return;
+
+        setIsRunningReliabilityMatrix(true);
+        setMatrixReport(null);
+        setMatrixProgressTotal(0);
+        setMatrixProgressCompleted(0);
+        setMatrixCurrentCaseLabel(null);
+        setStatusTone('warn');
+        setStatusMessage('Ejecutando matriz SR x Buffer. El motor se reiniciara de forma controlada.');
+
+        const abortController = new AbortController();
+        matrixAbortRef.current = abortController;
+
+        try {
+            const report = await runAudioReliabilityMatrix({
+                signal: abortController.signal,
+                onProgress: ({ totalCases, completedCases, runningCaseLabel }) => {
+                    setMatrixProgressTotal(totalCases);
+                    setMatrixProgressCompleted(completedCases);
+                    setMatrixCurrentCaseLabel(runningCaseLabel);
+                }
+            });
+
+            setMatrixReport(report);
+
+            const elapsedSeconds = (report.elapsedMs / 1000).toFixed(1);
+            if (report.restoreFailed) {
+                setStatusTone('error');
+                setStatusMessage(`Matriz completada con error de restauracion (${elapsedSeconds}s). ${report.restoreError || ''}`.trim());
+            } else if (report.aborted) {
+                setStatusTone('warn');
+                setStatusMessage(`Matriz cancelada por usuario tras ${report.results.length}/${report.totalCases} casos (${elapsedSeconds}s).`);
+            } else if (report.failedCases > 0) {
+                setStatusTone('error');
+                setStatusMessage(`Matriz completada con fallos: ${report.failedCases} fail, ${report.warnedCases} warn, ${report.passedCases} pass (${elapsedSeconds}s).`);
+            } else if (report.warnedCases > 0) {
+                setStatusTone('warn');
+                setStatusMessage(`Matriz completada sin fallos criticos: ${report.warnedCases} casos con warning, ${report.passedCases} pass (${elapsedSeconds}s).`);
+            } else {
+                setStatusTone('ok');
+                setStatusMessage(`Matriz completada en excelencia tecnica: ${report.passedCases}/${report.totalCases} casos PASS (${elapsedSeconds}s).`);
+            }
+        } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+                setStatusTone('warn');
+                setStatusMessage('Matriz cancelada por usuario.');
+            } else {
+                console.error('No se pudo ejecutar la matriz de confiabilidad.', error);
+                setStatusTone('error');
+                setStatusMessage('No se pudo ejecutar la matriz SR x Buffer.');
+            }
+        } finally {
+            if (matrixAbortRef.current === abortController) {
+                matrixAbortRef.current = null;
+            }
+            setMatrixCurrentCaseLabel(null);
+            setIsRunningReliabilityMatrix(false);
+        }
+    };
+
+    const cancelReliabilityMatrix = () => {
+        matrixAbortRef.current?.abort();
+    };
+
+    const runPerformanceBenchmark = async () => {
+        if (isRunningPerformanceBenchmark) return;
+
+        setIsRunningPerformanceBenchmark(true);
+        setBenchmarkReport(null);
+        setBenchmarkGate(null);
+        setBenchmarkProgressTotal(0);
+        setBenchmarkProgressCompleted(0);
+        setBenchmarkCurrentCaseLabel(null);
+        setStatusTone('warn');
+        setStatusMessage('Ejecutando benchmark extremo A/B (interval vs worklet clock).');
+
+        const abortController = new AbortController();
+        benchmarkAbortRef.current = abortController;
+
+        try {
+            const report = await runAudioPerformanceBenchmark({
+                signal: abortController.signal,
+                onProgress: ({ totalCases, completedCases, runningCaseLabel }) => {
+                    setBenchmarkProgressTotal(totalCases);
+                    setBenchmarkProgressCompleted(completedCases);
+                    setBenchmarkCurrentCaseLabel(runningCaseLabel);
+                }
+            });
+
+            setBenchmarkReport(report);
+            const gate = evaluateAudioPerformanceGate(report);
+            setBenchmarkGate(gate);
+            const historyEntry = createAudioPerformanceBenchmarkHistoryEntry(report, gate);
+            setBenchmarkHistory((prev) => [historyEntry, ...prev].slice(0, 30));
+
+            const elapsedSeconds = (report.elapsedMs / 1000).toFixed(1);
+            if (report.restoreFailed) {
+                setStatusTone('error');
+                setStatusMessage(`Benchmark completado con error de restauracion (${elapsedSeconds}s). ${report.restoreError || ''}`.trim());
+            } else if (report.aborted) {
+                setStatusTone('warn');
+                setStatusMessage(`Benchmark cancelado tras ${report.results.length}/${report.totalCases} escenarios (${elapsedSeconds}s).`);
+            } else if (gate.status === 'fail') {
+                setStatusTone('error');
+                setStatusMessage(`Benchmark completado con gate FAIL: ${gate.failures[0] || 'presupuesto excedido'} (${elapsedSeconds}s).`);
+            } else if (gate.status === 'warn') {
+                setStatusTone('warn');
+                setStatusMessage(`Benchmark completado con warnings de gate: ${gate.warnings[0] || 'revision recomendada'} (${elapsedSeconds}s).`);
+            } else {
+                setStatusTone('ok');
+                setStatusMessage(`Benchmark extremo completado en PASS: ${report.passedCases}/${report.totalCases} casos (${elapsedSeconds}s).`);
+            }
+        } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+                setStatusTone('warn');
+                setStatusMessage('Benchmark cancelado por usuario.');
+            } else {
+                console.error('No se pudo ejecutar benchmark de performance.', error);
+                setStatusTone('error');
+                setStatusMessage('No se pudo ejecutar benchmark extremo de performance.');
+            }
+        } finally {
+            if (benchmarkAbortRef.current === abortController) {
+                benchmarkAbortRef.current = null;
+            }
+            setBenchmarkCurrentCaseLabel(null);
+            setIsRunningPerformanceBenchmark(false);
+        }
+    };
+
+    const cancelPerformanceBenchmark = () => {
+        benchmarkAbortRef.current?.abort();
+    };
+
+    const applySchedulerMode = () => {
+        audioEngine.setSchedulerMode(schedulerModeDraft);
+        setStatusTone('ok');
+        setStatusMessage(`Scheduler mode aplicado: ${schedulerModeDraft}.`);
+    };
+
+    const copyJsonReport = async (label: string, payload: unknown) => {
+        try {
+            const text = JSON.stringify(payload, null, 2);
+            await navigator.clipboard.writeText(text);
+            setStatusTone('ok');
+            setStatusMessage(`${label} copiado al portapapeles.`);
+        } catch (error) {
+            console.error(`No se pudo copiar ${label}.`, error);
+            setStatusTone('error');
+            setStatusMessage(`No se pudo copiar ${label}.`);
+        }
+    };
+
+    const exportJsonReport = (baseName: string, payload: unknown) => {
+        try {
+            const text = JSON.stringify(payload, null, 2);
+            const blob = new Blob([text], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = `${baseName}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+            anchor.click();
+            URL.revokeObjectURL(url);
+            setStatusTone('ok');
+            setStatusMessage(`${baseName} exportado como JSON.`);
+        } catch (error) {
+            console.error(`No se pudo exportar ${baseName}.`, error);
+            setStatusTone('error');
+            setStatusMessage(`No se pudo exportar ${baseName}.`);
+        }
+    };
+
     const addFolder = async (target: 'plugins' | 'library') => {
         const folder = await platformService.selectDirectory();
         if (!folder) return;
@@ -359,7 +616,7 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
     };
 
     const closeModal = () => {
-        if (isScanningLibrary || isScanningPlugins || isRestartingAudio) return;
+        if (isScanningLibrary || isScanningPlugins || isRestartingAudio || isRunningReliabilityMatrix || isRunningPerformanceBenchmark) return;
         onClose();
     };
 
@@ -383,10 +640,9 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                     </div>
 
                     <div className="p-3 space-y-1.5">
-                        <TabButton id="audio" label="Audio Engine" subLabel="I/O · Latencia · Calidad" icon={Cpu} active={activeTab === 'audio'} onClick={setActiveTab} />
+                        <TabButton id="audio" label="Audio" subLabel="I/O · Latencia · Escucha" icon={Cpu} active={activeTab === 'audio'} onClick={setActiveTab} />
                         <TabButton id="midi" label="MIDI" subLabel="Controladores y actividad" icon={Piano} active={activeTab === 'midi'} onClick={setActiveTab} />
-                        <TabButton id="plugins" label="Plugins" subLabel="Rutas y escaneo" icon={Plug} active={activeTab === 'plugins'} onClick={setActiveTab} />
-                        <TabButton id="library" label="Library" subLabel="Rutas y catalogo" icon={HardDrive} active={activeTab === 'library'} onClick={setActiveTab} />
+                        <TabButton id="content" label="Contenido" subLabel="Plugins + Libreria" icon={HardDrive} active={activeTab === 'content'} onClick={setActiveTab} />
                     </div>
 
                     <div className="mt-auto p-4 border-t border-white/10 bg-white/[0.01]">
@@ -402,10 +658,9 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                     <header className="h-14 px-5 border-b border-white/10 flex items-center justify-between bg-[#10121b]">
                         <div>
                             <h2 className="text-sm font-semibold text-white">
-                                {activeTab === 'audio' && 'Audio Engine'}
+                                {activeTab === 'audio' && 'Audio Setup'}
                                 {activeTab === 'midi' && 'MIDI Controller Hub'}
-                                {activeTab === 'plugins' && 'Plugin Manager'}
-                                {activeTab === 'library' && 'Library Manager'}
+                                {activeTab === 'content' && 'Gestor de Contenido'}
                             </h2>
                             <p className="text-[10px] text-gray-500 uppercase tracking-wider">Flujo directo, sin pasos ocultos</p>
                         </div>
@@ -442,6 +697,308 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                     />
                                 </div>
 
+                                <div className="rounded-sm border border-white/10 bg-[#131620] p-4 space-y-3">
+                                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-gray-500">
+                                        <Headphones size={12} /> Escucha por defecto
+                                    </div>
+                                    <p className="text-xs text-gray-300">Define como nacen las pistas de audio nuevas para mantener un flujo coherente en todo el proyecto.</p>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                                        {DEFAULT_LISTENING_OPTIONS.map((option) => (
+                                            <button
+                                                key={option.id}
+                                                onClick={() => setDefaultListenMode(option.id)}
+                                                className={`rounded-sm border px-3 py-2 text-left transition-colors ${defaultListenMode === option.id
+                                                    ? 'border-daw-cyan/50 bg-daw-cyan/10 text-white'
+                                                    : 'border-white/10 bg-[#0f1320] text-gray-300 hover:border-white/25 hover:text-white'}`}
+                                            >
+                                                <div className="text-[11px] font-bold uppercase tracking-wider">{option.label}</div>
+                                                <div className="mt-1 text-[10px] text-gray-500">{option.description}</div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="rounded-sm border border-white/10 bg-[#131620] p-4 space-y-3">
+                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                        <div>
+                                            <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-gray-500">
+                                                <Gauge size={12} /> Matriz de confiabilidad SR x Buffer
+                                            </div>
+                                            <p className="text-xs text-gray-300 mt-1">Ejecuta validacion automatica en 40 combinaciones de sample rate + buffer y comprueba estabilidad de render.</p>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {isRunningReliabilityMatrix && (
+                                                <button
+                                                    onClick={cancelReliabilityMatrix}
+                                                    className="h-8 px-3 rounded-sm border border-red-500/35 bg-red-500/10 text-[10px] font-bold uppercase tracking-wider text-red-300 hover:text-red-200"
+                                                >
+                                                    Cancelar
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => void runReliabilityMatrix()}
+                                                disabled={isRunningReliabilityMatrix}
+                                                className="h-8 px-3 rounded-sm border border-daw-cyan/45 bg-daw-cyan/10 text-[10px] font-bold uppercase tracking-wider text-daw-cyan hover:text-white disabled:opacity-40"
+                                            >
+                                                    {isRunningReliabilityMatrix ? 'Validando...' : 'Run Matrix'}
+                                                </button>
+                                            {matrixReport && (
+                                                <>
+                                                    <button
+                                                        onClick={() => void copyJsonReport('Reporte de matriz', matrixReport)}
+                                                        className="h-8 px-3 rounded-sm border border-white/20 bg-[#171b28] text-[10px] font-bold uppercase tracking-wider text-gray-200 hover:text-white flex items-center gap-1"
+                                                    >
+                                                        <Copy size={11} /> Copiar JSON
+                                                    </button>
+                                                    <button
+                                                        onClick={() => exportJsonReport('audio-reliability-matrix', matrixReport)}
+                                                        className="h-8 px-3 rounded-sm border border-white/20 bg-[#171b28] text-[10px] font-bold uppercase tracking-wider text-gray-200 hover:text-white"
+                                                    >
+                                                        Export JSON
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {(isRunningReliabilityMatrix || matrixReport) && (
+                                        <div className="rounded-sm border border-white/10 bg-[#0f1320] p-3 space-y-3">
+                                            <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-500">
+                                                <span>Progreso</span>
+                                                <span className="font-mono text-gray-300">{matrixProgressCompleted}/{matrixProgressTotal || matrixReport?.totalCases || 0} ({matrixProgressPercent}%)</span>
+                                            </div>
+
+                                            <div className="h-2 rounded-full bg-black/40 overflow-hidden">
+                                                <div
+                                                    className="h-full bg-gradient-to-r from-daw-cyan/80 to-daw-violet/80 transition-all duration-300"
+                                                    style={{ width: `${matrixProgressPercent}%` }}
+                                                />
+                                            </div>
+
+                                            {matrixCurrentCaseLabel && (
+                                                <div className="text-[10px] text-gray-400">Caso actual: <span className="font-mono text-gray-200">{matrixCurrentCaseLabel}</span></div>
+                                            )}
+
+                                            {matrixReport && (
+                                                <div className="space-y-2">
+                                                    <div className="grid grid-cols-3 gap-2">
+                                                        <div className="rounded-sm border border-green-500/25 bg-green-500/10 px-2 py-1">
+                                                            <div className="text-[9px] uppercase tracking-wider text-green-300">Pass</div>
+                                                            <div className="text-sm font-bold text-green-200">{matrixReport.passedCases}</div>
+                                                        </div>
+                                                        <div className="rounded-sm border border-amber-500/25 bg-amber-500/10 px-2 py-1">
+                                                            <div className="text-[9px] uppercase tracking-wider text-amber-300">Warn</div>
+                                                            <div className="text-sm font-bold text-amber-200">{matrixReport.warnedCases}</div>
+                                                        </div>
+                                                        <div className="rounded-sm border border-red-500/25 bg-red-500/10 px-2 py-1">
+                                                            <div className="text-[9px] uppercase tracking-wider text-red-300">Fail</div>
+                                                            <div className="text-sm font-bold text-red-200">{matrixReport.failedCases}</div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="max-h-44 overflow-y-auto custom-scrollbar space-y-1 pr-1">
+                                                        {matrixReport.results.map((result) => (
+                                                            <div
+                                                                key={result.caseConfig.id}
+                                                                className={`rounded-sm border px-2 py-1.5 text-[10px] ${result.status === 'pass'
+                                                                    ? 'border-green-500/25 bg-green-500/10 text-green-100'
+                                                                    : result.status === 'warn'
+                                                                        ? 'border-amber-500/25 bg-amber-500/10 text-amber-100'
+                                                                        : 'border-red-500/25 bg-red-500/10 text-red-100'}`}
+                                                            >
+                                                                <div className="flex items-center justify-between gap-2">
+                                                                    <span className="font-mono">{Math.round(result.caseConfig.sampleRate / 100) / 10}kHz / {String(result.caseConfig.bufferSize)}</span>
+                                                                    <span className="uppercase tracking-wider">{result.status}</span>
+                                                                </div>
+                                                                <div className="mt-0.5 text-[9px] opacity-80">
+                                                                    activo {result.diagnostics.activeSampleRate}Hz · buffer {result.diagnostics.effectiveBufferSize} · peak {result.render.peakDb.toFixed(1)} dBFS
+                                                                </div>
+                                                                {result.issues[0] && (
+                                                                    <div className="mt-0.5 text-[9px] opacity-90">{result.issues[0]}</div>
+                                                                )}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="rounded-sm border border-white/10 bg-[#131620] p-4 space-y-3">
+                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                        <div>
+                                            <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-gray-500">
+                                                <Cpu size={12} /> Benchmark extremo A/B scheduler
+                                            </div>
+                                            <p className="text-xs text-gray-300 mt-1">Compara scheduler interval vs worklet-clock en escenarios medium/high/extreme y reporta jitter p95/p99, event-loop lag y writes de grafo.</p>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {isRunningPerformanceBenchmark && (
+                                                <button
+                                                    onClick={cancelPerformanceBenchmark}
+                                                    className="h-8 px-3 rounded-sm border border-red-500/35 bg-red-500/10 text-[10px] font-bold uppercase tracking-wider text-red-300 hover:text-red-200"
+                                                >
+                                                    Cancelar
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => void runPerformanceBenchmark()}
+                                                disabled={isRunningPerformanceBenchmark}
+                                                className="h-8 px-3 rounded-sm border border-daw-violet/45 bg-daw-violet/10 text-[10px] font-bold uppercase tracking-wider text-violet-200 hover:text-white disabled:opacity-40"
+                                            >
+                                                {isRunningPerformanceBenchmark ? 'Bench Running...' : 'Run Benchmark'}
+                                            </button>
+                                            {benchmarkReport && (
+                                                <>
+                                                    <button
+                                                        onClick={() => void copyJsonReport('Reporte benchmark', benchmarkReport)}
+                                                        className="h-8 px-3 rounded-sm border border-white/20 bg-[#171b28] text-[10px] font-bold uppercase tracking-wider text-gray-200 hover:text-white flex items-center gap-1"
+                                                    >
+                                                        <Copy size={11} /> Copiar JSON
+                                                    </button>
+                                                    <button
+                                                        onClick={() => exportJsonReport('audio-performance-benchmark', benchmarkReport)}
+                                                        className="h-8 px-3 rounded-sm border border-white/20 bg-[#171b28] text-[10px] font-bold uppercase tracking-wider text-gray-200 hover:text-white"
+                                                    >
+                                                        Export JSON
+                                                    </button>
+                                                </>
+                                            )}
+                                            {benchmarkHistory.length > 0 && (
+                                                <button
+                                                    onClick={() => {
+                                                        setBenchmarkHistory([]);
+                                                        setStatusTone('ok');
+                                                        setStatusMessage('Historial de benchmark limpiado.');
+                                                    }}
+                                                    className="h-8 px-3 rounded-sm border border-white/20 bg-[#171b28] text-[10px] font-bold uppercase tracking-wider text-gray-200 hover:text-white"
+                                                >
+                                                    Limpiar Historial
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {(isRunningPerformanceBenchmark || benchmarkReport || benchmarkHistory.length > 0) && (
+                                        <div className="rounded-sm border border-white/10 bg-[#0f1320] p-3 space-y-3">
+                                            {(isRunningPerformanceBenchmark || benchmarkReport) && (
+                                                <>
+                                                    <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-500">
+                                                        <span>Progreso</span>
+                                                        <span className="font-mono text-gray-300">{benchmarkProgressCompleted}/{benchmarkProgressTotal || benchmarkReport?.totalCases || 0} ({benchmarkProgressPercent}%)</span>
+                                                    </div>
+
+                                                    <div className="h-2 rounded-full bg-black/40 overflow-hidden">
+                                                        <div
+                                                            className="h-full bg-gradient-to-r from-violet-500/80 to-cyan-500/80 transition-all duration-300"
+                                                            style={{ width: `${benchmarkProgressPercent}%` }}
+                                                        />
+                                                    </div>
+
+                                                    {benchmarkCurrentCaseLabel && (
+                                                        <div className="text-[10px] text-gray-400">Escenario actual: <span className="font-mono text-gray-200">{benchmarkCurrentCaseLabel}</span></div>
+                                                    )}
+                                                </>
+                                            )}
+
+                                            {benchmarkReport && (
+                                                <div className="space-y-2">
+                                                    <div className="grid grid-cols-3 gap-2">
+                                                        <div className="rounded-sm border border-green-500/25 bg-green-500/10 px-2 py-1">
+                                                            <div className="text-[9px] uppercase tracking-wider text-green-300">Pass</div>
+                                                            <div className="text-sm font-bold text-green-200">{benchmarkReport.passedCases}</div>
+                                                        </div>
+                                                        <div className="rounded-sm border border-amber-500/25 bg-amber-500/10 px-2 py-1">
+                                                            <div className="text-[9px] uppercase tracking-wider text-amber-300">Warn</div>
+                                                            <div className="text-sm font-bold text-amber-200">{benchmarkReport.warnedCases}</div>
+                                                        </div>
+                                                        <div className="rounded-sm border border-red-500/25 bg-red-500/10 px-2 py-1">
+                                                            <div className="text-[9px] uppercase tracking-wider text-red-300">Fail</div>
+                                                            <div className="text-sm font-bold text-red-200">{benchmarkReport.failedCases}</div>
+                                                        </div>
+                                                    </div>
+
+                                                    {benchmarkGate && (
+                                                        <div className={`rounded-sm border px-2 py-2 ${benchmarkGate.status === 'pass'
+                                                            ? 'border-green-500/30 bg-green-500/10 text-green-100'
+                                                            : benchmarkGate.status === 'warn'
+                                                                ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+                                                                : 'border-red-500/30 bg-red-500/10 text-red-100'}`}>
+                                                            <div className="text-[9px] uppercase tracking-wider">
+                                                                Performance Gate · {benchmarkGate.status.toUpperCase()}
+                                                            </div>
+                                                            <div className="mt-0.5 text-[9px] opacity-90">
+                                                                drift p95 {benchmarkGate.summary.maxWorkletP95TickDriftMs.toFixed(1)}ms · drift p99 {benchmarkGate.summary.maxWorkletP99TickDriftMs.toFixed(1)}ms · lag p95 {benchmarkGate.summary.maxWorkletP95LagMs.toFixed(1)}ms · win-rate {(benchmarkGate.summary.workletWinRate * 100).toFixed(1)}%
+                                                            </div>
+                                                            {benchmarkGate.issues[0] && (
+                                                                <div className="mt-0.5 text-[9px] opacity-95">{benchmarkGate.issues[0]}</div>
+                                                            )}
+                                                        </div>
+                                                    )}
+
+                                                    {benchmarkReport.comparisons.length > 0 && (
+                                                        <div className="rounded-sm border border-white/10 bg-black/25 p-2 space-y-1">
+                                                            <div className="text-[9px] uppercase tracking-wider text-gray-400">A/B Interval vs Worklet</div>
+                                                            {benchmarkReport.comparisons.map((comparison) => (
+                                                                <div key={comparison.scenarioKey} className="text-[9px] text-gray-200 flex items-center justify-between gap-2">
+                                                                    <span className="font-mono uppercase">{comparison.scenarioKey}</span>
+                                                                    <span>
+                                                                        winner <b>{comparison.winner}</b> · drift p95 delta {comparison.driftP95ImprovementMs.toFixed(1)}ms · lag p95 delta {comparison.lagP95ImprovementMs.toFixed(1)}ms
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+
+                                                    <div className="max-h-44 overflow-y-auto custom-scrollbar space-y-1 pr-1">
+                                                        {benchmarkReport.results.map((result) => (
+                                                            <div
+                                                                key={result.caseConfig.id}
+                                                                className={`rounded-sm border px-2 py-1.5 text-[10px] ${result.status === 'pass'
+                                                                    ? 'border-green-500/25 bg-green-500/10 text-green-100'
+                                                                    : result.status === 'warn'
+                                                                        ? 'border-amber-500/25 bg-amber-500/10 text-amber-100'
+                                                                        : 'border-red-500/25 bg-red-500/10 text-red-100'}`}
+                                                            >
+                                                                <div className="flex items-center justify-between gap-2">
+                                                                    <span className="font-mono">{result.caseConfig.label}</span>
+                                                                    <span className="uppercase tracking-wider">{result.status}</span>
+                                                                </div>
+                                                                <div className="mt-0.5 text-[9px] opacity-80">
+                                                                    {result.metrics.scheduler.mode} · drift p95 {result.metrics.scheduler.p95TickDriftMs.toFixed(1)}ms · loop p99 {result.metrics.scheduler.p99LoopMs.toFixed(1)}ms · lag p95 {result.metrics.eventLoop.p95LagMs.toFixed(1)}ms
+                                                                </div>
+                                                                <div className="mt-0.5 text-[9px] opacity-80">
+                                                                    graph writes mix {result.metrics.graphUpdate.mixParamWrites} · sends {result.metrics.graphUpdate.sendLevelWrites}
+                                                                </div>
+                                                                {result.issues[0] && (
+                                                                    <div className="mt-0.5 text-[9px] opacity-90">{result.issues[0]}</div>
+                                                                )}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {benchmarkHistory.length > 0 && (
+                                                <div className="rounded-sm border border-white/10 bg-[#0d111d] p-2 space-y-1">
+                                                    <div className="text-[9px] uppercase tracking-wider text-gray-400">Historial reciente benchmark</div>
+                                                    <div className="max-h-24 overflow-y-auto custom-scrollbar pr-1 space-y-1">
+                                                        {benchmarkHistory.slice(0, 8).map((entry) => (
+                                                            <div key={entry.id} className="text-[9px] text-gray-200 flex items-center justify-between gap-2 border border-white/10 rounded-sm px-2 py-1 bg-black/20">
+                                                                <span className="font-mono">{new Date(entry.createdAt).toLocaleString()}</span>
+                                                                <span className="uppercase">{entry.gateStatus}</span>
+                                                                <span>win {(entry.workletWinRate * 100).toFixed(0)}%</span>
+                                                                <span>d95 {entry.maxWorkletP95TickDriftMs.toFixed(1)}ms</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <SelectField
                                         label="Input Device"
@@ -468,9 +1025,9 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                         label="Sample Rate"
                                         value={String(draftAudio.sampleRate)}
                                         onChange={(value) => updateAudioField('sampleRate', Number(value) as AudioSettings['sampleRate'])}
-                                        options={SAMPLE_RATE_OPTIONS.map((sampleRate) => ({
-                                            value: String(sampleRate),
-                                            label: `${sampleRate} Hz`
+                                        options={SAMPLE_RATE_OPTIONS.map((option) => ({
+                                            value: String(option.value),
+                                            label: option.label
                                         }))}
                                     />
 
@@ -495,6 +1052,31 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                     />
                                 </div>
 
+                                <div className="rounded-sm border border-white/10 bg-[#131620] p-4 space-y-3">
+                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                        <div>
+                                            <div className="text-[10px] uppercase tracking-wider text-gray-500">Scheduler Clock Mode</div>
+                                            <p className="text-xs text-gray-300 mt-1">Selecciona el driver de scheduler para el engine en tiempo real: interval tradicional o reloj por AudioWorklet.</p>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <select
+                                                value={schedulerModeDraft}
+                                                onChange={(event) => setSchedulerModeDraft(event.target.value as 'interval' | 'worklet-clock')}
+                                                className="h-9 rounded-sm border border-white/10 bg-[#12141b] px-3 text-xs text-gray-200 outline-none focus:border-daw-violet/60"
+                                            >
+                                                <option value="worklet-clock">Worklet Clock (recommended)</option>
+                                                <option value="interval">Interval Fallback</option>
+                                            </select>
+                                            <button
+                                                onClick={applySchedulerMode}
+                                                className="h-9 px-3 rounded-sm border border-daw-cyan/45 bg-daw-cyan/10 text-[10px] font-bold uppercase tracking-wider text-daw-cyan hover:text-white"
+                                            >
+                                                Aplicar Scheduler
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
                                     <MetricCard label="Engine Rate" value={`${Math.round(engineStats.sampleRate)} Hz`} icon={AudioLines} />
                                     <MetricCard label="Current Latency" value={formatLatencyMs(engineStats.latency)} icon={Clock3} />
@@ -509,6 +1091,19 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                         value={(engineStats.bufferStrategy || 'n/a').toUpperCase()}
                                         icon={Activity}
                                     />
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                    <MetricCard label="Scheduler Mode" value={(engineStats.schedulerMode || 'n/a').toUpperCase()} icon={Cpu} />
+                                    <MetricCard label="Tick Drift P95" value={`${(engineStats.schedulerP95TickDriftMs || 0).toFixed(1)} ms`} icon={Clock3} />
+                                    <MetricCard label="Tick Drift P99" value={`${(engineStats.schedulerP99TickDriftMs || 0).toFixed(1)} ms`} icon={Clock3} />
+                                    <MetricCard label="Loop P99" value={`${(engineStats.schedulerP99LoopMs || 0).toFixed(1)} ms`} icon={Activity} />
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    <MetricCard label="Queue Entries" value={`${Math.round(engineStats.schedulerQueueEntries || 0)}`} icon={Gauge} />
+                                    <MetricCard label="Queue Active" value={`${Math.round(engineStats.schedulerQueueActive || 0)}`} icon={Cpu} />
+                                    <MetricCard label="Queue Cand P95" value={`${(engineStats.schedulerQueueP95Candidates || 0).toFixed(1)}`} icon={Activity} />
                                 </div>
 
                                 {engineStats.sampleRateMismatch && (
@@ -616,34 +1211,34 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                             </div>
                         )}
 
-                        {activeTab === 'plugins' && (
-                            <ScanManagerSection
-                                title="Plugin Folders"
-                                hint="Escanea VST3 y DLL para construir un indice navegable."
-                                folders={pluginFolders}
-                                entries={pluginIndex}
-                                isDesktop={isDesktop}
-                                isScanning={isScanningPlugins}
-                                totalSize={pluginSize}
-                                onAddFolder={() => void addFolder('plugins')}
-                                onRemoveFolder={(folder) => removeFolder('plugins', folder)}
-                                onScan={() => void scanFolders('plugins')}
-                            />
-                        )}
+                        {activeTab === 'content' && (
+                            <div className="space-y-5">
+                                <ScanManagerSection
+                                    title="Plugin Folders"
+                                    hint="Escanea VST3 y DLL para construir un indice navegable."
+                                    folders={pluginFolders}
+                                    entries={pluginIndex}
+                                    isDesktop={isDesktop}
+                                    isScanning={isScanningPlugins}
+                                    totalSize={pluginSize}
+                                    onAddFolder={() => void addFolder('plugins')}
+                                    onRemoveFolder={(folder) => removeFolder('plugins', folder)}
+                                    onScan={() => void scanFolders('plugins')}
+                                />
 
-                        {activeTab === 'library' && (
-                            <ScanManagerSection
-                                title="Library Folders"
-                                hint="Indexa audio (WAV, AIFF, FLAC, MP3, OGG) para flujo rapido de importacion."
-                                folders={libraryFolders}
-                                entries={libraryIndex}
-                                isDesktop={isDesktop}
-                                isScanning={isScanningLibrary}
-                                totalSize={librarySize}
-                                onAddFolder={() => void addFolder('library')}
-                                onRemoveFolder={(folder) => removeFolder('library', folder)}
-                                onScan={() => void scanFolders('library')}
-                            />
+                                <ScanManagerSection
+                                    title="Library Folders"
+                                    hint="Indexa audio (WAV, AIFF, FLAC, MP3, OGG) para flujo rapido de importacion."
+                                    folders={libraryFolders}
+                                    entries={libraryIndex}
+                                    isDesktop={isDesktop}
+                                    isScanning={isScanningLibrary}
+                                    totalSize={librarySize}
+                                    onAddFolder={() => void addFolder('library')}
+                                    onRemoveFolder={(folder) => removeFolder('library', folder)}
+                                    onScan={() => void scanFolders('library')}
+                                />
+                            </div>
                         )}
 
                         {statusMessage && (

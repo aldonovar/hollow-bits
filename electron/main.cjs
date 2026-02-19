@@ -89,6 +89,25 @@ const runFfmpeg = (args) => new Promise((resolve, reject) => {
 
 const DIRECTORY_SCAN_LIMIT = 10000;
 const MAX_DIRECT_FILE_READ_BYTES = 512 * 1024 * 1024;
+const MAX_IMPORT_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_IMPORT_BATCH_BYTES = 1024 * 1024 * 1024;
+
+let mainWindow = null;
+
+const logMainError = (label, error) => {
+    const message = error instanceof Error
+        ? `${error.message}\n${error.stack || ''}`.trim()
+        : String(error);
+    console.error(`[main:${label}] ${message}`);
+};
+
+process.on('uncaughtException', (error) => {
+    logMainError('uncaughtException', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+    logMainError('unhandledRejection', reason);
+});
 
 const sanitizeExtensions = (extensions) => {
     if (!Array.isArray(extensions)) return new Set();
@@ -244,15 +263,34 @@ ipcMain.handle('select-files', async (event) => {
     });
 
     if (filePaths && filePaths.length > 0) {
-        const files = await Promise.all(filePaths.map(async (p) => {
-            const buffer = await fs.readFile(p);
+        const files = [];
+        let accumulatedSize = 0;
+
+        for (const filePath of filePaths) {
+            const stats = await fs.stat(filePath);
+            if (!stats.isFile()) {
+                continue;
+            }
+
+            if (stats.size > MAX_IMPORT_FILE_BYTES) {
+                throw new Error(`El archivo ${path.basename(filePath)} supera el limite de 256 MB.`);
+            }
+
+            accumulatedSize += stats.size;
+            if (accumulatedSize > MAX_IMPORT_BATCH_BYTES) {
+                throw new Error('La importacion supera el limite de 1 GB por lote. Importa menos archivos por tanda.');
+            }
+
+            const buffer = await fs.readFile(filePath);
             const data = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-            return {
-                name: path.basename(p),
-                path: p,
+
+            files.push({
+                name: path.basename(filePath),
+                path: filePath,
                 data
-            };
-        }));
+            });
+        }
+
         return files;
     }
     return [];
@@ -384,7 +422,7 @@ const createWindow = () => {
     const windowIcon = app.isPackaged ? undefined : path.join(__dirname, '../build/icon.png');
 
     // Create the browser window.
-    const mainWindow = new BrowserWindow({
+    mainWindow = new BrowserWindow({
         width: 1400,
         height: 900,
         icon: windowIcon,
@@ -410,6 +448,18 @@ const createWindow = () => {
     mainWindow.on('enter-full-screen', notifyState);
     mainWindow.on('leave-full-screen', notifyState);
     mainWindow.webContents.on('did-finish-load', notifyState);
+    mainWindow.on('closed', () => {
+        mainWindow = null;
+    });
+    mainWindow.on('unresponsive', () => {
+        logMainError('window-unresponsive', 'Renderer no responde.');
+    });
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+        logMainError('render-process-gone', `${details.reason} (exitCode=${details.exitCode})`);
+    });
+    mainWindow.webContents.on('did-fail-load', (_event, code, description, validatedURL) => {
+        logMainError('did-fail-load', `code=${code} url=${validatedURL} reason=${description}`);
+    });
     mainWindow.webContents.on('did-finish-load', () => {
         try {
             mainWindow.webContents.setAudioMuted(false);
@@ -450,6 +500,10 @@ app.whenReady().then(() => {
             createWindow();
         }
     });
+});
+
+app.on('child-process-gone', (_event, details) => {
+    logMainError('child-process-gone', `${details.type} (${details.reason}, exitCode=${details.exitCode})`);
 });
 
 app.on('window-all-closed', () => {

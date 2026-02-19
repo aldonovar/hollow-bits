@@ -36,6 +36,7 @@ import {
     sampleAutomationLaneAtBar,
     writeAutomationPoint
 } from './services/automationService';
+import { sanitizeAudioSettingsCandidate } from './services/audioSettingsNormalizer';
 import {
     CollabCommandRecord,
     loadCollabSessionSnapshot,
@@ -157,6 +158,11 @@ const AUDIO_SETTINGS_STORAGE_KEY = 'ethereal.audio-settings.v1';
 const AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY = 'ethereal.audio-effective-settings.v1';
 const MIN_CLIP_LENGTH_BARS = 0.0625;
 const AUTOSAVE_DEBOUNCE_MS = 1200;
+const IMPORT_AUDIO_CONCURRENCY = 2;
+
+const buildRuntimeId = (prefix: string): string => {
+    return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+};
 
 const getDefaultAudioSettings = (): AudioSettings => ({
     sampleRate: 48000,
@@ -164,29 +170,9 @@ const getDefaultAudioSettings = (): AudioSettings => ({
     latencyHint: 'interactive'
 });
 
-const isValidSampleRate = (sampleRate: unknown): sampleRate is AudioSettings['sampleRate'] => {
-    return sampleRate === 44100 || sampleRate === 48000 || sampleRate === 88200 || sampleRate === 96000 || sampleRate === 192000;
-};
-
-
-
-
-const isValidBufferSize = (bufferSize: unknown): bufferSize is AudioSettings['bufferSize'] => {
-    return bufferSize === 'auto' || bufferSize === 128 || bufferSize === 256 || bufferSize === 512 || bufferSize === 1024 || bufferSize === 2048;
-};
-
 const sanitizeAudioSettings = (candidate: Partial<AudioSettings> | null | undefined): AudioSettings => {
     const defaults = getDefaultAudioSettings();
-    if (!candidate) return defaults;
-
-    return {
-        sampleRate: isValidSampleRate(candidate.sampleRate) ? candidate.sampleRate : defaults.sampleRate,
-        bufferSize: isValidBufferSize(candidate.bufferSize) ? candidate.bufferSize : defaults.bufferSize,
-        latencyHint: typeof candidate.latencyHint === 'string' ? candidate.latencyHint : defaults.latencyHint,
-        inputDeviceId: typeof candidate.inputDeviceId === 'string' ? candidate.inputDeviceId : undefined,
-        outputDeviceId: typeof candidate.outputDeviceId === 'string' ? candidate.outputDeviceId : undefined,
-        lastFailedOutputDeviceId: typeof candidate.lastFailedOutputDeviceId === 'string' ? candidate.lastFailedOutputDeviceId : undefined
-    };
+    return sanitizeAudioSettingsCandidate(candidate, defaults);
 };
 
 const loadAudioSettingsFromStorage = (): AudioSettings => {
@@ -213,6 +199,7 @@ const App: React.FC = () => {
     const [projectName, setProjectName] = useState("Sin Título");
     const [loadingProject, setLoadingProject] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState("");
+    const [importProgress, setImportProgress] = useState<{ total: number; completed: number; currentFile: string | null } | null>(null);
 
     // Undo/Redo Hook
     const { state: tracks, setState: setTracks, setStateNoHistory: setTracksNoHistory, undo, redo, canUndo, canRedo } = useUndoRedo<Track[]>(INITIAL_TRACKS);
@@ -268,7 +255,11 @@ const App: React.FC = () => {
         effectiveBufferSize: 0,
         bufferStrategy: 'auto',
         lookaheadMs: 25,
-        scheduleAheadTimeMs: 100
+        scheduleAheadTimeMs: 100,
+        schedulerMode: audioEngine.getSchedulerMode(),
+        schedulerP95TickDriftMs: 0,
+        schedulerP99TickDriftMs: 0,
+        schedulerP99LoopMs: 0
     });
 
     // Refs
@@ -417,11 +408,11 @@ const App: React.FC = () => {
     }, [applyTrackMutation]);
 
     const appendTrack = useCallback((track: Track, options?: TrackMutationOptions) => {
-        applyTrackMutation((prevTracks) => [...prevTracks, track], { ...options, recolor: true });
+        applyTrackMutation((prevTracks) => [...prevTracks, track], { ...options, recolor: options?.recolor ?? false });
     }, [applyTrackMutation]);
 
     const appendTracks = useCallback((nextTracks: Track[], options?: TrackMutationOptions) => {
-        applyTrackMutation((prevTracks) => [...prevTracks, ...nextTracks], { ...options, recolor: true });
+        applyTrackMutation((prevTracks) => [...prevTracks, ...nextTracks], { ...options, recolor: options?.recolor ?? false });
     }, [applyTrackMutation]);
 
     const replaceTracks = useCallback((nextTracks: Track[], options?: TrackMutationOptions) => {
@@ -549,7 +540,16 @@ const App: React.FC = () => {
 
     // Sync Tracks with Audio Engine
     useEffect(() => {
-        audioEngine.updateTracks(tracks);
+        let isCancelled = false;
+        const syncFrame = window.requestAnimationFrame(() => {
+            if (isCancelled) return;
+            audioEngine.updateTracks(tracks);
+        });
+
+        return () => {
+            isCancelled = true;
+            window.cancelAnimationFrame(syncFrame);
+        };
     }, [tracks]);
 
     useEffect(() => {
@@ -591,7 +591,7 @@ const App: React.FC = () => {
     }, [tracks, transport.isPlaying]);
 
     // --- HELPER: GET PROJECT DURATION ---
-    const getProjectEndBar = useCallback(() => {
+    const projectEndBar = useMemo(() => {
         let maxBar = 0;
         tracks.forEach((t: Track) => {
             t.clips.forEach((c: Clip) => {
@@ -603,11 +603,12 @@ const App: React.FC = () => {
         return maxBar > 0 ? maxBar : 8;
     }, [tracks]);
 
+    const getProjectEndBar = useCallback(() => projectEndBar, [projectEndBar]);
+
     // Dynamic Calculation of Total Bars for Infinite Scroll
     const totalProjectBars = useMemo(() => {
-        const endBar = getProjectEndBar();
-        return Math.max(200, endBar + 40); // Base 200, or End + padding
-    }, [getProjectEndBar]);
+        return Math.max(200, projectEndBar + 40); // Base 200, or End + padding
+    }, [projectEndBar]);
 
     // --- HANDLE LOOPING & END OF SONG (Transport display now synced from Timeline) ---
     useEffect(() => {
@@ -1278,7 +1279,7 @@ const App: React.FC = () => {
     }, [applyTrackMutation, buildScannedMidiClip, closeAllToolPanels]);
 
     const removeTrackWithRoutingCleanup = useCallback((trackId: string) => {
-        applyTrackMutation((prevTracks) => removeTrackRoutingReferences(prevTracks, trackId), { recolor: true });
+        applyTrackMutation((prevTracks) => removeTrackRoutingReferences(prevTracks, trackId), { recolor: false, reason: 'delete-track' });
 
         if (selectedTrackId === trackId) {
             setSelectedTrackId(null);
@@ -1715,7 +1716,7 @@ const App: React.FC = () => {
 
         if (armedTracks.length === 0) {
             const newTrack = createTrack({
-                id: `t-${Date.now()}`,
+                id: buildRuntimeId('t-rec'),
                 name: `REC VOCAL ${tracks.length + 1}`,
                 type: TrackType.AUDIO,
                 color: getTrackColorByPosition(tracks.length, tracks.length + 1),
@@ -2055,7 +2056,7 @@ const App: React.FC = () => {
         sourceId?: string
     ): Clip => {
         return {
-            id: `c-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+            id: buildRuntimeId('c-audio'),
             name,
             color,
             start: Math.max(1, startBar),
@@ -2077,7 +2078,22 @@ const App: React.FC = () => {
 
         const importStamp = Date.now();
 
-        const importedTracks = await Promise.all(sources.map(async (source, i) => {
+        setImportProgress({
+            total: sources.length,
+            completed: 0,
+            currentFile: sources[0]?.name || null
+        });
+
+        const importedTracks: Array<Track | null> = new Array(sources.length).fill(null);
+        const totalTrackCountAfterImport = tracks.length + sources.length;
+        let nextIndex = 0;
+
+        const processSource = async (index: number) => {
+            const source = sources[index];
+            if (!source) return;
+
+            setImportProgress((prev) => prev ? { ...prev, currentFile: source.name } : prev);
+
             try {
                 const arrayBuffer = source.arrayBuffer.slice(0);
                 const audioBuffer = await audioEngine.decodeAudioData(arrayBuffer);
@@ -2091,33 +2107,59 @@ const App: React.FC = () => {
                 }
 
                 const newTrack = createTrack({
-                    id: `t-imp-${importStamp}-${i}`,
-                    name: source.name.replace(/\.[^/.]+$/, "").substring(0, 12),
+                    id: `t-imp-${importStamp}-${index}`,
+                    name: source.name.replace(/\.[^/.]+$/, '').substring(0, 12),
                     type: TrackType.AUDIO,
-                    color: '#A855F7',
+                    color: getTrackColorByPosition(tracks.length + index, totalTrackCountAfterImport),
                     volume: -3
                 });
 
                 const newClip = buildAudioClipFromBuffer(source.name, newTrack.color, audioBuffer, 1, sourceId);
                 newTrack.clips.push(newClip);
-                return newTrack;
+                importedTracks[index] = newTrack;
             } catch (fileError) {
                 console.error(`Failed to import ${source.name}`, fileError);
-                return null;
+                importedTracks[index] = null;
+            } finally {
+                setImportProgress((prev) => prev
+                    ? {
+                        ...prev,
+                        completed: Math.min(prev.total, prev.completed + 1)
+                    }
+                    : prev);
             }
-        }));
+        };
+
+        const workerCount = Math.min(IMPORT_AUDIO_CONCURRENCY, sources.length);
+        const workers = Array.from({ length: workerCount }, async () => {
+            while (nextIndex < sources.length) {
+                const currentIndex = nextIndex;
+                nextIndex += 1;
+                await processSource(currentIndex);
+
+                await new Promise<void>((resolve) => {
+                    window.setTimeout(resolve, 0);
+                });
+            }
+        });
+
+        await Promise.all(workers);
+
+        window.setTimeout(() => {
+            setImportProgress(null);
+        }, 160);
 
         const validTracks = importedTracks.filter((track): track is Track => track !== null);
         if (validTracks.length === 0) {
             throw new Error('No se pudo decodificar ningún archivo de audio.');
         }
 
-        appendTracks(validTracks, { reason: 'import-audio-files' });
+        appendTracks(validTracks, { reason: 'import-audio-files', recolor: false });
 
         if (validTracks.length < sources.length) {
             alert('Algunos archivos no se pudieron importar, pero el resto se agregó correctamente.');
         }
-    }, [appendTracks, buildAudioClipFromBuffer]);
+    }, [appendTracks, buildAudioClipFromBuffer, tracks.length]);
 
     const importLibraryEntryIntoDestination = useCallback(async (
         entry: ScannedFileEntry,
@@ -2171,10 +2213,10 @@ const App: React.FC = () => {
         }
 
         const newTrack = createTrack({
-            id: `t-lib-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+            id: buildRuntimeId('t-lib'),
             name: fileData.name.replace(/\.[^/.]+$/, "").substring(0, 12) || 'Library Audio',
             type: TrackType.AUDIO,
-            color: '#A855F7',
+            color: getTrackColorByPosition(tracks.length, tracks.length + 1),
             volume: -3
         });
 
@@ -2235,7 +2277,7 @@ const App: React.FC = () => {
 
         const trackName = isNoise ? 'Noise Generator' : 'Tone Generator';
         const newTrack = createTrack({
-            id: `t-gen-${type}-${Date.now()}`,
+            id: buildRuntimeId(`t-gen-${type}`),
             name: trackName,
             type: TrackType.AUDIO,
             color: isNoise ? '#F472B6' : '#3BF9F6',
@@ -2262,7 +2304,7 @@ const App: React.FC = () => {
     const cloneClipForDrop = useCallback((clip: Clip, color: string, startBar: number): Clip => {
         return {
             ...clip,
-            id: `c-drop-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+            id: buildRuntimeId('c-drop'),
             color,
             start: Math.max(1, startBar),
             notes: clip.notes.map((note) => ({ ...note }))
@@ -2406,7 +2448,7 @@ const App: React.FC = () => {
                 await importAudioSources(sources);
             } catch (err) {
                 console.error("Electron import failed", err);
-                alert("No se pudo importar el archivo de audio.");
+                alert(err instanceof Error ? err.message : "No se pudo importar el archivo de audio.");
             }
             return;
         }
@@ -2447,6 +2489,63 @@ const App: React.FC = () => {
         setBottomView('editor');
     }, []);
 
+    const handleTimelineSeek = useCallback((bar: number) => {
+        void handleSeekToBar(bar);
+    }, [handleSeekToBar]);
+
+    const handleTimelineTrackUpdate = useCallback((id: string, updates: Partial<Track>, options?: { noHistory?: boolean; reason?: string }) => {
+        updateTrackById(id, updates, { recolor: false, ...options });
+    }, [updateTrackById]);
+
+    const handleTimelineClipUpdate = useCallback((trackId: string, clipId: string, updates: Partial<Clip>, options?: { noHistory?: boolean; reason?: string }) => {
+        updateClipById(trackId, clipId, updates, { recolor: false, ...options });
+    }, [updateClipById]);
+
+    const handleTimelineGridChange = useCallback((size: number, enabled: boolean) => {
+        setTransport((prev: TransportState) => ({ ...prev, gridSize: size, snapToGrid: enabled }));
+    }, []);
+
+    const handleTimelineTimeUpdate = useCallback((bar: number, beat: number, sixteenth: number) => {
+        setTransport((prev: TransportState) => {
+            if (prev.currentBar === bar && prev.currentBeat === beat && prev.currentSixteenth === sixteenth) {
+                return prev;
+            }
+
+            return { ...prev, currentBar: bar, currentBeat: beat, currentSixteenth: sixteenth };
+        });
+    }, []);
+
+    const handleTimelineAddTrack = useCallback((type = TrackType.AUDIO) => {
+        const count = tracks.filter((track) => track.type === type).length + 1;
+        const baseName =
+            type === TrackType.RETURN
+                ? `Return ${String.fromCharCode(64 + count)}`
+                : type === TrackType.GROUP
+                    ? `Group ${count}`
+                    : `${type === TrackType.MIDI ? 'Midi' : 'Audio'} ${count}`;
+
+        const newTrack = createTrack({
+            id: buildRuntimeId(`t-${type.toLowerCase()}`),
+            name: baseName,
+            type,
+            color: getTrackColorByPosition(tracks.length, tracks.length + 1)
+        });
+
+        appendTrack(newTrack, { reason: 'timeline-add-track', recolor: false });
+    }, [appendTrack, tracks]);
+
+    const handleMixerCreateGroup = useCallback(() => {
+        const count = tracks.filter((track) => track.type === TrackType.GROUP).length + 1;
+        const newTrack = createTrack({
+            id: buildRuntimeId('t-group'),
+            name: `Group ${count}`,
+            type: TrackType.GROUP,
+            color: getTrackColorByPosition(tracks.length, tracks.length + 1)
+        });
+
+        appendTrack(newTrack, { reason: 'mixer-create-group', recolor: false });
+    }, [appendTrack, tracks]);
+
     const isScannerImmersive = showNoteScanner;
     const selectedTrack = tracks.find((track) => track.id === selectedTrackId) || null;
 
@@ -2460,6 +2559,22 @@ const App: React.FC = () => {
                         <h2 className="text-xl font-black text-white tracking-widest uppercase">Procesando</h2>
                         <p className="text-gray-500 text-xs mt-2 font-mono">{loadingMessage}</p>
                     </div>
+                </div>
+            )}
+
+            {importProgress && (
+                <div className="fixed right-4 bottom-12 z-[120] w-[320px] rounded-sm border border-daw-border bg-[#10131c]/96 backdrop-blur-md px-3 py-2 shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-200">
+                    <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400">
+                        <span>Importando audio</span>
+                        <span className="font-mono text-gray-200">{importProgress.completed}/{importProgress.total}</span>
+                    </div>
+                    <div className="mt-2 h-1.5 rounded-full bg-black/40 overflow-hidden">
+                        <div
+                            className="h-full bg-gradient-to-r from-daw-cyan to-daw-violet transition-all duration-200"
+                            style={{ width: `${Math.max(0, Math.min(100, (importProgress.completed / Math.max(1, importProgress.total)) * 100))}%` }}
+                        />
+                    </div>
+                    <div className="mt-1 text-[10px] text-gray-500 truncate">{importProgress.currentFile || 'Preparando importacion...'}</div>
                 </div>
             )}
 
@@ -2503,10 +2618,15 @@ const App: React.FC = () => {
                                 <div className="px-4 py-2 text-[10px] font-bold text-gray-500 uppercase tracking-wider border-b border-white/5 mb-1">Archivo</div>
                                 <button onClick={handleNewProject} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Nuevo Proyecto</span></button>
                                 <button onClick={() => { handleOpenProject(); setShowFileMenu(false); }} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Abrir Proyecto...</span></button>
-                                {/* Settings Button */}
-                                <div className="w-full flex justify-center mt-2 group relative">
-                                    <SidebarItem icon={Settings} label="Configuración" onClick={() => setShowSettings(true)} />
-                                </div>
+                                <button
+                                    onClick={() => {
+                                        setShowSettings(true);
+                                        setShowFileMenu(false);
+                                    }}
+                                    className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors"
+                                >
+                                    Configuracion de Audio...
+                                </button>
 
                                 <div className="h-px bg-daw-border w-1/2 my-2"></div>
                                 <button onClick={handleSaveProject} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Guardar Proyecto</span><span className="opacity-50 text-[10px]">Ctrl+S</span></button>
@@ -2617,53 +2737,26 @@ const App: React.FC = () => {
                                 zoom={zoom}
                                 trackHeight={trackHeight}
                                 bpm={transport.bpm}
-                                onSeek={(bar) => {
-                                    void handleSeekToBar(bar);
-                                }}
+                                onSeek={handleTimelineSeek}
                                 onTrackSelect={handleTrackSelect}
                                 onClipSelect={handleClipSelect}
-                                onTrackUpdate={(id, updates, options) => updateTrackById(id, updates, { recolor: false, ...options })}
+                                onTrackUpdate={handleTimelineTrackUpdate}
                                 onTrackDelete={removeTrackWithRoutingCleanup}
-                                onClipUpdate={(trackId, clipId, updates, options) => updateClipById(trackId, clipId, updates, { recolor: false, ...options })}
+                                onClipUpdate={handleTimelineClipUpdate}
                                 onConsolidate={handleConsolidateClips}
                                 onReverse={handleReverseClip}
                                 onQuantize={handleQuantizeClip}
                                 onSplitClip={handleSplitClipAtCursor}
                                 onDuplicateClip={handleDuplicateClip}
-                                onGridChange={(s, e) => setTransport((p: TransportState) => ({ ...p, gridSize: s, snapToGrid: e }))}
-                                onExternalDrop={(trackId, bar, payload) => {
-                                    void handleTimelineExternalDrop(trackId, bar, payload);
-                                }}
-                                onAddTrack={(type = TrackType.AUDIO) => {
-                                    const count = tracks.filter((track) => track.type === type).length + 1;
-
-                                    const newTrack = createTrack({
-                                        id: `t-${type.toLowerCase()}-${Date.now()}`,
-                                        name:
-                                            type === TrackType.RETURN
-                                                ? `Return ${String.fromCharCode(64 + count)}`
-                                                : type === TrackType.GROUP
-                                                    ? `Group ${count}`
-                                                    : `${type === TrackType.MIDI ? 'Midi' : 'Audio'} ${count}`,
-                                        type,
-                                        color: '#B34BE4'
-                                    });
-
-                                    appendTrack(newTrack);
-                                }}
+                                onGridChange={handleTimelineGridChange}
+                                onExternalDrop={handleTimelineExternalDrop}
+                                onAddTrack={handleTimelineAddTrack}
                                 gridSize={transport.gridSize}
                                 snapToGrid={transport.snapToGrid}
                                 isPlaying={transport.isPlaying}
                                 selectedTrackId={selectedTrackId}
                                 containerRef={timelineContainerRef}
-                                onTimeUpdate={(bar, beat, sixteenth) => {
-                                    setTransport((prev: TransportState) => {
-                                        if (prev.currentBar !== bar || prev.currentBeat !== beat || prev.currentSixteenth !== sixteenth) {
-                                            return { ...prev, currentBar: bar, currentBeat: beat, currentSixteenth: sixteenth };
-                                        }
-                                        return prev;
-                                    });
-                                }}
+                                onTimeUpdate={handleTimelineTimeUpdate}
                             />
                         </div>
                     ) : mainView === 'session' ? (
@@ -2690,17 +2783,7 @@ const App: React.FC = () => {
                                 canRecallSnapshotB={Boolean(mixSnapshots.B)}
                                 activeSnapshot={activeMixSnapshot}
                                 onMacroApply={handleMixerMacroApply}
-                                onCreateGroup={() => {
-                                    const count = tracks.filter((track) => track.type === TrackType.GROUP).length + 1;
-                                    const newTrack = createTrack({
-                                        id: `t-group-${Date.now()}`,
-                                        name: `Group ${count}`,
-                                        type: TrackType.GROUP,
-                                        color: '#6EA8FF'
-                                    });
-
-                                    appendTrack(newTrack);
-                                }}
+                                onCreateGroup={handleMixerCreateGroup}
                             />
                         </div>
                     )}

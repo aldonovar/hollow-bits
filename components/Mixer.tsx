@@ -158,23 +158,17 @@ const Mixer: React.FC<MixerProps> = ({
     let rafId = 0;
     let lastFrame = 0;
 
-    const animate = (time: number) => {
-      if (time - lastFrame >= 33) {
-        lastFrame = time;
+        const animate = (time: number) => {
+          if (time - lastFrame >= 33) {
+            lastFrame = time;
 
-        const nextMeters: Record<string, MeterSnapshot> = {};
-        const nextClipHolds: Record<string, boolean> = {};
+            const snapshot = audioEngine.getMeterSnapshot(tracks.map((track) => track.id));
 
-        tracks.forEach((track) => {
-          nextMeters[track.id] = audioEngine.getTrackMeter(track.id);
-          nextClipHolds[track.id] = audioEngine.getTrackClipHold(track.id);
-        });
-
-        setTrackMeters(nextMeters);
-        setTrackClipHolds(nextClipHolds);
-        setMasterMeter(audioEngine.getMasterMeter());
-        setMasterClipHold(audioEngine.getMasterClipHold());
-      }
+            setTrackMeters(snapshot.tracks);
+            setTrackClipHolds(snapshot.clipHolds);
+            setMasterMeter(snapshot.master);
+            setMasterClipHold(snapshot.masterClipHold);
+          }
 
       rafId = requestAnimationFrame(animate);
     };

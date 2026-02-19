@@ -5,6 +5,7 @@ import {
     getLaneByParam,
     sampleAutomationLaneAtBar
 } from './automationService';
+import { sanitizeAudioSettingsCandidate } from './audioSettingsNormalizer';
 
 interface ActiveSource {
     source?: AudioBufferSourceNode;
@@ -56,8 +57,39 @@ interface TrackNodeGraph {
     reverbGain: GainNode;
     sendGains: Map<string, GainNode>;
     sendModes: Map<string, 'pre' | 'post'>;
+    sendLevels: Map<string, number>;
     outputTargetGroupId: string | null;
     deviceRuntimes: Map<string, DeviceRuntime>;
+}
+
+interface TrackMixParamState {
+    gain: number;
+    pan: number;
+    reverb: number;
+}
+
+interface WaveformEnvelopeCacheEntry {
+    min: Float32Array;
+    max: Float32Array;
+    length: number;
+    sampleRate: number;
+    channels: number;
+    lastUsedAt: number;
+}
+
+export interface GraphUpdateStats {
+    updatedAt: number;
+    trackCount: number;
+    removedTrackCount: number;
+    createdTrackCount: number;
+    mixParamWrites: number;
+    sendLevelWrites: number;
+    sendNodeCreates: number;
+    sendNodeRemovals: number;
+    routingReconnects: number;
+    inputConnectOps: number;
+    inputDisconnectOps: number;
+    deviceChainRebuilds: number;
 }
 
 interface MixEvaluationContext {
@@ -92,6 +124,50 @@ export interface EngineDiagnostics {
     bufferStrategy?: string;
     lookaheadMs?: number;
     scheduleAheadTimeMs?: number;
+    schedulerMode?: EngineSchedulerMode;
+    schedulerP95TickDriftMs?: number;
+    schedulerP99TickDriftMs?: number;
+    schedulerP99LoopMs?: number;
+    schedulerQueueEntries?: number;
+    schedulerQueueActive?: number;
+    schedulerQueueP95Candidates?: number;
+}
+
+export type EngineSchedulerMode = 'interval' | 'worklet-clock';
+
+export interface SchedulerTelemetrySnapshot {
+    mode: EngineSchedulerMode;
+    tickCount: number;
+    skippedTicks: number;
+    avgLoopMs: number;
+    p95LoopMs: number;
+    p99LoopMs: number;
+    avgTickIntervalMs: number;
+    p95TickIntervalMs: number;
+    p99TickIntervalMs: number;
+    avgTickDriftMs: number;
+    p95TickDriftMs: number;
+    p99TickDriftMs: number;
+    maxTickDriftMs: number;
+    overrunCount: number;
+    lastTickAtMs: number;
+    windowSamples: number;
+    queueEntryCount?: number;
+    queueActiveCount?: number;
+    queueRebuildCount?: number;
+    avgQueueCandidateCount?: number;
+    p95QueueCandidateCount?: number;
+    p99QueueCandidateCount?: number;
+}
+
+interface SchedulerClipQueueEntry {
+    id: string;
+    track: Track;
+    clip: Clip;
+    startSec: number;
+    endSec: number;
+    durationSec: number;
+    offsetSec: number;
 }
 
 class AudioEngine {
@@ -108,8 +184,30 @@ class AudioEngine {
     analysers: Map<string, AnalyserNode> = new Map();
     analyserBuffers: Map<string, Float32Array> = new Map();
     trackMeterState: Map<string, TrackMeterState> = new Map();
+    trackMeterComputedAtMs: Map<string, number> = new Map();
     trackClipHoldState: Set<string> = new Set();
+    trackMixParamState: Map<string, TrackMixParamState> = new Map();
+    sanitizedClipCache: WeakMap<Clip, Clip> = new WeakMap();
+    sanitizedTrackCache: WeakMap<Track, Track> = new WeakMap();
+    sanitizedDevicesCache: WeakMap<Device[], Device[]> = new WeakMap();
+    deviceSignatureCache: WeakMap<Device[], string> = new WeakMap();
+    waveformEnvelopeCache: WeakMap<AudioBuffer, Map<number, WaveformEnvelopeCacheEntry>> = new WeakMap();
+    lastGraphUpdateStats: GraphUpdateStats = {
+        updatedAt: 0,
+        trackCount: 0,
+        removedTrackCount: 0,
+        createdTrackCount: 0,
+        mixParamWrites: 0,
+        sendLevelWrites: 0,
+        sendNodeCreates: 0,
+        sendNodeRemovals: 0,
+        routingReconnects: 0,
+        inputConnectOps: 0,
+        inputDisconnectOps: 0,
+        deviceChainRebuilds: 0
+    };
     masterMeterState: TrackMeterState = { rmsDb: -72, peakDb: -72 };
+    masterMeterComputedAtMs: number = 0;
     masterClipHold: boolean = false;
     trackNodes: Map<string, TrackNodeGraph> = new Map();
     trackDeviceSignatures: Map<string, string> = new Map();
@@ -123,6 +221,7 @@ class AudioEngine {
 
     // Input State
     inputNodes: Map<string, MediaStreamAudioSourceNode> = new Map();
+    inputNodeConnectedTracks: Set<string> = new Set();
     inputStream: MediaStream | null = null;
 
     nextNoteTime: number = 0;
@@ -130,6 +229,31 @@ class AudioEngine {
     currentBpm: number = 120;
     masterTransposeSemitones: number = 0;
     schedulerTimer: number | null = null;
+    schedulerClockNode: AudioWorkletNode | null = null;
+    schedulerClockSink: GainNode | null = null;
+    schedulerMode: EngineSchedulerMode = 'worklet-clock';
+    schedulerWorkletAvailable: boolean = false;
+    schedulerLoopRunning: boolean = false;
+    schedulerLastTickAtMs: number = 0;
+    schedulerExpectedNextTickAtMs: number = 0;
+    schedulerTickCount: number = 0;
+    schedulerSkippedTickCount: number = 0;
+    schedulerOverrunCount: number = 0;
+    schedulerLoopDurationSamplesMs: number[] = [];
+    schedulerTickIntervalSamplesMs: number[] = [];
+    schedulerTickDriftSamplesMs: number[] = [];
+    schedulerQueueCandidateSamples: number[] = [];
+    schedulerQueueEntriesByStart: SchedulerClipQueueEntry[] = [];
+    schedulerQueueEntriesByEnd: SchedulerClipQueueEntry[] = [];
+    schedulerQueueEntryIndex: Map<string, SchedulerClipQueueEntry> = new Map();
+    schedulerQueueActiveIds: Set<string> = new Set();
+    schedulerQueueStartCursor: number = 0;
+    schedulerQueueEndCursor: number = 0;
+    schedulerQueueLastProjectTimeSec: number = Number.NEGATIVE_INFINITY;
+    schedulerQueueSignature: string = '';
+    schedulerQueueRebuildCount: number = 0;
+    schedulerClipArrayTokenSeed: number = 0;
+    schedulerClipArrayTokens: WeakMap<Clip[], number> = new WeakMap();
     lookahead: number = 25.0; // ms
     scheduleAheadTime: number = 0.1; // seconds
     schedulerIntervalMs: number = 25;
@@ -152,13 +276,13 @@ class AudioEngine {
 
     // Settings
     settings: AudioSettings = {
-        sampleRate: 192000, // User Request: Maximun Quality Default
-        bufferSize: 256, // Latency hint
+        sampleRate: 48000,
+        bufferSize: 'auto',
         latencyHint: 'interactive'
     };
     private requestedSettings: AudioSettings = {
-        sampleRate: 192000,
-        bufferSize: 256,
+        sampleRate: 48000,
+        bufferSize: 'auto',
         latencyHint: 'interactive'
     };
     private effectiveSampleRate: number = 48000;
@@ -167,6 +291,10 @@ class AudioEngine {
     private outputFallbackApplied: boolean = false;
     private currentTracksSnapshot: Track[] = [];
     private _isRestarting: boolean = false;
+
+    private getMeterCacheWindowMs(): number {
+        return this.isPlaying ? (1000 / 30) : (1000 / 12);
+    }
 
     constructor() {
         // Singleton pattern usually managed by instance export
@@ -180,23 +308,462 @@ class AudioEngine {
         return Number.isFinite(value) ? value : fallback;
     }
 
+    private shouldUpdateNumber(prev: number | undefined, next: number, epsilon: number = 0.0005): boolean {
+        if (prev === undefined || !Number.isFinite(prev)) {
+            return true;
+        }
+        return Math.abs(prev - next) >= epsilon;
+    }
+
+    private getCachedWaveformEnvelope(buffer: AudioBuffer, steps: number): { min: Float32Array; max: Float32Array } | null {
+        const perBufferCache = this.waveformEnvelopeCache.get(buffer);
+        if (!perBufferCache) return null;
+
+        const cached = perBufferCache.get(steps);
+        if (!cached) return null;
+
+        if (
+            cached.length !== buffer.length
+            || cached.sampleRate !== buffer.sampleRate
+            || cached.channels !== buffer.numberOfChannels
+        ) {
+            perBufferCache.delete(steps);
+            return null;
+        }
+
+        cached.lastUsedAt = performance.now();
+        return {
+            min: cached.min,
+            max: cached.max
+        };
+    }
+
+    private storeCachedWaveformEnvelope(
+        buffer: AudioBuffer,
+        steps: number,
+        envelope: { min: Float32Array; max: Float32Array }
+    ) {
+        let perBufferCache = this.waveformEnvelopeCache.get(buffer);
+        if (!perBufferCache) {
+            perBufferCache = new Map();
+            this.waveformEnvelopeCache.set(buffer, perBufferCache);
+        }
+
+        perBufferCache.set(steps, {
+            min: envelope.min,
+            max: envelope.max,
+            length: buffer.length,
+            sampleRate: buffer.sampleRate,
+            channels: buffer.numberOfChannels,
+            lastUsedAt: performance.now()
+        });
+
+        const MAX_WAVEFORM_CACHE_VARIANTS_PER_BUFFER = 10;
+        if (perBufferCache.size <= MAX_WAVEFORM_CACHE_VARIANTS_PER_BUFFER) {
+            return;
+        }
+
+        let oldestKey: number | null = null;
+        let oldestTime = Number.POSITIVE_INFINITY;
+
+        perBufferCache.forEach((entry, key) => {
+            if (entry.lastUsedAt < oldestTime) {
+                oldestTime = entry.lastUsedAt;
+                oldestKey = key;
+            }
+        });
+
+        if (oldestKey !== null) {
+            perBufferCache.delete(oldestKey);
+        }
+    }
+
+    private pushSchedulerSample(bucket: number[], value: number) {
+        const MAX_SCHEDULER_SAMPLE_WINDOW = 300;
+        bucket.push(value);
+        if (bucket.length > MAX_SCHEDULER_SAMPLE_WINDOW) {
+            bucket.shift();
+        }
+    }
+
+    private averageOf(values: number[]): number {
+        if (values.length === 0) return 0;
+        const total = values.reduce((acc, value) => acc + value, 0);
+        return total / values.length;
+    }
+
+    private percentileOf(values: number[], percentile: number): number {
+        if (values.length === 0) return 0;
+        const sorted = [...values].sort((a, b) => a - b);
+        const clamped = this.clamp(percentile, 0, 1);
+        const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * clamped)));
+        return sorted[index];
+    }
+
+    private resetSchedulerTelemetry() {
+        this.schedulerLastTickAtMs = 0;
+        this.schedulerExpectedNextTickAtMs = 0;
+        this.schedulerTickCount = 0;
+        this.schedulerSkippedTickCount = 0;
+        this.schedulerOverrunCount = 0;
+        this.schedulerLoopDurationSamplesMs = [];
+        this.schedulerTickIntervalSamplesMs = [];
+        this.schedulerTickDriftSamplesMs = [];
+        this.schedulerQueueCandidateSamples = [];
+        this.schedulerQueueRebuildCount = 0;
+    }
+
+    private getSchedulerClipArrayToken(clips: Clip[]): number {
+        const cached = this.schedulerClipArrayTokens.get(clips);
+        if (typeof cached === 'number') {
+            return cached;
+        }
+
+        this.schedulerClipArrayTokenSeed += 1;
+        const nextToken = this.schedulerClipArrayTokenSeed;
+        this.schedulerClipArrayTokens.set(clips, nextToken);
+        return nextToken;
+    }
+
+    private computeSchedulerQueueSignature(tracks: Track[]): string {
+        const signatureParts: string[] = [
+            `bpm:${this.currentBpm.toFixed(4)}`,
+            `tracks:${tracks.length}`
+        ];
+
+        tracks.forEach((track) => {
+            const clips = Array.isArray(track.clips) ? track.clips : [];
+            signatureParts.push(
+                `${track.id}:${track.isMuted ? 1 : 0}:${this.getSchedulerClipArrayToken(clips)}`
+            );
+        });
+
+        return signatureParts.join('|');
+    }
+
+    private resetSchedulerQueueState() {
+        this.schedulerQueueStartCursor = 0;
+        this.schedulerQueueEndCursor = 0;
+        this.schedulerQueueLastProjectTimeSec = Number.NEGATIVE_INFINITY;
+        this.schedulerQueueActiveIds.clear();
+    }
+
+    private clearSchedulerQueue() {
+        this.schedulerQueueEntriesByStart = [];
+        this.schedulerQueueEntriesByEnd = [];
+        this.schedulerQueueEntryIndex.clear();
+        this.schedulerQueueSignature = '';
+        this.resetSchedulerQueueState();
+    }
+
+    private lowerBoundSchedulerStartByTime(targetSec: number): number {
+        let low = 0;
+        let high = this.schedulerQueueEntriesByStart.length;
+
+        while (low < high) {
+            const mid = (low + high) >> 1;
+            if (this.schedulerQueueEntriesByStart[mid].startSec < targetSec) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        return low;
+    }
+
+    private lowerBoundSchedulerEndByTime(targetSec: number): number {
+        let low = 0;
+        let high = this.schedulerQueueEntriesByEnd.length;
+
+        while (low < high) {
+            const mid = (low + high) >> 1;
+            if (this.schedulerQueueEntriesByEnd[mid].endSec <= targetSec) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        return low;
+    }
+
+    private primeSchedulerQueueState(projectTimeSec: number, lookAheadTimeSec: number) {
+        const safeLookAhead = Math.max(projectTimeSec, lookAheadTimeSec);
+        this.schedulerQueueActiveIds.clear();
+
+        this.schedulerQueueStartCursor = this.lowerBoundSchedulerStartByTime(safeLookAhead);
+        this.schedulerQueueEndCursor = this.lowerBoundSchedulerEndByTime(projectTimeSec);
+
+        for (let index = 0; index < this.schedulerQueueStartCursor; index += 1) {
+            const entry = this.schedulerQueueEntriesByStart[index];
+            if (entry.endSec > projectTimeSec) {
+                this.schedulerQueueActiveIds.add(entry.id);
+            }
+        }
+
+        this.schedulerQueueLastProjectTimeSec = projectTimeSec;
+    }
+
+    private rebuildSchedulerQueue(tracks: Track[]) {
+        if (tracks.length === 0) {
+            this.clearSchedulerQueue();
+            return;
+        }
+
+        const secondsPerBar = (60 / Math.max(1, this.currentBpm)) * 4;
+        const entries: SchedulerClipQueueEntry[] = [];
+
+        tracks.forEach((track) => {
+            if (track.isMuted) return;
+
+            track.clips.forEach((clip) => {
+                if (!clip.buffer) return;
+
+                const safeStartBar = Math.max(1, this.finiteOr(clip.start, 1));
+                const safeDurationBar = Math.max(1 / 64, this.finiteOr(clip.length, 1));
+                const safeOffsetBar = Math.max(0, this.finiteOr(clip.offset, 0));
+
+                const startSec = (safeStartBar - 1) * secondsPerBar;
+                const durationSec = safeDurationBar * secondsPerBar;
+                const endSec = startSec + durationSec;
+
+                if (!Number.isFinite(startSec) || !Number.isFinite(durationSec) || durationSec <= 0.0001) {
+                    return;
+                }
+
+                entries.push({
+                    id: `${track.id}-${clip.id}`,
+                    track,
+                    clip,
+                    startSec,
+                    endSec,
+                    durationSec,
+                    offsetSec: safeOffsetBar * secondsPerBar
+                });
+            });
+        });
+
+        const byStart = [...entries].sort((a, b) => {
+            if (a.startSec !== b.startSec) return a.startSec - b.startSec;
+            return a.id.localeCompare(b.id);
+        });
+
+        const byEnd = [...entries].sort((a, b) => {
+            if (a.endSec !== b.endSec) return a.endSec - b.endSec;
+            return a.id.localeCompare(b.id);
+        });
+
+        this.schedulerQueueEntriesByStart = byStart;
+        this.schedulerQueueEntriesByEnd = byEnd;
+        this.schedulerQueueEntryIndex = new Map(byStart.map((entry) => [entry.id, entry]));
+        this.schedulerQueueRebuildCount += 1;
+
+        const projectTime = this.getCurrentTime();
+        this.primeSchedulerQueueState(projectTime, projectTime + this.scheduleAheadTime);
+    }
+
+    private refreshSchedulerQueue(rawTracks: Track[], safeTracks: Track[]) {
+        const nextSignature = this.computeSchedulerQueueSignature(rawTracks);
+        if (nextSignature === this.schedulerQueueSignature) {
+            return;
+        }
+
+        this.schedulerQueueSignature = nextSignature;
+        this.rebuildSchedulerQueue(safeTracks);
+    }
+
+    private collectSchedulerCandidates(projectTimeSec: number, lookAheadTimeSec: number): SchedulerClipQueueEntry[] {
+        if (this.schedulerQueueEntriesByStart.length === 0) {
+            return [];
+        }
+
+        const safeLookAhead = Math.max(projectTimeSec, lookAheadTimeSec);
+        const movedBackInTimeline = (projectTimeSec + 0.0001) < this.schedulerQueueLastProjectTimeSec;
+
+        if (movedBackInTimeline) {
+            this.primeSchedulerQueueState(projectTimeSec, safeLookAhead);
+        }
+
+        while (
+            this.schedulerQueueStartCursor < this.schedulerQueueEntriesByStart.length
+            && this.schedulerQueueEntriesByStart[this.schedulerQueueStartCursor].startSec < safeLookAhead
+        ) {
+            this.schedulerQueueActiveIds.add(this.schedulerQueueEntriesByStart[this.schedulerQueueStartCursor].id);
+            this.schedulerQueueStartCursor += 1;
+        }
+
+        while (
+            this.schedulerQueueEndCursor < this.schedulerQueueEntriesByEnd.length
+            && this.schedulerQueueEntriesByEnd[this.schedulerQueueEndCursor].endSec <= projectTimeSec
+        ) {
+            this.schedulerQueueActiveIds.delete(this.schedulerQueueEntriesByEnd[this.schedulerQueueEndCursor].id);
+            this.schedulerQueueEndCursor += 1;
+        }
+
+        const candidates: SchedulerClipQueueEntry[] = [];
+
+        this.schedulerQueueActiveIds.forEach((entryId) => {
+            const entry = this.schedulerQueueEntryIndex.get(entryId);
+            if (!entry) return;
+            if (entry.endSec <= projectTimeSec) return;
+            if (entry.startSec >= safeLookAhead) return;
+            candidates.push(entry);
+        });
+
+        this.schedulerQueueLastProjectTimeSec = projectTimeSec;
+        this.pushSchedulerSample(this.schedulerQueueCandidateSamples, candidates.length);
+
+        return candidates;
+    }
+
+    private getEffectiveSchedulerMode(): EngineSchedulerMode {
+        if (this.schedulerMode === 'worklet-clock' && this.schedulerWorkletAvailable && this.schedulerClockNode) {
+            return 'worklet-clock';
+        }
+
+        return 'interval';
+    }
+
+    private ensureSchedulerClockNode(): boolean {
+        if (!this.ctx || !this.schedulerWorkletAvailable) {
+            return false;
+        }
+
+        if (!this.schedulerClockSink) {
+            this.schedulerClockSink = this.ctx.createGain();
+            this.schedulerClockSink.gain.value = 0;
+            this.schedulerClockSink.connect(this.ctx.destination);
+        }
+
+        if (!this.schedulerClockNode) {
+            try {
+                const clockNode = new AudioWorkletNode(this.ctx, 'transport-clock-processor');
+                clockNode.port.onmessage = (event) => {
+                    if (!event?.data || event.data.type !== 'tick') return;
+                    this.schedulerLoop();
+                };
+                clockNode.connect(this.schedulerClockSink);
+                this.schedulerClockNode = clockNode;
+            } catch (error) {
+                console.warn('[AudioEngine] transport clock worklet unavailable, falling back to interval scheduler.', error);
+                this.schedulerWorkletAvailable = false;
+                return false;
+            }
+        }
+
+        if (!this.schedulerClockNode) {
+            return false;
+        }
+
+        const tickIntervalFrames = Math.max(
+            128,
+            Math.round((this.schedulerIntervalMs / 1000) * this.ctx.sampleRate)
+        );
+
+        this.schedulerClockNode.port.postMessage({
+            type: 'config',
+            enabled: this.isPlaying,
+            tickIntervalFrames
+        });
+
+        return true;
+    }
+
+    private startSchedulerDriver() {
+        this.stopSchedulerDriver();
+
+        if (!this.isPlaying) {
+            return;
+        }
+
+        this.resetSchedulerTelemetry();
+
+        if (this.schedulerMode === 'worklet-clock' && this.ensureSchedulerClockNode()) {
+            return;
+        }
+
+        this.schedulerTimer = window.setInterval(() => this.schedulerLoop(), this.schedulerIntervalMs);
+    }
+
+    private stopSchedulerDriver() {
+        if (this.schedulerTimer) {
+            window.clearInterval(this.schedulerTimer);
+            this.schedulerTimer = null;
+        }
+
+        if (this.schedulerClockNode) {
+            try {
+                this.schedulerClockNode.port.postMessage({ type: 'config', enabled: false });
+            } catch {
+                // clock already disposed
+            }
+        }
+    }
+
+    setSchedulerMode(mode: EngineSchedulerMode) {
+        this.schedulerMode = mode;
+
+        if (this.isPlaying) {
+            this.startSchedulerDriver();
+        }
+    }
+
+    getSchedulerMode(): EngineSchedulerMode {
+        return this.schedulerMode;
+    }
+
+    getSchedulerTelemetry(): SchedulerTelemetrySnapshot {
+        const tickDriftSamples = this.schedulerTickDriftSamplesMs;
+
+        return {
+            mode: this.getEffectiveSchedulerMode(),
+            tickCount: this.schedulerTickCount,
+            skippedTicks: this.schedulerSkippedTickCount,
+            avgLoopMs: this.averageOf(this.schedulerLoopDurationSamplesMs),
+            p95LoopMs: this.percentileOf(this.schedulerLoopDurationSamplesMs, 0.95),
+            p99LoopMs: this.percentileOf(this.schedulerLoopDurationSamplesMs, 0.99),
+            avgTickIntervalMs: this.averageOf(this.schedulerTickIntervalSamplesMs),
+            p95TickIntervalMs: this.percentileOf(this.schedulerTickIntervalSamplesMs, 0.95),
+            p99TickIntervalMs: this.percentileOf(this.schedulerTickIntervalSamplesMs, 0.99),
+            avgTickDriftMs: this.averageOf(tickDriftSamples),
+            p95TickDriftMs: this.percentileOf(tickDriftSamples, 0.95),
+            p99TickDriftMs: this.percentileOf(tickDriftSamples, 0.99),
+            maxTickDriftMs: tickDriftSamples.length > 0 ? Math.max(...tickDriftSamples) : 0,
+            overrunCount: this.schedulerOverrunCount,
+            lastTickAtMs: this.schedulerLastTickAtMs,
+            windowSamples: this.schedulerLoopDurationSamplesMs.length,
+            queueEntryCount: this.schedulerQueueEntriesByStart.length,
+            queueActiveCount: this.schedulerQueueActiveIds.size,
+            queueRebuildCount: this.schedulerQueueRebuildCount,
+            avgQueueCandidateCount: this.averageOf(this.schedulerQueueCandidateSamples),
+            p95QueueCandidateCount: this.percentileOf(this.schedulerQueueCandidateSamples, 0.95),
+            p99QueueCandidateCount: this.percentileOf(this.schedulerQueueCandidateSamples, 0.99)
+        };
+    }
+
+    private getActiveSampleRateForTuning(): number {
+        return this.ctx?.sampleRate || this.settings.sampleRate || 48000;
+    }
+
     private resolveRequestedBufferSize(): number {
+        const sampleRate = this.getActiveSampleRateForTuning();
         const requested = this.settings.bufferSize;
+        const minBuffer = sampleRate >= 176000 ? 512 : sampleRate >= 88000 ? 256 : 128;
+
         if (requested === 'auto') {
-            if (this.settings.latencyHint === 'playback') return 1024;
-            if (this.settings.latencyHint === 'balanced') return 512;
-            return 256;
+            if (this.settings.latencyHint === 'playback') {
+                return sampleRate >= 176000 ? 2048 : 1024;
+            }
+
+            if (this.settings.latencyHint === 'balanced') {
+                return sampleRate >= 176000 ? 1024 : 512;
+            }
+
+            return sampleRate >= 176000 ? 1024 : sampleRate >= 88000 ? 512 : 256;
         }
 
-        // Safety: If sample rate is high (>= 88.2kHz), force a minimum buffer of 256
-        // to prevent CPU starvation/silence on some interfaces.
-        const sampleRate = this.settings.sampleRate || 48000;
-        let effectiveMin = 128;
-        if (sampleRate >= 88000) {
-            effectiveMin = 256;
-        }
-
-        return this.clamp(this.finiteOr(requested, 256), effectiveMin, 2048);
+        return this.clamp(this.finiteOr(requested, minBuffer), minBuffer, 2048);
     }
 
     private resolveLatencyHintForContext(): AudioContextLatencyCategory | number {
@@ -213,12 +780,16 @@ class AudioEngine {
         const sampleRate = this.ctx?.sampleRate || this.settings.sampleRate || 48000;
         const effectiveBuffer = this.resolveRequestedBufferSize();
         const frameDurationSec = effectiveBuffer / sampleRate;
+        const isUltraRate = sampleRate >= 176000;
+        const isHighRate = sampleRate >= 88000;
+        const lookaheadMultiplier = isUltraRate ? 2.6 : isHighRate ? 2.0 : 1.5;
+        const scheduleMultiplier = isUltraRate ? 5.5 : isHighRate ? 4.2 : 3;
 
         this.effectiveBufferSize = Math.round(effectiveBuffer);
-        this.lookahead = this.clamp(frameDurationSec * 1000 * 1.5, 8, 120);
-        this.scheduleAheadTime = this.clamp(frameDurationSec * 3, 0.04, 0.35);
-        this.schedulerIntervalMs = Math.round(this.clamp(this.lookahead, 8, 120));
-        this.granularGrainSize = this.clamp(frameDurationSec * 4, 0.02, 0.14);
+        this.lookahead = this.clamp(frameDurationSec * 1000 * lookaheadMultiplier, 10, isUltraRate ? 180 : 140);
+        this.scheduleAheadTime = this.clamp(frameDurationSec * scheduleMultiplier, 0.05, isUltraRate ? 0.55 : 0.45);
+        this.schedulerIntervalMs = Math.round(this.clamp(this.lookahead, 10, isUltraRate ? 180 : 140));
+        this.granularGrainSize = this.clamp(frameDurationSec * (isUltraRate ? 5 : 4), 0.02, 0.16);
         this.granularOverlap = Math.round(this.clamp(this.effectiveBufferSize <= 256 ? 4 : this.effectiveBufferSize <= 1024 ? 3 : 2, 2, 6));
 
         const userLatencyHint = this.settings.latencyHint;
@@ -227,16 +798,20 @@ class AudioEngine {
 
         this.effectiveLatencyHint = this.resolveLatencyHintForContext();
 
-        if (this.schedulerTimer && this.isPlaying) {
-            window.clearInterval(this.schedulerTimer);
-            this.schedulerTimer = window.setInterval(() => this.schedulerLoop(), this.schedulerIntervalMs);
+        if (this.isPlaying) {
+            this.startSchedulerDriver();
         }
     }
 
     private sanitizeDevices(devices: Device[] | undefined): Device[] {
         if (!Array.isArray(devices)) return [];
 
-        return devices
+        const cached = this.sanitizedDevicesCache.get(devices);
+        if (cached) {
+            return cached;
+        }
+
+        const sanitized = devices
             .filter((device): device is Device => Boolean(device && typeof device.id === 'string' && Array.isArray(device.params)))
             .map((device) => ({
                 ...device,
@@ -249,9 +824,17 @@ class AudioEngine {
                         max: this.finiteOr(param.max, 1)
                     }))
             }));
+
+        this.sanitizedDevicesCache.set(devices, sanitized);
+        return sanitized;
     }
 
     private sanitizeClip(clip: Clip): Clip {
+        const cached = this.sanitizedClipCache.get(clip);
+        if (cached) {
+            return cached;
+        }
+
         const safeStart = Math.max(1, this.finiteOr(clip.start, 1));
         const safeLength = Math.max(1 / 64, this.finiteOr(clip.length, 1));
         const safeOffset = Math.max(0, this.finiteOr(clip.offset, 0));
@@ -262,7 +845,7 @@ class AudioEngine {
         const safeOriginalBpm = Math.max(1, this.finiteOr(clip.originalBpm ?? 120, 120));
         const safeTranspose = this.clamp(Math.round(this.finiteOr(clip.transpose ?? 0, 0)), -24, 24);
 
-        return {
+        const sanitized = {
             ...clip,
             start: safeStart,
             length: safeLength,
@@ -275,11 +858,19 @@ class AudioEngine {
             transpose: safeTranspose,
             notes: Array.isArray(clip.notes) ? clip.notes : []
         };
+
+        this.sanitizedClipCache.set(clip, sanitized);
+        return sanitized;
     }
 
     private sanitizeTrack(track: Track): Track {
+        const cached = this.sanitizedTrackCache.get(track);
+        if (cached) {
+            return cached;
+        }
+
         const safeType = Object.values(TrackType).includes(track.type) ? track.type : TrackType.AUDIO;
-        const safeMonitor = track.monitor === 'in' || track.monitor === 'off' ? track.monitor : 'auto';
+        const safeMonitor: Track['monitor'] = track.monitor === 'in' || track.monitor === 'off' ? track.monitor : 'auto';
         const safeMicSettings: NonNullable<Track['micSettings']> = {
             profile: track.micSettings?.profile === 'podcast' || track.micSettings?.profile === 'raw'
                 ? track.micSettings.profile
@@ -310,7 +901,7 @@ class AudioEngine {
             })
             : [];
 
-        return {
+        const sanitized = {
             ...track,
             type: safeType,
             volume: this.clamp(this.finiteOr(track.volume, 0), -60, 6),
@@ -329,6 +920,9 @@ class AudioEngine {
             sendModes: track.sendModes && typeof track.sendModes === 'object' ? track.sendModes : {},
             micSettings: safeMicSettings
         };
+
+        this.sanitizedTrackCache.set(track, sanitized);
+        return sanitized;
     }
 
     private normalizePan(pan: number): number {
@@ -427,6 +1021,22 @@ class AudioEngine {
         };
     }
 
+    private getDesiredOutputGroupId(track: Track, groupTrackIdSet: Set<string>): string | null {
+        if (track.type === TrackType.RETURN || track.type === TrackType.GROUP) {
+            return null;
+        }
+
+        if (!track.groupId) {
+            return null;
+        }
+
+        if (!groupTrackIdSet.has(track.groupId) || track.groupId === track.id) {
+            return null;
+        }
+
+        return track.groupId;
+    }
+
     private collectAutomationBarTimes(...tracks: (Track | undefined)[]): number[] {
         const times = new Set<number>([1]);
 
@@ -480,12 +1090,20 @@ class AudioEngine {
     }
 
     private createDeviceSignature(devices: Device[]): string {
-        return devices
+        const cached = this.deviceSignatureCache.get(devices);
+        if (cached) {
+            return cached;
+        }
+
+        const signature = devices
             .map((device) => {
                 const paramKeys = device.params.map((param) => this.normalizeParamName(param.name)).join(',');
                 return `${device.id}:${device.type}:${paramKeys}`;
             })
             .join('|');
+
+        this.deviceSignatureCache.set(devices, signature);
+        return signature;
     }
 
     private createAudioParamSetter(
@@ -802,13 +1420,14 @@ class AudioEngine {
     }
 
     setAudioConfiguration(newSettings: AudioSettings) {
-        this.requestedSettings = { ...this.requestedSettings, ...newSettings };
+        const sanitizedSettings = sanitizeAudioSettingsCandidate(newSettings, this.settings);
+        this.requestedSettings = { ...this.requestedSettings, ...sanitizedSettings };
 
         const prevOutputDeviceId = this.settings.outputDeviceId;
         const prevSampleRate = this.ctx?.sampleRate ?? this.settings.sampleRate;
         const prevBufferSize = this.settings.bufferSize;
-        const requestedSampleRate = newSettings.sampleRate ?? this.requestedSettings.sampleRate;
-        this.settings = { ...this.settings, ...newSettings };
+        const requestedSampleRate = sanitizedSettings.sampleRate ?? this.requestedSettings.sampleRate;
+        this.settings = { ...this.settings, ...sanitizedSettings };
 
         if (this.sampleRateRestartGuard && this.sampleRateRestartGuard.requested === requestedSampleRate) {
             if (this.ctx && this.ctx.sampleRate === this.sampleRateRestartGuard.active) {
@@ -816,14 +1435,14 @@ class AudioEngine {
             }
         }
 
-        const sampleRateChanged = Boolean(this.ctx && newSettings.sampleRate && newSettings.sampleRate !== prevSampleRate);
-        const bufferSizeChanged = typeof newSettings.bufferSize !== 'undefined' && newSettings.bufferSize !== prevBufferSize;
+        const sampleRateChanged = Boolean(this.ctx && sanitizedSettings.sampleRate && sanitizedSettings.sampleRate !== prevSampleRate);
+        const bufferSizeChanged = typeof sanitizedSettings.bufferSize !== 'undefined' && sanitizedSettings.bufferSize !== prevBufferSize;
 
         // Sample rate and numeric latency targets are create-time settings for AudioContext.
         if (
             this.ctx &&
             (sampleRateChanged || bufferSizeChanged) &&
-            (!sampleRateChanged || !this.sampleRateRestartGuard || this.sampleRateRestartGuard.requested !== newSettings.sampleRate || this.sampleRateRestartGuard.active !== this.ctx.sampleRate)
+            (!sampleRateChanged || !this.sampleRateRestartGuard || this.sampleRateRestartGuard.requested !== sanitizedSettings.sampleRate || this.sampleRateRestartGuard.active !== this.ctx.sampleRate)
         ) {
             if (this._isRestarting) {
                 console.log(`[AudioEngine.setAudioConfiguration] Engine already restarting — skipping duplicate restart.`);
@@ -837,7 +1456,7 @@ class AudioEngine {
             return; // restartEngine handles everything including output device
         }
 
-        if (bufferSizeChanged || typeof newSettings.latencyHint === 'string') {
+        if (bufferSizeChanged || typeof sanitizedSettings.latencyHint === 'string') {
             this.applyRuntimeBufferStrategy();
         }
 
@@ -982,16 +1601,13 @@ class AudioEngine {
 
         try {
             if (newSettings) {
-                this.requestedSettings = { ...this.requestedSettings, ...newSettings };
-                this.settings = { ...this.settings, ...newSettings };
+                const sanitizedSettings = sanitizeAudioSettingsCandidate(newSettings, this.settings);
+                this.requestedSettings = { ...this.requestedSettings, ...sanitizedSettings };
+                this.settings = { ...this.settings, ...sanitizedSettings };
             }
 
             this.stop(true);
-
-            if (this.schedulerTimer) {
-                window.clearInterval(this.schedulerTimer);
-                this.schedulerTimer = null;
-            }
+            this.stopSchedulerDriver();
 
             this.stopPlayback();
 
@@ -1008,6 +1624,14 @@ class AudioEngine {
             this.monitoringSessions.forEach((_session, trackId) => {
                 this.stopMonitoring(trackId);
             });
+
+            this.inputNodes.forEach((node) => {
+                try { node.disconnect(); } catch {
+                    // already disconnected
+                }
+            });
+            this.inputNodes.clear();
+            this.inputNodeConnectedTracks.clear();
 
             this.trackNodes.forEach((nodes) => {
                 nodes.deviceRuntimes.forEach((runtime) => {
@@ -1042,8 +1666,17 @@ class AudioEngine {
             this.analysers.clear();
             this.analyserBuffers.clear();
             this.trackMeterState.clear();
+            this.trackMeterComputedAtMs.clear();
             this.trackClipHoldState.clear();
+            this.trackMixParamState.clear();
+            this.sanitizedClipCache = new WeakMap();
+            this.sanitizedTrackCache = new WeakMap();
+            this.sanitizedDevicesCache = new WeakMap();
+            this.deviceSignatureCache = new WeakMap();
+            this.waveformEnvelopeCache = new WeakMap();
+            this.clearSchedulerQueue();
             this.masterMeterState = { rmsDb: -72, peakDb: -72 };
+            this.masterMeterComputedAtMs = 0;
             this.masterClipHold = false;
             this.masterGain = null;
             this.masterOutput = null;
@@ -1052,6 +1685,10 @@ class AudioEngine {
             this.cueGain = null;
             this.limiter = null;
             this.defaultReverbImpulse = null;
+            this.schedulerClockNode = null;
+            this.schedulerClockSink = null;
+            this.schedulerWorkletAvailable = false;
+            this.resetSchedulerTelemetry();
 
             if (this.ctx) {
                 try {
@@ -1104,6 +1741,7 @@ class AudioEngine {
             try { node.disconnect(); } catch { }
         });
         this.inputNodes.clear();
+        this.inputNodeConnectedTracks.clear();
     }
 
     async getAvailableDevices(): Promise<{ inputs: MediaDeviceInfo[], outputs: MediaDeviceInfo[] }> {
@@ -1130,8 +1768,9 @@ class AudioEngine {
 
     async init(settings?: AudioSettings) {
         if (settings) {
-            this.requestedSettings = { ...this.requestedSettings, ...settings };
-            this.settings = { ...this.settings, ...settings };
+            const sanitizedSettings = sanitizeAudioSettingsCandidate(settings, this.settings);
+            this.requestedSettings = { ...this.requestedSettings, ...sanitizedSettings };
+            this.settings = { ...this.settings, ...sanitizedSettings };
         }
 
         // 0. Initialize Context if missing
@@ -1164,18 +1803,42 @@ class AudioEngine {
 
                     // Force Downgrade
                     this.ctx.close().then(() => {
+                        this.isPlaying = false;
+                        this.stopSchedulerDriver();
+                        this.stopPlayback();
+
                         this.ctx = null;
                         this.requestedSettings.sampleRate = 48000;
                         this.settings.sampleRate = 48000;
                         this.masterGain = null; // Force graph rebuild
                         this.trackNodes.clear();
+                        this.trackDeviceSignatures.clear();
+                        this.trackMixParamState.clear();
+                        this.analysers.clear();
+                        this.analyserBuffers.clear();
+                        this.trackMeterState.clear();
+                        this.trackMeterComputedAtMs.clear();
+                        this.trackClipHoldState.clear();
+                        this.sanitizedClipCache = new WeakMap();
+                        this.sanitizedTrackCache = new WeakMap();
+                        this.sanitizedDevicesCache = new WeakMap();
+                        this.deviceSignatureCache = new WeakMap();
+                        this.waveformEnvelopeCache = new WeakMap();
+                        this.clearSchedulerQueue();
+                        this.inputNodes.clear();
+                        this.inputNodeConnectedTracks.clear();
+                        this.schedulerClockNode = null;
+                        this.schedulerClockSink = null;
+                        this.schedulerWorkletAvailable = false;
+                        this.resetSchedulerTelemetry();
 
                         // Restart
                         this.init().then(() => {
-                            // Re-mount the graph? 
-                            // Ideally we should reload the page or trigger a full restart, 
-                            // but stepping down to 48k is the priority.
-                            window.location.reload(); // Simplest way to ensure clean state after driver crash
+                            if (this.currentTracksSnapshot.length > 0) {
+                                this.updateTracks(this.currentTracksSnapshot);
+                            }
+                        }).catch((error) => {
+                            console.error('[AudioEngine] Watchdog recovery failed after downgrade.', error);
                         });
                     });
                 }
@@ -1268,6 +1931,19 @@ class AudioEngine {
                 console.error("Failed to load Granular Processor", e);
             }
 
+            this.schedulerWorkletAvailable = false;
+            this.schedulerClockNode = null;
+            this.schedulerClockSink = null;
+            try {
+                await this.ctx.audioWorklet.addModule('./worklets/transport-clock-processor.js');
+                this.schedulerWorkletAvailable = true;
+                this.ensureSchedulerClockNode();
+                console.log('Transport Clock Processor Loaded');
+            } catch (error) {
+                this.schedulerWorkletAvailable = false;
+                console.warn('Failed to load Transport Clock Processor (using interval scheduler).', error);
+            }
+
             // Resume if suspended (user gesture requirement)
             if (this.ctx.state !== 'running') {
                 const unlock = () => {
@@ -1293,7 +1969,7 @@ class AudioEngine {
         const profileEchoFeedback = profile === 'raw' ? 0.14 : profile === 'podcast' ? 0.2 : 0.16;
 
         const userInputGain = this.clamp(this.finiteOr(track.micSettings?.inputGain ?? 1, 1), 0, 2);
-        const monitoringEnabled = Boolean(track.micSettings?.monitoringEnabled) && track.monitor !== 'off';
+        const monitoringEnabled = this.isTrackMonitoringActive(track);
         const monitorReverbOn = Boolean(track.micSettings?.monitoringReverb);
         const monitorEchoOn = Boolean(track.micSettings?.monitoringEcho);
 
@@ -1302,6 +1978,13 @@ class AudioEngine {
         session.reverbSend.gain.setTargetAtTime(monitoringEnabled && monitorReverbOn ? profileReverb : 0, now, 0.02);
         session.echoWet.gain.setTargetAtTime(monitoringEnabled && monitorEchoOn ? profileEchoWet : 0, now, 0.02);
         session.echoFeedback.gain.setTargetAtTime(monitoringEnabled && monitorEchoOn ? profileEchoFeedback : 0, now, 0.03);
+    }
+
+    private isTrackMonitoringActive(track: Track): boolean {
+        if (!track.micSettings?.monitoringEnabled) return false;
+        if (track.monitor === 'off') return false;
+        if (track.monitor === 'in') return true;
+        return Boolean(track.isArmed);
     }
 
     private async startMonitoring(track: Track) {
@@ -1397,7 +2080,7 @@ class AudioEngine {
     private syncMonitoringSessions(tracks: Track[]) {
         const eligibleTrackIds = new Set(
             tracks
-                .filter((track) => track.type === TrackType.AUDIO && Boolean(track.micSettings?.monitoringEnabled) && track.monitor !== 'off')
+                .filter((track) => track.type === TrackType.AUDIO && this.isTrackMonitoringActive(track))
                 .map((track) => track.id)
         );
 
@@ -1423,6 +2106,22 @@ class AudioEngine {
 
         const safeTracks = tracks.map((track) => this.sanitizeTrack(track));
         this.currentTracksSnapshot = safeTracks;
+        this.refreshSchedulerQueue(tracks, safeTracks);
+
+        const graphStats: GraphUpdateStats = {
+            updatedAt: Date.now(),
+            trackCount: safeTracks.length,
+            removedTrackCount: 0,
+            createdTrackCount: 0,
+            mixParamWrites: 0,
+            sendLevelWrites: 0,
+            sendNodeCreates: 0,
+            sendNodeRemovals: 0,
+            routingReconnects: 0,
+            inputConnectOps: 0,
+            inputDisconnectOps: 0,
+            deviceChainRebuilds: 0
+        };
 
         const now = this.ctx.currentTime;
         const activeTrackIds = new Set(safeTracks.map((track) => track.id));
@@ -1439,6 +2138,8 @@ class AudioEngine {
         this.trackNodes.forEach((nodes, trackId) => {
             if (activeTrackIds.has(trackId)) return;
 
+            this.stopActiveSourcesForTrack(trackId);
+
             this.trackNodes.forEach((candidateNodes) => {
                 if (candidateNodes.outputTargetGroupId !== trackId) return;
 
@@ -1449,6 +2150,7 @@ class AudioEngine {
                 }
                 candidateNodes.panner.connect(this.masterGain!);
                 candidateNodes.outputTargetGroupId = null;
+                graphStats.routingReconnects += 1;
             });
 
             const analyser = this.analysers.get(trackId);
@@ -1470,17 +2172,31 @@ class AudioEngine {
                 }
             });
             nodes.sendModes.clear();
+            nodes.sendLevels.clear();
 
             nodes.deviceRuntimes.forEach((runtime) => {
                 runtime.cleanup?.();
             });
+
+            graphStats.removedTrackCount += 1;
 
             this.trackNodes.delete(trackId);
             this.trackDeviceSignatures.delete(trackId);
             this.analysers.delete(trackId);
             this.analyserBuffers.delete(trackId);
             this.trackMeterState.delete(trackId);
+            this.trackMeterComputedAtMs.delete(trackId);
             this.trackClipHoldState.delete(trackId);
+            this.trackMixParamState.delete(trackId);
+
+            const inputNode = this.inputNodes.get(trackId);
+            if (inputNode) {
+                try { inputNode.disconnect(); } catch {
+                    // already disconnected
+                }
+                this.inputNodes.delete(trackId);
+            }
+            this.inputNodeConnectedTracks.delete(trackId);
         });
 
         if (this.cueTrackId && !activeTrackIds.has(this.cueTrackId)) {
@@ -1545,10 +2261,12 @@ class AudioEngine {
                     reverbGain,
                     sendGains: new Map(),
                     sendModes: new Map(),
+                    sendLevels: new Map(),
                     outputTargetGroupId: null,
                     deviceRuntimes: new Map()
                 };
                 this.trackNodes.set(track.id, nodes);
+                graphStats.createdTrackCount += 1;
             }
 
             if (!nodes) return;
@@ -1571,35 +2289,68 @@ class AudioEngine {
             const safePan = this.finiteOr(track.pan, 0);
             const safeReverb = this.finiteOr(track.reverb || 0, 0);
 
-            nodes.gain.gain.setTargetAtTime(safeTargetGain, now, 0.02);
-            nodes.panner.pan.setTargetAtTime(this.normalizePan(safePan), now, 0.02);
+            const normalizedPan = this.normalizePan(safePan);
+            const normalizedReverb = this.normalizeReverbSend(safeReverb);
+            const previousMixState = this.trackMixParamState.get(track.id);
+
+            if (this.shouldUpdateNumber(previousMixState?.gain, safeTargetGain, 0.0008)) {
+                nodes.gain.gain.setTargetAtTime(safeTargetGain, now, 0.02);
+                graphStats.mixParamWrites += 1;
+            }
+
+            if (this.shouldUpdateNumber(previousMixState?.pan, normalizedPan, 0.0008)) {
+                nodes.panner.pan.setTargetAtTime(normalizedPan, now, 0.02);
+                graphStats.mixParamWrites += 1;
+            }
 
             // Reverb Parameter (Input 0-1 or dB)
             // Assuming track.reverb is a 0-1 send level.
-            nodes.reverbGain.gain.setTargetAtTime(this.normalizeReverbSend(safeReverb), now, 0.02);
+            if (this.shouldUpdateNumber(previousMixState?.reverb, normalizedReverb, 0.0015)) {
+                nodes.reverbGain.gain.setTargetAtTime(normalizedReverb, now, 0.02);
+                graphStats.mixParamWrites += 1;
+            }
+
+            this.trackMixParamState.set(track.id, {
+                gain: safeTargetGain,
+                pan: normalizedPan,
+                reverb: normalizedReverb
+            });
 
             const nextSignature = this.createDeviceSignature(track.devices);
             if (this.trackDeviceSignatures.get(track.id) !== nextSignature) {
                 this.rebuildTrackEffects(track.id, track.devices);
                 this.trackDeviceSignatures.set(track.id, nextSignature);
+                graphStats.deviceChainRebuilds += 1;
             }
 
-            // Input Routing (Microphone)
-            if (this.inputStream && (track.monitor === 'in' || (track.monitor === 'auto' && track.isArmed))) {
+            // Input Routing (Microphone) with connection state caching
+            const shouldConnectTrackInput = Boolean(this.inputStream && (track.monitor === 'in' || (track.monitor === 'auto' && track.isArmed)));
+            const wasTrackInputConnected = this.inputNodeConnectedTracks.has(track.id);
+
+            if (shouldConnectTrackInput) {
                 let inputNode = this.inputNodes.get(track.id);
                 if (!inputNode) {
-                    inputNode = this.ctx!.createMediaStreamSource(this.inputStream);
+                    inputNode = this.ctx!.createMediaStreamSource(this.inputStream!);
                     this.inputNodes.set(track.id, inputNode);
                 }
 
-                // Ensure fresh connection
-                try { inputNode.disconnect(); } catch { }
-                inputNode.connect(nodes.input);
+                if (!wasTrackInputConnected) {
+                    try { inputNode.disconnect(); } catch {
+                        // already disconnected
+                    }
+                    inputNode.connect(nodes.input);
+                    this.inputNodeConnectedTracks.add(track.id);
+                    graphStats.inputConnectOps += 1;
+                }
             } else {
                 const inputNode = this.inputNodes.get(track.id);
-                if (inputNode) {
-                    try { inputNode.disconnect(); } catch { }
+                if (inputNode && wasTrackInputConnected) {
+                    try { inputNode.disconnect(); } catch {
+                        // already disconnected
+                    }
+                    graphStats.inputDisconnectOps += 1;
                 }
+                this.inputNodeConnectedTracks.delete(track.id);
             }
         });
 
@@ -1620,6 +2371,8 @@ class AudioEngine {
                     }
                     sourceNodes.sendGains.delete(targetTrackId);
                     sourceNodes.sendModes.delete(targetTrackId);
+                    sourceNodes.sendLevels.delete(targetTrackId);
+                    graphStats.sendNodeRemovals += 1;
                 }
             });
 
@@ -1627,20 +2380,63 @@ class AudioEngine {
                 return;
             }
 
-            const hasLegacyDbSends = Object.values(track.sends || {}).some((value) => {
+            const sendEntries = Object.entries(track.sends || {});
+            const candidateReturnIds = new Set<string>();
+
+            sourceNodes.sendGains.forEach((_sendGain, returnTrackId) => {
+                if (returnTrackIdSet.has(returnTrackId)) {
+                    candidateReturnIds.add(returnTrackId);
+                }
+            });
+
+            sendEntries.forEach(([returnTrackId]) => {
+                if (returnTrackIdSet.has(returnTrackId)) {
+                    candidateReturnIds.add(returnTrackId);
+                }
+            });
+
+            if (candidateReturnIds.size === 0) {
+                return;
+            }
+
+            const hasLegacyDbSends = sendEntries.some(([, value]) => {
                 return Number.isFinite(value) && (Number(value) < 0 || Number(value) > 1);
             });
 
-            returnTrackIds.forEach((returnTrackId) => {
+            candidateReturnIds.forEach((returnTrackId) => {
                 const returnNodes = this.trackNodes.get(returnTrackId);
                 if (!returnNodes) return;
 
+                const sendLevel = this.normalizeSendGain(track.sends?.[returnTrackId], hasLegacyDbSends);
+                const shouldKeepSend = sendLevel > 0.0001;
                 let sendGain = sourceNodes.sendGains.get(returnTrackId);
+
+                if (!shouldKeepSend) {
+                    if (sendGain) {
+                        try { sourceNodes.preSendTap.disconnect(sendGain); } catch {
+                            // already disconnected
+                        }
+                        try { sourceNodes.panner.disconnect(sendGain); } catch {
+                            // already disconnected
+                        }
+                        try { sendGain.disconnect(); } catch {
+                            // already disconnected
+                        }
+                        sourceNodes.sendGains.delete(returnTrackId);
+                        graphStats.sendNodeRemovals += 1;
+                    }
+
+                    sourceNodes.sendModes.delete(returnTrackId);
+                    sourceNodes.sendLevels.delete(returnTrackId);
+                    return;
+                }
+
                 if (!sendGain) {
                     sendGain = this.ctx!.createGain();
-                    sendGain.gain.value = 0;
+                    sendGain.gain.value = sendLevel;
                     sendGain.connect(returnNodes.input);
                     sourceNodes.sendGains.set(returnTrackId, sendGain);
+                    graphStats.sendNodeCreates += 1;
                 }
 
                 const sendMode: 'pre' | 'post' = track.sendModes?.[returnTrackId] === 'pre' ? 'pre' : 'post';
@@ -1661,8 +2457,12 @@ class AudioEngine {
                     sourceNodes.sendModes.set(returnTrackId, sendMode);
                 }
 
-                const sendLevel = this.normalizeSendGain(track.sends?.[returnTrackId], hasLegacyDbSends);
-                sendGain.gain.setTargetAtTime(sendLevel, now, 0.025);
+                const previousSendLevel = sourceNodes.sendLevels.get(returnTrackId);
+                if (this.shouldUpdateNumber(previousSendLevel, sendLevel, 0.0015)) {
+                    sendGain.gain.setTargetAtTime(sendLevel, now, 0.025);
+                    sourceNodes.sendLevels.set(returnTrackId, sendLevel);
+                    graphStats.sendLevelWrites += 1;
+                }
             });
         });
 
@@ -1670,38 +2470,35 @@ class AudioEngine {
             const nodes = this.trackNodes.get(track.id);
             if (!nodes) return;
 
-            const desiredGroupId =
-                track.type !== TrackType.RETURN
-                    && track.type !== TrackType.GROUP
-                    && track.groupId
-                    && groupTrackIdSet.has(track.groupId)
-                    && track.groupId !== track.id
-                    ? track.groupId
-                    : null;
+            const desiredGroupId = this.getDesiredOutputGroupId(track, groupTrackIdSet);
+            const previousGroupId = nodes.outputTargetGroupId;
 
-            // Disconnect from EVERYTHING to prevent summing
-            try { nodes.panner.disconnect(); } catch { }
-
-            // Reconnect Analyser (Post-Panner Tap)
-            const analyser = this.analysers.get(track.id);
-            if (analyser) {
-                nodes.panner.connect(analyser);
+            if (previousGroupId === desiredGroupId) {
+                return;
             }
 
-            if (desiredGroupId) {
-                const groupNodes = this.trackNodes.get(desiredGroupId);
-                if (groupNodes) {
-                    nodes.panner.connect(groupNodes.input);
-                    nodes.outputTargetGroupId = desiredGroupId;
-                } else {
-                    nodes.panner.connect(this.masterGain!);
-                    nodes.outputTargetGroupId = null;
+            const previousTarget: AudioNode | null = previousGroupId
+                ? this.trackNodes.get(previousGroupId)?.input || null
+                : this.masterGain;
+
+            if (previousTarget) {
+                try {
+                    nodes.panner.disconnect(previousTarget);
+                } catch {
+                    // already disconnected
                 }
-            } else {
-                nodes.panner.connect(this.masterGain!);
-                nodes.outputTargetGroupId = null;
             }
+
+            const nextTarget: AudioNode = desiredGroupId
+                ? this.trackNodes.get(desiredGroupId)?.input || this.masterGain!
+                : this.masterGain!;
+
+            nodes.panner.connect(nextTarget);
+            nodes.outputTargetGroupId = desiredGroupId;
+            graphStats.routingReconnects += 1;
         });
+
+        this.lastGraphUpdateStats = graphStats;
 
         this.syncCueRouting();
         this.syncMonitoringSessions(safeTracks);
@@ -1747,6 +2544,15 @@ class AudioEngine {
         const analyser = this.analysers.get(trackId);
         if (!analyser) {
             return { rmsDb: -72, peakDb: -72 };
+        }
+
+        const nowMs = performance.now();
+        const lastComputedAt = this.trackMeterComputedAtMs.get(trackId) ?? 0;
+        if ((nowMs - lastComputedAt) < this.getMeterCacheWindowMs()) {
+            const cached = this.trackMeterState.get(trackId);
+            if (cached) {
+                return cached;
+            }
         }
 
         let data = this.analyserBuffers.get(trackId);
@@ -1795,6 +2601,7 @@ class AudioEngine {
             rmsDb: boundedRms,
             peakDb: boundedPeak
         });
+        this.trackMeterComputedAtMs.set(trackId, nowMs);
 
         return {
             rmsDb: boundedRms,
@@ -1812,17 +2619,24 @@ class AudioEngine {
 
     resetTrackMeter(trackId: string) {
         this.trackMeterState.set(trackId, { rmsDb: -72, peakDb: -72 });
+        this.trackMeterComputedAtMs.set(trackId, 0);
         this.trackClipHoldState.delete(trackId);
     }
 
     resetAllTrackMeters() {
         this.trackMeterState.clear();
+        this.trackMeterComputedAtMs.clear();
         this.trackClipHoldState.clear();
     }
 
     getMasterMeter(): { rmsDb: number; peakDb: number } {
         if (!this.masterAnalyser) {
             return { rmsDb: -72, peakDb: -72 };
+        }
+
+        const nowMs = performance.now();
+        if ((nowMs - this.masterMeterComputedAtMs) < this.getMeterCacheWindowMs()) {
+            return this.masterMeterState;
         }
 
         if (!this.masterAnalyserBuffer || this.masterAnalyserBuffer.length !== this.masterAnalyser.fftSize) {
@@ -1865,8 +2679,32 @@ class AudioEngine {
             rmsDb: Math.max(-72, Math.min(6, nextRmsDb)),
             peakDb: Math.max(-72, Math.min(6, nextPeakDb))
         };
+        this.masterMeterComputedAtMs = nowMs;
 
         return this.masterMeterState;
+    }
+
+    getMeterSnapshot(trackIds: string[]): {
+        tracks: Record<string, TrackMeterState>;
+        clipHolds: Record<string, boolean>;
+        master: TrackMeterState;
+        masterClipHold: boolean;
+    } {
+        const uniqueTrackIds = Array.from(new Set(trackIds.filter(Boolean)));
+        const tracks: Record<string, TrackMeterState> = {};
+        const clipHolds: Record<string, boolean> = {};
+
+        uniqueTrackIds.forEach((trackId) => {
+            tracks[trackId] = this.getTrackMeter(trackId);
+            clipHolds[trackId] = this.getTrackClipHold(trackId);
+        });
+
+        return {
+            tracks,
+            clipHolds,
+            master: this.getMasterMeter(),
+            masterClipHold: this.getMasterClipHold()
+        };
     }
 
     getMasterClipHold(): boolean {
@@ -1875,6 +2713,7 @@ class AudioEngine {
 
     resetMasterMeter() {
         this.masterMeterState = { rmsDb: -72, peakDb: -72 };
+        this.masterMeterComputedAtMs = 0;
         this.masterClipHold = false;
     }
 
@@ -1894,6 +2733,7 @@ class AudioEngine {
         const activeSampleRate = this.ctx?.sampleRate || this.effectiveSampleRate || 0;
         const requestedSampleRate = this.requestedSettings.sampleRate;
         const profileSuggestion = this.evaluateProfileSuggestion();
+        const scheduler = this.getSchedulerTelemetry();
         const configuredBufferSize = this.settings.bufferSize;
         const effectiveBufferSize = typeof configuredBufferSize === 'number'
             ? configuredBufferSize
@@ -1913,7 +2753,14 @@ class AudioEngine {
             effectiveBufferSize,
             bufferStrategy: configuredBufferSize === 'auto' ? 'auto' : 'fixed',
             lookaheadMs: this.lookahead,
-            scheduleAheadTimeMs: this.scheduleAheadTime * 1000
+            scheduleAheadTimeMs: this.scheduleAheadTime * 1000,
+            schedulerMode: scheduler.mode,
+            schedulerP95TickDriftMs: scheduler.p95TickDriftMs,
+            schedulerP99TickDriftMs: scheduler.p99TickDriftMs,
+            schedulerP99LoopMs: scheduler.p99LoopMs,
+            schedulerQueueEntries: scheduler.queueEntryCount,
+            schedulerQueueActive: scheduler.queueActiveCount,
+            schedulerQueueP95Candidates: scheduler.p95QueueCandidateCount
         };
     }
 
@@ -1927,6 +2774,10 @@ class AudioEngine {
             cueTrackId: this.cueTrackId,
             cueMode: this.cueMode
         };
+    }
+
+    getLastGraphUpdateStats() {
+        return this.lastGraphUpdateStats;
     }
 
     async recoverPlaybackGraph(tracks: Track[]) {
@@ -1987,16 +2838,22 @@ class AudioEngine {
     }
 
     getWaveformEnvelopeData(buffer: AudioBuffer, steps: number): { min: Float32Array; max: Float32Array } {
-        const left = buffer.getChannelData(0);
-        const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
-        if (steps <= 0 || left.length === 0) {
+        if (steps <= 0 || buffer.length === 0) {
             return {
                 min: new Float32Array(0),
                 max: new Float32Array(0)
             };
         }
 
-        const safeSteps = Math.max(1, Math.min(steps, left.length));
+        const safeSteps = Math.max(1, Math.min(steps, buffer.length));
+        const cachedEnvelope = this.getCachedWaveformEnvelope(buffer, safeSteps);
+        if (cachedEnvelope) {
+            return cachedEnvelope;
+        }
+
+        const left = buffer.getChannelData(0);
+        const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
+
         const stepSize = Math.max(1, Math.floor(left.length / safeSteps));
         const minValues = new Float32Array(safeSteps);
         const maxValues = new Float32Array(safeSteps);
@@ -2017,10 +2874,13 @@ class AudioEngine {
             maxValues[i] = localMax === -1 ? 0 : localMax;
         }
 
-        return {
+        const envelope = {
             min: minValues,
             max: maxValues
         };
+
+        this.storeCachedWaveformEnvelope(buffer, safeSteps, envelope);
+        return envelope;
     }
 
     getWaveformData(buffer: AudioBuffer, steps: number): Float32Array {
@@ -2147,20 +3007,20 @@ class AudioEngine {
             return;
         }
 
+        this.currentBpm = bpm;
         this.updateTracks(tracks);
 
         this.isPlaying = true;
-        this.currentBpm = bpm;
         this.offsetTime = offsetTime;
 
         // Calculate the "Zero Point" of the timeline relative to Now
         // ProjectTime = Now - VirtualStart
         // VirtualStart = Now - ProjectTime
         this.virtualStartTime = this.ctx.currentTime - offsetTime;
+        this.primeSchedulerQueueState(offsetTime, offsetTime + this.scheduleAheadTime);
 
         // Start Scheduler
-        if (this.schedulerTimer) window.clearInterval(this.schedulerTimer);
-        this.schedulerTimer = window.setInterval(() => this.schedulerLoop(), this.schedulerIntervalMs);
+        this.startSchedulerDriver();
     }
 
     pause() {
@@ -2169,10 +3029,8 @@ class AudioEngine {
         this.offsetTime = pauseTime; // Store where we stopped
         this.virtualStartTime = (this.ctx?.currentTime || 0) - pauseTime;
         this.stopPlayback(); // Kill sound
-        if (this.schedulerTimer) {
-            window.clearInterval(this.schedulerTimer);
-            this.schedulerTimer = null;
-        }
+        this.stopSchedulerDriver();
+        this.resetSchedulerQueueState();
         // Do not suspend context, just stop scheduling
     }
 
@@ -2180,10 +3038,8 @@ class AudioEngine {
         const stopTime = this.getCurrentTime();
         this.isPlaying = false;
         this.stopPlayback();
-        if (this.schedulerTimer) {
-            window.clearInterval(this.schedulerTimer);
-            this.schedulerTimer = null;
-        }
+        this.stopSchedulerDriver();
+        this.resetSchedulerQueueState();
 
         if (reset) {
             this.offsetTime = 0;
@@ -2197,6 +3053,7 @@ class AudioEngine {
     seek(time: number, tracks: Track[], bpm: number) {
         const wasPlaying = this.isPlaying;
         this.stopPlayback(); // Stop current sounds
+        this.resetSchedulerQueueState();
 
         this.offsetTime = time;
         this.virtualStartTime = (this.ctx?.currentTime || 0) - time;
@@ -2210,6 +3067,8 @@ class AudioEngine {
     setBpm(bpm: number) {
         // console.log(`[AudioEngine] setBpm: ${bpm}`);
         this.currentBpm = bpm;
+        this.schedulerQueueSignature = '';
+        this.rebuildSchedulerQueue(this.currentTracksSnapshot);
         this.updateActiveSourcesParams();
     }
 
@@ -2248,98 +3107,134 @@ class AudioEngine {
     // --- SCHEDULER ---
 
     private schedulerLoop(tracks?: Track[]) {
-        if (!this.ctx) return;
+        const loopStartedAtMs = performance.now();
 
-        const tracksToSchedule = (tracks && tracks.length > 0 ? tracks : this.currentTracksSnapshot)
-            .map((track) => this.sanitizeTrack(track));
-        if (tracksToSchedule.length === 0) return;
+        if (this.schedulerLoopRunning) {
+            this.schedulerSkippedTickCount += 1;
+            return;
+        }
 
-        const scheduleWindow = this.scheduleAheadTime;
-        const now = this.ctx.currentTime;
-        const projectTime = now - this.virtualStartTime;
-        const lookAheadTime = projectTime + scheduleWindow;
+        this.schedulerLoopRunning = true;
 
-        tracksToSchedule.forEach((track) => {
-            if (track.isMuted) return;
+        try {
+            if (!this.ctx) return;
 
-            track.clips.forEach((rawClip) => {
-                const clip = this.sanitizeClip(rawClip);
-                const secondsPerBar = (60 / this.currentBpm) * 4;
-                const clipStartSec = (clip.start - 1) * secondsPerBar;
-                const clipDurationSec = clip.length * secondsPerBar;
-                const clipEndSec = clipStartSec + clipDurationSec;
+            if (tracks && tracks.length > 0) {
+                const safeTracks = tracks.map((track) => this.sanitizeTrack(track));
+                this.currentTracksSnapshot = safeTracks;
+                this.refreshSchedulerQueue(tracks, safeTracks);
+            }
 
-                if (clipEndSec > projectTime && clipStartSec < lookAheadTime) {
-                    const clipNodeId = `${track.id}-${clip.id}`;
+            if (this.schedulerQueueEntriesByStart.length === 0) {
+                return;
+            }
 
-                    const exhaustedUntil = this.exhaustedClipWindows.get(clipNodeId);
-                    if (typeof exhaustedUntil === 'number') {
-                        if (projectTime < exhaustedUntil - 0.0001) {
-                            return;
-                        }
-                        this.exhaustedClipWindows.delete(clipNodeId);
+            const scheduleWindow = this.scheduleAheadTime;
+            const now = this.ctx.currentTime;
+            const projectTime = now - this.virtualStartTime;
+            const lookAheadTime = projectTime + scheduleWindow;
+
+            const schedulerCandidates = this.collectSchedulerCandidates(projectTime, lookAheadTime);
+
+            schedulerCandidates.forEach((entry) => {
+                const { track, clip } = entry;
+                if (track.isMuted) return;
+
+                const clipNodeId = entry.id;
+                const exhaustedUntil = this.exhaustedClipWindows.get(clipNodeId);
+                if (typeof exhaustedUntil === 'number') {
+                    if (projectTime < exhaustedUntil - 0.0001) {
+                        return;
                     }
-
-                    if (this.activeSources.has(clipNodeId)) return;
-
-                    let startOffset = 0;
-                    let playAt = 0;
-                    let durationToPlay = clipDurationSec;
-
-                    if (clipStartSec < projectTime) {
-                        startOffset = projectTime - clipStartSec;
-                        playAt = now;
-                        durationToPlay = clipDurationSec - startOffset;
-                    } else {
-                        playAt = now + (clipStartSec - projectTime);
-                        startOffset = 0;
-                    }
-
-                    const clipInternalOffsetSec = (clip.offset || 0) * secondsPerBar;
-                    let finalBufferOffset = startOffset + clipInternalOffsetSec;
-
-                    if (clip.buffer) {
-                        const playbackProfile = this.getClipPlaybackProfile(track, clip);
-                        const effectiveRate = clip.isWarped ? playbackProfile.granularRate : playbackProfile.nativeRate;
-                        const safeRate = Math.max(0.0001, Math.abs(this.finiteOr(effectiveRate, 1)));
-                        const timelineOffsetSeconds = startOffset + clipInternalOffsetSec;
-                        finalBufferOffset = timelineOffsetSeconds * safeRate;
-                        const remainingBuffer = clip.buffer.duration - finalBufferOffset;
-
-                        if (!Number.isFinite(remainingBuffer) || remainingBuffer <= 0.0001) {
-                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
-                            return;
-                        }
-
-                        const maxPlayableTimelineDuration = remainingBuffer / safeRate;
-                        if (!Number.isFinite(maxPlayableTimelineDuration) || maxPlayableTimelineDuration <= 0.0001) {
-                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
-                            return;
-                        }
-
-                        if (maxPlayableTimelineDuration < durationToPlay - 0.0001) {
-                            durationToPlay = maxPlayableTimelineDuration;
-                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
-                        }
-                    }
-
-                    if (clip.buffer) {
-                        const remainingBuffer = clip.buffer.duration - finalBufferOffset;
-                        if (!Number.isFinite(remainingBuffer) || remainingBuffer <= 0.0001) {
-                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
-                            return;
-                        }
-
-                        if (remainingBuffer < durationToPlay - 0.0001) {
-                            durationToPlay = remainingBuffer;
-                            this.exhaustedClipWindows.set(clipNodeId, clipEndSec);
-                        }
-                    }
-
-                    this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId);
+                    this.exhaustedClipWindows.delete(clipNodeId);
                 }
+
+                if (this.activeSources.has(clipNodeId)) return;
+
+                let startOffset = 0;
+                let playAt = 0;
+                let durationToPlay = entry.durationSec;
+
+                if (entry.startSec < projectTime) {
+                    startOffset = projectTime - entry.startSec;
+                    playAt = now;
+                    durationToPlay = entry.durationSec - startOffset;
+                } else {
+                    playAt = now + (entry.startSec - projectTime);
+                }
+
+                if (!Number.isFinite(durationToPlay) || durationToPlay <= 0.0001) {
+                    return;
+                }
+
+                let finalBufferOffset = startOffset + entry.offsetSec;
+
+                if (clip.buffer) {
+                    const playbackProfile = this.getClipPlaybackProfile(track, clip);
+                    const effectiveRate = clip.isWarped ? playbackProfile.granularRate : playbackProfile.nativeRate;
+                    const safeRate = Math.max(0.0001, Math.abs(this.finiteOr(effectiveRate, 1)));
+                    const timelineOffsetSeconds = startOffset + entry.offsetSec;
+                    finalBufferOffset = timelineOffsetSeconds * safeRate;
+                    const remainingBuffer = clip.buffer.duration - finalBufferOffset;
+
+                    if (!Number.isFinite(remainingBuffer) || remainingBuffer <= 0.0001) {
+                        this.exhaustedClipWindows.set(clipNodeId, entry.endSec);
+                        return;
+                    }
+
+                    const maxPlayableTimelineDuration = remainingBuffer / safeRate;
+                    if (!Number.isFinite(maxPlayableTimelineDuration) || maxPlayableTimelineDuration <= 0.0001) {
+                        this.exhaustedClipWindows.set(clipNodeId, entry.endSec);
+                        return;
+                    }
+
+                    if (maxPlayableTimelineDuration < durationToPlay - 0.0001) {
+                        durationToPlay = maxPlayableTimelineDuration;
+                        this.exhaustedClipWindows.set(clipNodeId, entry.endSec);
+                    }
+                }
+
+                if (clip.buffer) {
+                    const remainingBuffer = clip.buffer.duration - finalBufferOffset;
+                    if (!Number.isFinite(remainingBuffer) || remainingBuffer <= 0.0001) {
+                        this.exhaustedClipWindows.set(clipNodeId, entry.endSec);
+                        return;
+                    }
+
+                    if (remainingBuffer < durationToPlay - 0.0001) {
+                        durationToPlay = remainingBuffer;
+                        this.exhaustedClipWindows.set(clipNodeId, entry.endSec);
+                    }
+                }
+
+                this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId);
             });
-        });
+        } finally {
+            const loopEndedAtMs = performance.now();
+            const loopDurationMs = Math.max(0, loopEndedAtMs - loopStartedAtMs);
+
+            this.schedulerTickCount += 1;
+            this.pushSchedulerSample(this.schedulerLoopDurationSamplesMs, loopDurationMs);
+
+            if (this.schedulerLastTickAtMs > 0) {
+                const tickIntervalMs = Math.max(0, loopStartedAtMs - this.schedulerLastTickAtMs);
+                this.pushSchedulerSample(this.schedulerTickIntervalSamplesMs, tickIntervalMs);
+
+                const expectedTickAtMs = this.schedulerExpectedNextTickAtMs > 0
+                    ? this.schedulerExpectedNextTickAtMs
+                    : this.schedulerLastTickAtMs + this.schedulerIntervalMs;
+                const tickDriftMs = Math.max(0, loopStartedAtMs - expectedTickAtMs);
+                this.pushSchedulerSample(this.schedulerTickDriftSamplesMs, tickDriftMs);
+            }
+
+            if (loopDurationMs > (this.schedulerIntervalMs * 0.9)) {
+                this.schedulerOverrunCount += 1;
+            }
+
+            this.schedulerLastTickAtMs = loopStartedAtMs;
+            this.schedulerExpectedNextTickAtMs = loopStartedAtMs + this.schedulerIntervalMs;
+            this.schedulerLoopRunning = false;
+        }
     }
 
     scheduleAudioClip(clip: Clip, track: Track, playAt: number, bufferOffset: number, duration: number, nodeId: string) {
@@ -2452,6 +3347,39 @@ class AudioEngine {
 
     startPlayback() {
         // Alias
+    }
+
+    private stopActiveSourcesForTrack(trackId: string) {
+        const prefix = `${trackId}-`;
+
+        this.activeSources.forEach((activeSource, nodeId) => {
+            if (!nodeId.startsWith(prefix)) return;
+
+            if (activeSource.source) {
+                try { activeSource.source.stop(); } catch {
+                    // already stopped
+                }
+                try { activeSource.source.disconnect(); } catch {
+                    // already disconnected
+                }
+            }
+
+            if (activeSource.granularNode) {
+                activeSource.granularNode.parameters.get('isPlaying')?.setValueAtTime(0, this.ctx?.currentTime || 0);
+                window.setTimeout(() => {
+                    try { activeSource.granularNode?.disconnect(); } catch {
+                        // already disconnected
+                    }
+                }, 60);
+            }
+
+            try { activeSource.gain.disconnect(); } catch {
+                // already disconnected
+            }
+
+            this.activeSources.delete(nodeId);
+            this.exhaustedClipWindows.delete(nodeId);
+        });
     }
 
     stopPlayback() {

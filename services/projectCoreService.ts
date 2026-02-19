@@ -1,4 +1,5 @@
 import { Track, TrackType } from '../types';
+import { loadStudioSettings } from './studioSettingsService';
 
 interface CreateTrackOptions {
     id: string;
@@ -31,7 +32,32 @@ const cloneTracksCollection = <T>(source: T[] | undefined): T[] => {
     return [...source];
 };
 
+const resolveDefaultAudioListening = (): { monitor: Track['monitor']; monitoringEnabled: boolean } => {
+    const settings = loadStudioSettings();
+
+    if (settings.defaultListenMode === 'always') {
+        return {
+            monitor: 'in',
+            monitoringEnabled: true
+        };
+    }
+
+    if (settings.defaultListenMode === 'armed') {
+        return {
+            monitor: 'auto',
+            monitoringEnabled: true
+        };
+    }
+
+    return {
+        monitor: 'auto',
+        monitoringEnabled: false
+    };
+};
+
 export const createTrack = (options: CreateTrackOptions): Track => {
+    const defaultAudioListening = options.type === TrackType.AUDIO ? resolveDefaultAudioListening() : null;
+
     return {
         id: options.id,
         name: options.name,
@@ -41,7 +67,7 @@ export const createTrack = (options: CreateTrackOptions): Track => {
         pan: options.pan ?? 0,
         reverb: options.reverb ?? 0,
         transpose: options.transpose ?? 0,
-        monitor: options.monitor ?? 'auto',
+        monitor: options.monitor ?? defaultAudioListening?.monitor ?? 'auto',
         isMuted: options.isMuted ?? false,
         isSoloed: options.isSoloed ?? false,
         isArmed: options.isArmed ?? false,
@@ -60,7 +86,7 @@ export const createTrack = (options: CreateTrackOptions): Track => {
             : {
                 profile: 'studio-voice',
                 inputGain: 1,
-                monitoringEnabled: false,
+                monitoringEnabled: defaultAudioListening?.monitoringEnabled ?? false,
                 monitoringReverb: false,
                 monitoringEcho: false
             }

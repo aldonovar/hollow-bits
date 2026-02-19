@@ -1,9 +1,9 @@
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useCallback, useSyncExternalStore } from 'react';
 import { Track } from '../types';
 import { Trash2, Circle } from 'lucide-react';
 import Knob from './Knob';
-import { audioEngine } from '../services/audioEngine';
+import { trackHeaderMeterStore } from '../services/trackHeaderMeterStore';
 
 interface TrackHeaderProps {
     track: Track;
@@ -15,12 +15,13 @@ interface TrackHeaderProps {
 }
 
 const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isSelected, onSelect, onUpdate, onDelete }) => {
-    const [rmsMeterLevel, setRmsMeterLevel] = useState(0);
-    const [peakMeterLevel, setPeakMeterLevel] = useState(0);
-    const [clipped, setClipped] = useState(false);
-    const lastClipTime = useRef(0);
-    const lastFrameTime = useRef(0);
     const monitorModes: Track['monitor'][] = ['in', 'auto', 'off'];
+
+    const meterSnapshot = useSyncExternalStore(
+        useCallback((listener) => trackHeaderMeterStore.subscribe(track.id, listener), [track.id]),
+        useCallback(() => trackHeaderMeterStore.getSnapshot(track.id), [track.id]),
+        () => trackHeaderMeterStore.getSnapshot(track.id)
+    );
 
     const dbToMeterNormalized = (db: number): number => {
         const minDb = -72;
@@ -34,58 +35,9 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
     const showMonitor = height >= 140;
     const isCompact = height < 100;
 
-    // Real-time Metering
-    useEffect(() => {
-        let rAF: number;
-        const minFrameDelta = 1000 / 30;
-
-        const commitMeterLevel = (
-            setter: React.Dispatch<React.SetStateAction<number>>,
-            next: number
-        ) => {
-            setter((prev) => {
-                if (Math.abs(prev - next) < 0.0035) return prev;
-                return next;
-            });
-        };
-
-        const updateMeter = (timestamp: number) => {
-            if ((timestamp - lastFrameTime.current) < minFrameDelta) {
-                rAF = requestAnimationFrame(updateMeter);
-                return;
-            }
-            lastFrameTime.current = timestamp;
-
-            if (track.isMuted) {
-                commitMeterLevel(setRmsMeterLevel, 0);
-                commitMeterLevel(setPeakMeterLevel, 0);
-                setClipped(false);
-            } else {
-                const meter = audioEngine.getTrackMeter(track.id);
-                const peakLevel = dbToMeterNormalized(meter.peakDb);
-                const rmsLevel = Math.min(peakLevel, dbToMeterNormalized(meter.rmsDb));
-
-                commitMeterLevel(setPeakMeterLevel, peakLevel);
-                commitMeterLevel(setRmsMeterLevel, rmsLevel);
-
-                // Clip Handling (Hold for 1s)
-                const now = Date.now();
-                if (meter.peakDb >= -0.3) {
-                    setClipped(true);
-                    lastClipTime.current = now;
-                } else {
-                    // Turn off clip if held long enough
-                    if (now - lastClipTime.current > 1000) {
-                        setClipped(prev => prev ? false : prev);
-                    }
-                }
-            }
-            rAF = requestAnimationFrame(updateMeter);
-        };
-
-        rAF = requestAnimationFrame(updateMeter);
-        return () => cancelAnimationFrame(rAF);
-    }, [track.id, track.isMuted]);
+    const peakMeterLevel = track.isMuted ? 0 : dbToMeterNormalized(meterSnapshot.peakDb);
+    const rmsMeterLevel = track.isMuted ? 0 : Math.min(peakMeterLevel, dbToMeterNormalized(meterSnapshot.rmsDb));
+    const clipped = !track.isMuted && meterSnapshot.clipped;
 
     const peakHeight = Math.min(100, peakMeterLevel * 100);
     const rmsHeight = Math.min(100, rmsMeterLevel * 100);
