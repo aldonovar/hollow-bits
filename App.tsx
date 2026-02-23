@@ -734,7 +734,8 @@ const App: React.FC = () => {
             return false;
         }
 
-        const cursorTime = Math.max(0, audioEngine.getCurrentTime());
+        const cursorBarTime = positionToBarTime(transport);
+        const cursorTime = barToSeconds(cursorBarTime, transport.bpm);
         const projectEndBar = getProjectEndBar();
         const projectEndTime = barToSeconds(projectEndBar, transport.bpm);
         const shouldRestartFromBeginning = shouldRestartAtSongBoundary(cursorTime, projectEndTime);
@@ -753,6 +754,13 @@ const App: React.FC = () => {
         isPlayingRef.current = true;
         pauseResumeArmedRef.current = false;
         audioEngine.play(latestTracksRef.current, transport.bpm, 1, playbackStartTime);
+
+        if (!audioEngine.getIsPlaying()) {
+            isPlayingRef.current = false;
+            pauseResumeArmedRef.current = false;
+            setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
+            return false;
+        }
 
         if (!isTransportCommandCurrent(commandToken)) {
             return false;
