@@ -176,6 +176,8 @@ class AudioEngine {
     masterOutput: GainNode | null = null;
     masterAnalyser: AnalyserNode | null = null;
     masterAnalyserBuffer: Float32Array | null = null;
+    masterFrequencyDataBuffer: Uint8Array | null = null;
+    emptyFrequencyData: Uint8Array = new Uint8Array(0);
     cueGain: GainNode | null = null;
     cueSourceNode: AudioNode | null = null;
     cueTrackId: string | null = null;
@@ -1682,6 +1684,7 @@ class AudioEngine {
             this.masterOutput = null;
             this.masterAnalyser = null;
             this.masterAnalyserBuffer = null;
+            this.masterFrequencyDataBuffer = null;
             this.cueGain = null;
             this.limiter = null;
             this.defaultReverbImpulse = null;
@@ -2722,11 +2725,24 @@ class AudioEngine {
         this.resetMasterMeter();
     }
 
+    getFrequencyDataInto(target?: Uint8Array): Uint8Array {
+        if (!this.masterAnalyser) return this.emptyFrequencyData;
+        const frequencyBinCount = this.masterAnalyser.frequencyBinCount;
+
+        let output = target;
+        if (!output || output.length !== frequencyBinCount) {
+            if (!this.masterFrequencyDataBuffer || this.masterFrequencyDataBuffer.length !== frequencyBinCount) {
+                this.masterFrequencyDataBuffer = new Uint8Array(frequencyBinCount);
+            }
+            output = this.masterFrequencyDataBuffer;
+        }
+
+        this.masterAnalyser.getByteFrequencyData(output);
+        return output;
+    }
+
     getFrequencyData(): Uint8Array {
-        if (!this.masterAnalyser) return new Uint8Array(0);
-        const data = new Uint8Array(this.masterAnalyser.frequencyBinCount);
-        this.masterAnalyser.getByteFrequencyData(data);
-        return data;
+        return this.getFrequencyDataInto();
     }
 
     getDiagnostics(): EngineDiagnostics {
@@ -3007,6 +3023,10 @@ class AudioEngine {
             return;
         }
 
+        this.stopPlayback();
+        this.stopSchedulerDriver();
+        this.resetSchedulerQueueState();
+
         this.currentBpm = bpm;
         this.updateTracks(tracks);
 
@@ -3117,6 +3137,7 @@ class AudioEngine {
         this.schedulerLoopRunning = true;
 
         try {
+            if (!this.isPlaying) return;
             if (!this.ctx) return;
 
             if (tracks && tracks.length > 0) {
@@ -3137,6 +3158,7 @@ class AudioEngine {
             const schedulerCandidates = this.collectSchedulerCandidates(projectTime, lookAheadTime);
 
             schedulerCandidates.forEach((entry) => {
+                if (!this.isPlaying) return;
                 const { track, clip } = entry;
                 if (track.isMuted) return;
 
@@ -3238,7 +3260,7 @@ class AudioEngine {
     }
 
     scheduleAudioClip(clip: Clip, track: Track, playAt: number, bufferOffset: number, duration: number, nodeId: string) {
-        if (!this.ctx || !clip.buffer) return;
+        if (!this.ctx || !clip.buffer || !this.isPlaying) return;
         if (!isFinite(duration) || duration <= 0) return;
         const clipBuffer = clip.buffer;
 
@@ -3351,6 +3373,7 @@ class AudioEngine {
 
     private stopActiveSourcesForTrack(trackId: string) {
         const prefix = `${trackId}-`;
+        const now = this.ctx?.currentTime || 0;
 
         this.activeSources.forEach((activeSource, nodeId) => {
             if (!nodeId.startsWith(prefix)) return;
@@ -3365,7 +3388,13 @@ class AudioEngine {
             }
 
             if (activeSource.granularNode) {
-                activeSource.granularNode.parameters.get('isPlaying')?.setValueAtTime(0, this.ctx?.currentTime || 0);
+                const isPlayingParam = activeSource.granularNode.parameters.get('isPlaying');
+                try {
+                    isPlayingParam?.cancelScheduledValues(now);
+                } catch {
+                    // older engines may not support canceling on this param
+                }
+                isPlayingParam?.setValueAtTime(0, now);
                 window.setTimeout(() => {
                     try { activeSource.granularNode?.disconnect(); } catch {
                         // already disconnected
@@ -3383,13 +3412,20 @@ class AudioEngine {
     }
 
     stopPlayback() {
+        const now = this.ctx?.currentTime || 0;
         this.activeSources.forEach(({ source, granularNode, gain }) => {
             if (source) {
                 try { source.stop(); } catch (e) { }
                 source.disconnect();
             }
             if (granularNode) {
-                granularNode.parameters.get('isPlaying')?.setValueAtTime(0, this.ctx!.currentTime);
+                const isPlayingParam = granularNode.parameters.get('isPlaying');
+                try {
+                    isPlayingParam?.cancelScheduledValues(now);
+                } catch {
+                    // older engines may not support canceling on this param
+                }
+                isPlayingParam?.setValueAtTime(0, now);
                 setTimeout(() => granularNode.disconnect(), 100);
             }
             try { gain.disconnect(); } catch {
@@ -3903,47 +3939,58 @@ class AudioEngine {
             if (!nodes) return;
 
             track.clips.forEach(clip => {
-                if (!clip.buffer) return;
+                const safeClip = this.sanitizeClip(clip);
+                if (!safeClip.buffer) return;
 
-                const startRes = (clip.start - 1) * (60 / options.bpm) * 4;
-                const durRes = clip.length * (60 / options.bpm) * 4;
-                const clipOriginalBpm = clip.originalBpm || 120;
-                const clipTransposeSemitones = (track.transpose || 0) + (clip.transpose || 0);
+                const startRes = (safeClip.start - 1) * (60 / options.bpm) * 4;
+                const durRes = safeClip.length * (60 / options.bpm) * 4;
+                const clipOriginalBpm = Math.max(1, this.finiteOr(safeClip.originalBpm ?? options.bpm, options.bpm));
+                const clipTransposeSemitones = this.finiteOr(track.transpose, 0) + this.finiteOr(safeClip.transpose ?? 0, 0);
                 const totalSemitones = this.masterTransposeSemitones + clipTransposeSemitones;
-                const shouldUseGranular = granularReady && Boolean(clip.isWarped);
-                const clipOffsetSeconds = clip.offset ? clip.offset * (60 / options.bpm) * 4 : 0;
+                const clipPlaybackRate = this.clamp(this.finiteOr(safeClip.playbackRate, 1), 0.25, 4);
+                const bpmRatio = options.bpm / clipOriginalBpm;
+                const transposeMult = Math.pow(2, totalSemitones / 12);
+                const granularRate = bpmRatio * clipPlaybackRate;
+                const nativeRate = granularRate * transposeMult;
+                const shouldUseGranular = granularReady && Boolean(safeClip.isWarped);
+                const effectiveRate = shouldUseGranular ? granularRate : nativeRate;
+                const safeRate = Math.max(0.0001, Math.abs(this.finiteOr(effectiveRate, 1)));
+                const clipOffsetTimelineSeconds = Math.max(0, this.finiteOr(safeClip.offset, 0)) * (60 / options.bpm) * 4;
+                const clipOffsetSeconds = clipOffsetTimelineSeconds * safeRate;
+                const remainingBuffer = Math.max(0, safeClip.buffer.duration - clipOffsetSeconds);
+                if (remainingBuffer <= 0.0001) return;
+
+                const maxPlayableTimelineDuration = remainingBuffer / safeRate;
+                const renderDuration = Math.min(durRes, maxPlayableTimelineDuration);
+                if (!Number.isFinite(renderDuration) || renderDuration <= 0.0001) return;
 
                 const clipGain = offlineCtx.createGain();
-                this.applyClipEnvelope(clipGain, clip, startRes, durRes, options.bpm);
+                this.applyClipEnvelope(clipGain, safeClip, startRes, renderDuration, options.bpm);
                 clipGain.connect(nodes.input);
 
                 if (shouldUseGranular) {
                     const node = new AudioWorkletNode(offlineCtx, 'granular-processor');
-                    const ch0 = clip.buffer.getChannelData(0);
-                    const ch1 = clip.buffer.numberOfChannels > 1 ? clip.buffer.getChannelData(1) : ch0;
+                    const ch0 = safeClip.buffer.getChannelData(0);
+                    const ch1 = safeClip.buffer.numberOfChannels > 1 ? safeClip.buffer.getChannelData(1) : ch0;
                     node.port.postMessage({ type: 'loadBuffer', buffer: [ch0, ch1] });
                     node.connect(clipGain);
 
                     const p = node.parameters;
                     p.get('startOffset')?.setValueAtTime(clipOffsetSeconds, startRes);
                     p.get('isPlaying')?.setValueAtTime(1, startRes);
-                    p.get('isPlaying')?.setValueAtTime(0, startRes + durRes);
-
-                    const bpmRatio = options.bpm / clipOriginalBpm;
-                    p.get('playbackRate')?.setValueAtTime(bpmRatio, startRes);
-                    p.get('pitch')?.setValueAtTime(Math.pow(2, totalSemitones / 12), startRes);
+                    p.get('isPlaying')?.setValueAtTime(0, startRes + renderDuration);
+                    p.get('playbackRate')?.setValueAtTime(granularRate, startRes);
+                    p.get('pitch')?.setValueAtTime(transposeMult, startRes);
                     return;
                 }
 
                 const source = offlineCtx.createBufferSource();
-                source.buffer = clip.buffer;
+                source.buffer = safeClip.buffer;
+                source.playbackRate.value = nativeRate;
 
-                // Non-warped: play at native speed, only apply transpose
-                const transposeMult = Math.pow(2, totalSemitones / 12);
-                source.playbackRate.value = transposeMult;
-
+                const bufferDurationToConsume = Math.max(0.0001, renderDuration * Math.max(0.0001, Math.abs(nativeRate)));
                 source.connect(clipGain);
-                source.start(startRes, clipOffsetSeconds, durRes);
+                source.start(startRes, clipOffsetSeconds, bufferDurationToConsume);
             });
         });
 
@@ -4014,7 +4061,10 @@ class AudioEngine {
         let offset = 44;
         for (let i = 0; i < length; i++) {
             for (let ch = 0; ch < numChannels; ch++) {
-                let sample = Math.max(-1, Math.min(1, channels[ch][i]));
+                const sourceSample = channels[ch][i];
+                let sample = useFloat
+                    ? sourceSample
+                    : Math.max(-1, Math.min(1, sourceSample));
 
                 if (ditherEnabled) {
                     const tpdfNoise = (Math.random() + Math.random() - 1) * lsb;
@@ -4040,7 +4090,12 @@ class AudioEngine {
                     view.setUint8(offset + 2, (int24 >> 16) & 0xFF);
                     offset += 3;
                 } else {
-                    view.setFloat32(offset, sample, true);
+                    if (useFloat) {
+                        view.setFloat32(offset, sample, true);
+                    } else {
+                        const int32 = Math.round(sample < 0 ? sample * 0x80000000 : sample * 0x7FFFFFFF);
+                        view.setInt32(offset, int32, true);
+                    }
                     offset += 4;
                 }
             }

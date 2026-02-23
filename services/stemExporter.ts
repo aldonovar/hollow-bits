@@ -5,6 +5,7 @@
 import JSZip from 'jszip';
 import { ExportAudioFormat, Track, TrackType } from '../types';
 import { audioTranscodeService } from './audioTranscodeService';
+import { audioEngine } from './audioEngine';
 
 // ============================================================================
 // INTERFACES
@@ -119,85 +120,176 @@ class StemExporter {
         this.currentExport = new AbortController();
         let totalSize = 0;
 
-        // Render each track sequentially to keep memory stable on large projects.
-        for (let stemIdx = 0; stemIdx < exportableTracks.length; stemIdx++) {
-            const track = exportableTracks[stemIdx];
-
-            try {
-                stems[stemIdx].status = 'rendering';
-                onProgress?.(stems);
-
-                if (this.currentExport?.signal.aborted) {
-                    throw new Error('Export cancelled');
-                }
-
-                const audioBuffer = await this.renderTrackOffline(
-                    track,
-                    bpm,
-                    projectDurationSeconds,
-                    opts,
-                    (progress) => {
-                        stems[stemIdx].progress = progress * 50;
-                        onProgress?.(stems);
-                    }
-                );
-
-                stems[stemIdx].status = 'encoding';
-                stems[stemIdx].progress = 50;
-                onProgress?.(stems);
-
-                const wavBlob = this.encodeWav(audioBuffer, opts);
-                let outputBlob: Blob = wavBlob;
-                let extension: ExportAudioFormat = 'wav';
-
-                if (opts.format !== 'wav') {
-                    outputBlob = await audioTranscodeService.transcodeFromWavBlob(wavBlob, {
-                        format: opts.format,
-                        sampleRate: opts.sampleRate,
-                        bitDepth: opts.bitDepth
-                    });
-                    extension = opts.format;
-                }
-
-                const filename = `${stems[stemIdx].trackName}.${extension}`;
-                stemFolder.file(filename, outputBlob);
-                totalSize += outputBlob.size;
-
-                stems[stemIdx].status = 'complete';
-                stems[stemIdx].progress = 100;
-                onProgress?.(stems);
-            } catch (error) {
-                stems[stemIdx].status = 'error';
-                stems[stemIdx].error = error instanceof Error ? error.message : 'Unknown error';
-                onProgress?.(stems);
-            }
+        const previousMasterVolumeDb = opts.includeEffects ? audioEngine.getMasterVolumeDb() : null;
+        if (opts.includeEffects && previousMasterVolumeDb !== null && previousMasterVolumeDb !== 0) {
+            audioEngine.setMasterVolumeDb(0);
         }
 
-        // Check if any stems completed successfully
-        const completedStems = stems.filter(s => s.status === 'complete');
+        try {
+            // Render each track sequentially to keep memory stable on large projects.
+            for (let stemIdx = 0; stemIdx < exportableTracks.length; stemIdx++) {
+                const track = exportableTracks[stemIdx];
 
-        if (completedStems.length === 0) {
+                try {
+                    stems[stemIdx].status = 'rendering';
+                    onProgress?.(stems);
+
+                    if (this.currentExport?.signal.aborted) {
+                        throw new Error('Export cancelled');
+                    }
+
+                    const audioBuffer = opts.includeEffects
+                        ? await this.renderTrackWithEffects(
+                            tracks,
+                            track,
+                            bpm,
+                            projectDurationBars,
+                            opts,
+                            (progress) => {
+                                stems[stemIdx].progress = progress * 50;
+                                onProgress?.(stems);
+                            }
+                        )
+                        : await this.renderTrackOffline(
+                            track,
+                            bpm,
+                            projectDurationSeconds,
+                            opts,
+                            (progress) => {
+                                stems[stemIdx].progress = progress * 50;
+                                onProgress?.(stems);
+                            }
+                        );
+
+                    stems[stemIdx].status = 'encoding';
+                    stems[stemIdx].progress = 50;
+                    onProgress?.(stems);
+
+                    const wavBlob = this.encodeWav(audioBuffer, opts);
+                    let outputBlob: Blob = wavBlob;
+                    let extension: ExportAudioFormat = 'wav';
+
+                    if (opts.format !== 'wav') {
+                        outputBlob = await audioTranscodeService.transcodeFromWavBlob(wavBlob, {
+                            format: opts.format,
+                            sampleRate: opts.sampleRate,
+                            bitDepth: opts.bitDepth
+                        });
+                        extension = opts.format;
+                    }
+
+                    const filename = `${stems[stemIdx].trackName}.${extension}`;
+                    stemFolder.file(filename, outputBlob);
+                    totalSize += outputBlob.size;
+
+                    stems[stemIdx].status = 'complete';
+                    stems[stemIdx].progress = 100;
+                    onProgress?.(stems);
+                } catch (error) {
+                    stems[stemIdx].status = 'error';
+                    stems[stemIdx].error = error instanceof Error ? error.message : 'Unknown error';
+                    onProgress?.(stems);
+                }
+            }
+
+            // Check if any stems completed successfully
+            const completedStems = stems.filter(s => s.status === 'complete');
+
+            if (completedStems.length === 0) {
+                return {
+                    success: false,
+                    stems,
+                    totalDuration: projectDurationSeconds,
+                    totalSize: 0
+                };
+            }
+
+            // Generate ZIP blob
+            const zipBlob = await zip.generateAsync({
+                type: 'blob',
+                compression: 'STORE' // Keep export fast and avoid re-compressing already encoded audio.
+            });
+
             return {
-                success: false,
+                success: true,
+                zipBlob,
                 stems,
                 totalDuration: projectDurationSeconds,
-                totalSize: 0
+                totalSize
             };
+        } finally {
+            if (opts.includeEffects && previousMasterVolumeDb !== null) {
+                audioEngine.setMasterVolumeDb(previousMasterVolumeDb);
+            }
+            this.currentExport = null;
+        }
+    }
+
+    private buildStemGroupRouteChain(tracks: Track[], targetTrackId: string): Set<string> {
+        const tracksById = new Map(tracks.map((track) => [track.id, track]));
+        const routeChain = new Set<string>([targetTrackId]);
+        let cursor = tracksById.get(targetTrackId) || null;
+        let guard = 0;
+
+        while (cursor?.groupId && guard < 32) {
+            const groupId = cursor.groupId;
+            if (!groupId || routeChain.has(groupId)) break;
+
+            const groupTrack = tracksById.get(groupId);
+            if (!groupTrack || groupTrack.type !== TrackType.GROUP) break;
+
+            routeChain.add(groupId);
+            cursor = groupTrack;
+            guard += 1;
         }
 
-        // Generate ZIP blob
-        const zipBlob = await zip.generateAsync({
-            type: 'blob',
-            compression: 'STORE' // Keep export fast and avoid re-compressing already encoded audio.
+        return routeChain;
+    }
+
+    private buildIsolatedStemTracks(tracks: Track[], targetTrackId: string): Track[] {
+        const routeChain = this.buildStemGroupRouteChain(tracks, targetTrackId);
+
+        return tracks.map((track) => {
+            const isReturn = track.type === TrackType.RETURN;
+            const isOnRoute = routeChain.has(track.id);
+            const shouldKeepActive = isReturn || isOnRoute;
+
+            return {
+                ...track,
+                isMuted: shouldKeepActive ? track.isMuted : true,
+                isSoloed: false,
+                soloSafe: false,
+                sends: shouldKeepActive ? (track.sends || {}) : {},
+                sendModes: shouldKeepActive ? (track.sendModes || {}) : {}
+            };
+        });
+    }
+
+    private async renderTrackWithEffects(
+        tracks: Track[],
+        targetTrack: Track,
+        bpm: number,
+        projectDurationBars: number,
+        options: ExportOptions,
+        onProgress?: (progress: number) => void
+    ): Promise<AudioBuffer> {
+        const isolatedTracks = this.buildIsolatedStemTracks(tracks, targetTrack.id);
+        onProgress?.(0.15);
+
+        const renderedBuffer = await audioEngine.renderProject(isolatedTracks, {
+            bars: Math.max(1, projectDurationBars),
+            bpm,
+            sampleRate: options.sampleRate,
+            sourceId: `stem-${targetTrack.id}`
         });
 
-        return {
-            success: true,
-            zipBlob,
-            stems,
-            totalDuration: projectDurationSeconds,
-            totalSize
-        };
+        onProgress?.(1);
+
+        if (options.normalizeLevel > 0) {
+            return this.normalizeBuffer(renderedBuffer, options.normalizeLevel);
+        }
+
+        return renderedBuffer;
     }
 
     /**
@@ -248,15 +340,18 @@ class StemExporter {
             // Calculate playback rate for time stretching
             const originalBpm = clip.originalBpm || bpm;
             const transposeSemitones = (track.transpose || 0) + (clip.transpose || 0);
-            const playbackRate = (bpm / originalBpm) * Math.pow(2, transposeSemitones / 12);
+            const clipPlaybackRate = this.clamp(clip.playbackRate || 1, 0.25, 4);
+            const playbackRate = (bpm / originalBpm) * clipPlaybackRate * Math.pow(2, transposeSemitones / 12);
             source.playbackRate.value = playbackRate;
 
             // Schedule the clip
             const startTime = Math.max(0, clipStartSeconds);
             const clipOffsetSeconds = (clip.offset || 0) * beatsPerBar * secondsPerBeat;
             const timelineOffset = clipStartSeconds < 0 ? Math.abs(clipStartSeconds) : 0;
-            const offset = clipOffsetSeconds + timelineOffset;
-            const duration = Math.min(clipDurationSeconds, durationSeconds - startTime);
+            const safeRate = Math.max(0.0001, Math.abs(playbackRate));
+            const offset = (clipOffsetSeconds + timelineOffset) * safeRate;
+            const maxTimelineDurationFromBuffer = Math.max(0, (clip.buffer.duration - offset) / safeRate);
+            const duration = Math.min(clipDurationSeconds, durationSeconds - startTime, maxTimelineDurationFromBuffer);
 
             if (startTime < durationSeconds && duration > 0) {
                 const fadeInSeconds = this.clamp((clip.fadeIn || 0) * beatsPerBar * secondsPerBeat, 0, duration);
@@ -276,7 +371,7 @@ class StemExporter {
                     clipGain.gain.linearRampToValueAtTime(0, startTime + duration);
                 }
 
-                source.start(startTime, offset, duration);
+                source.start(startTime, offset, duration * safeRate);
             }
         }
 
@@ -383,13 +478,17 @@ class StemExporter {
         let offset = 44;
         for (let i = 0; i < numSamples; i++) {
             for (let ch = 0; ch < numChannels; ch++) {
-                const sample = Math.max(-1, Math.min(1, channelData[ch][i]));
+                const sourceSample = channelData[ch][i];
+                const sample = bitDepth === 32
+                    ? sourceSample
+                    : Math.max(-1, Math.min(1, sourceSample));
 
                 if (bitDepth === 16) {
-                    view.setInt16(offset, sample * 0x7FFF, true);
+                    const intSample = Math.round(sample < 0 ? sample * 0x8000 : sample * 0x7FFF);
+                    view.setInt16(offset, intSample, true);
                     offset += 2;
                 } else if (bitDepth === 24) {
-                    const intSample = Math.round(sample * 0x7FFFFF);
+                    const intSample = Math.round(sample < 0 ? sample * 0x800000 : sample * 0x7FFFFF);
                     view.setUint8(offset, intSample & 0xFF);
                     view.setUint8(offset + 1, (intSample >> 8) & 0xFF);
                     view.setUint8(offset + 2, (intSample >> 16) & 0xFF);
