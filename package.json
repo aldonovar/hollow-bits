@@ -8,12 +8,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "assets:performer": "python scripts/generate-performer-frames.py",
+    "assets:performer:ffmpeg": "node scripts/generate-performer-frames.mjs",
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
     "perf:gate": "node scripts/audio-performance-gate.mjs",
     "quality:gates": "npm run typecheck && npm run test:unit && npm run build",
     "build": "tsc && vite build",
+    "build:win": "npm run build && electron-builder --win --x64 --publish never",
     "preview": "vite preview",
     "electron": "electron electron/main.cjs --dev",
     "dev:electron": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron\""
@@ -43,5 +46,44 @@
     "vite": "^6.2.0",
     "vitest": "^4.0.18",
     "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.etherealstudio.daw",
+    "productName": "ETHEREAL STUDIO",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**/*"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "ETHEREAL STUDIO"
+    }
   }
 }

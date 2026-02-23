@@ -29,6 +29,7 @@ const SEND_MIN_DB = -60;
 const SEND_MAX_DB = 6;
 const METER_MIN_DB = -72;
 const METER_MAX_DB = 6;
+const METER_UPDATE_EPSILON_DB = 0.2;
 
 const monitorModes: Track['monitor'][] = ['in', 'auto', 'off'];
 
@@ -79,6 +80,47 @@ const getTrackKindLabel = (trackType: TrackType): string => {
 
 const getFaderPosition = (dbValue: number): number => {
   return ((clamp(dbValue, FADER_MIN_DB, FADER_MAX_DB) - FADER_MIN_DB) / (FADER_MAX_DB - FADER_MIN_DB)) * 100;
+};
+
+const isMeterSnapshotDifferent = (prev: MeterSnapshot, next: MeterSnapshot): boolean => {
+  return (
+    Math.abs(prev.rmsDb - next.rmsDb) > METER_UPDATE_EPSILON_DB
+    || Math.abs(prev.peakDb - next.peakDb) > METER_UPDATE_EPSILON_DB
+  );
+};
+
+const areTrackMetersDifferent = (
+  prev: Record<string, MeterSnapshot>,
+  next: Record<string, MeterSnapshot>
+): boolean => {
+  const prevKeys = Object.keys(prev);
+  const nextKeys = Object.keys(next);
+  if (prevKeys.length !== nextKeys.length) return true;
+
+  for (const key of nextKeys) {
+    const prevMeter = prev[key];
+    const nextMeter = next[key];
+    if (!prevMeter || !nextMeter || isMeterSnapshotDifferent(prevMeter, nextMeter)) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const areClipHoldsDifferent = (
+  prev: Record<string, boolean>,
+  next: Record<string, boolean>
+): boolean => {
+  const prevKeys = Object.keys(prev);
+  const nextKeys = Object.keys(next);
+  if (prevKeys.length !== nextKeys.length) return true;
+
+  for (const key of nextKeys) {
+    if (prev[key] !== next[key]) return true;
+  }
+
+  return false;
 };
 
 const MeterColumn: React.FC<{ meter: MeterSnapshot; isClipHold: boolean; widthClass?: string; onReset: () => void }> = ({
@@ -142,6 +184,7 @@ const Mixer: React.FC<MixerProps> = ({
     const standardTracks = tracks.filter((track) => track.type !== TrackType.RETURN && track.type !== TrackType.GROUP);
     return [...standardTracks, ...groupTracks, ...returnTracks];
   }, [tracks, groupTracks, returnTracks]);
+  const trackIds = useMemo(() => tracks.map((track) => track.id), [tracks]);
 
   useEffect(() => {
     if (!focusedTrackId && orderedTracks.length > 0) {
@@ -162,12 +205,12 @@ const Mixer: React.FC<MixerProps> = ({
           if (time - lastFrame >= 33) {
             lastFrame = time;
 
-            const snapshot = audioEngine.getMeterSnapshot(tracks.map((track) => track.id));
+            const snapshot = audioEngine.getMeterSnapshot(trackIds);
 
-            setTrackMeters(snapshot.tracks);
-            setTrackClipHolds(snapshot.clipHolds);
-            setMasterMeter(snapshot.master);
-            setMasterClipHold(snapshot.masterClipHold);
+            setTrackMeters((prev) => (areTrackMetersDifferent(prev, snapshot.tracks) ? snapshot.tracks : prev));
+            setTrackClipHolds((prev) => (areClipHoldsDifferent(prev, snapshot.clipHolds) ? snapshot.clipHolds : prev));
+            setMasterMeter((prev) => (isMeterSnapshotDifferent(prev, snapshot.master) ? snapshot.master : prev));
+            setMasterClipHold((prev) => (prev !== snapshot.masterClipHold ? snapshot.masterClipHold : prev));
           }
 
       rafId = requestAnimationFrame(animate);
@@ -175,7 +218,7 @@ const Mixer: React.FC<MixerProps> = ({
 
     rafId = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(rafId);
-  }, [tracks]);
+  }, [trackIds]);
 
   useEffect(() => {
     setMasterVolumeDb(audioEngine.getMasterVolumeDb());

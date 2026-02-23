@@ -69,6 +69,14 @@ npm run dev:electron
 npm run build
 ```
 
+### Build Executable (Windows x64)
+
+```bash
+npm run build:win
+```
+
+El instalador `.exe` se genera en `release/` con el icono definido en `build/icon.ico`.
+
 ## Quality and Performance Gates
 
 Run the core engineering gates locally:

@@ -5,6 +5,7 @@ import { TransportState } from '../types';
 import { MidiDevice } from '../services/MidiService';
 import { audioEngine } from '../services/audioEngine';
 import { platformService } from '../services/platformService';
+import { positionToBarTime } from '../services/transportStateService';
 import Knob from './Knob';
 import AppLogo from './AppLogo';
 
@@ -177,6 +178,7 @@ const Transport: React.FC<TransportProps> = React.memo(({
     onExport
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const frequencyDataRef = useRef<Uint8Array | null>(null);
     const windowActionLockRef = useRef(false);
     const breathResetTimerRef = useRef<number | null>(null);
     const [cpuLoad, setCpuLoad] = useState(0);
@@ -234,7 +236,10 @@ const Transport: React.FC<TransportProps> = React.memo(({
 
             const width = canvas.width;
             const height = canvas.height;
-            const data = audioEngine.getFrequencyData();
+            const data = audioEngine.getFrequencyDataInto(frequencyDataRef.current || undefined);
+            if (frequencyDataRef.current !== data) {
+                frequencyDataRef.current = data;
+            }
 
             ctx.fillStyle = '#0a0a0a';
             ctx.fillRect(0, 0, width, height);
@@ -273,7 +278,9 @@ const Transport: React.FC<TransportProps> = React.memo(({
     const handleGlobalReset = () => { setBpm(124); setMasterTranspose(0); };
     const buttonClass = "w-9 h-7 flex items-center justify-center rounded-[2px] border border-transparent transition-all";
     const inactiveClass = "bg-[#2d2d2d] text-gray-400 hover:bg-[#3d3d3d] hover:text-gray-200";
-    const isPaused = !transport.isPlaying && transport.currentBar > 1;
+    const engineIsPlaying = audioEngine.getIsPlaying();
+    const hasResumeOffset = audioEngine.getCurrentTime() > 0.0001;
+    const isPaused = !transport.isPlaying && !engineIsPlaying && (positionToBarTime(transport) > 1.0001 || hasResumeOffset);
     const isLoopEnabled = transport.loopMode !== 'off';
     const loopBadge = transport.loopMode === 'once' ? '1' : transport.loopMode === 'infinite' ? '∞' : '';
     const loopTitle = transport.loopMode === 'off'

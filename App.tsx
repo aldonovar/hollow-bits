@@ -6,13 +6,11 @@ import Timeline from './components/Timeline';
 import Mixer from './components/Mixer';
 import Editor from './components/Editor';
 import Browser from './components/Browser';
-import AISidebar from './components/AISidebar';
-import NoteScannerPanel, { ApplyScanPayload } from './components/NoteScannerPanel';
+import type { ApplyScanPayload } from './components/NoteScannerPanel';
 import AppLogo from './components/AppLogo';
 import SessionView from './components/SessionView';
 import Modal from './components/Modal';
 import { FluidPanel } from './components/FluidPanel';
-import ExportModal from './components/ExportModal';
 import AsciiPerformerDock from './components/AsciiPerformerDock';
 import CollabPanel, { CollabActivityEntry } from './components/CollabPanel';
 import { INITIAL_TRACKS, getTrackColorByPosition } from './constants';
@@ -63,6 +61,10 @@ import {
     FolderInput, Settings, Cpu, LayoutGrid, Search, Users, Layers, Sliders, Sparkles, AlertTriangle, Undo2, Redo2, PlayCircle, Folder, HardDrive, Save, Trash2, Piano
 } from 'lucide-react';
 import { HardwareSettingsModal } from './components/HardwareSettingsModal';
+
+const AISidebar = React.lazy(() => import('./components/AISidebar'));
+const NoteScannerPanel = React.lazy(() => import('./components/NoteScannerPanel'));
+const ExportModal = React.lazy(() => import('./components/ExportModal'));
 
 // --- ATOMIC COMPONENTS (Extracted for Performance) ---
 
@@ -221,6 +223,9 @@ const App: React.FC = () => {
 
     // Side Panels
     const [activeToolPanel, setActiveToolPanel] = useState<ToolPanel>(null);
+    const [hasLoadedAISidebar, setHasLoadedAISidebar] = useState(false);
+    const [hasLoadedNoteScanner, setHasLoadedNoteScanner] = useState(false);
+    const [hasLoadedExportModal, setHasLoadedExportModal] = useState(false);
 
     // Menus & Modals
     const [showFileMenu, setShowFileMenu] = useState(false);
@@ -234,6 +239,24 @@ const App: React.FC = () => {
     const showBrowser = activeToolPanel === 'browser';
     const showAI = activeToolPanel === 'ai';
     const showNoteScanner = activeToolPanel === 'scanner';
+
+    useEffect(() => {
+        if (showAI) {
+            setHasLoadedAISidebar(true);
+        }
+    }, [showAI]);
+
+    useEffect(() => {
+        if (showNoteScanner) {
+            setHasLoadedNoteScanner(true);
+        }
+    }, [showNoteScanner]);
+
+    useEffect(() => {
+        if (showExportModal) {
+            setHasLoadedExportModal(true);
+        }
+    }, [showExportModal]);
 
     // Zoom & UI
     const [zoom] = useState(40);
@@ -281,9 +304,14 @@ const App: React.FC = () => {
         lastAudibleAt: Date.now(),
         recovering: false
     });
+    const latestTracksRef = useRef<Track[]>(tracks);
+    const trackSyncQueuedRef = useRef(false);
+    const trackSyncFrameRef = useRef<number | null>(null);
 
     // Audio Lock Ref (Prevents double-fire on rapid clicks)
     const isPlayingRef = useRef(false);
+    const transportCommandTokenRef = useRef(0);
+    const pauseResumeArmedRef = useRef(false);
 
     const [transport, setTransport] = useState<TransportState>({
         isPlaying: false,
@@ -540,17 +568,31 @@ const App: React.FC = () => {
 
     // Sync Tracks with Audio Engine
     useEffect(() => {
-        let isCancelled = false;
-        const syncFrame = window.requestAnimationFrame(() => {
-            if (isCancelled) return;
-            audioEngine.updateTracks(tracks);
-        });
-
-        return () => {
-            isCancelled = true;
-            window.cancelAnimationFrame(syncFrame);
-        };
+        latestTracksRef.current = tracks;
     }, [tracks]);
+
+    useEffect(() => {
+        if (trackSyncQueuedRef.current) {
+            return;
+        }
+
+        trackSyncQueuedRef.current = true;
+        trackSyncFrameRef.current = window.requestAnimationFrame(() => {
+            trackSyncQueuedRef.current = false;
+            trackSyncFrameRef.current = null;
+            audioEngine.updateTracks(latestTracksRef.current);
+        });
+    }, [tracks]);
+
+    useEffect(() => {
+        return () => {
+            if (trackSyncFrameRef.current !== null) {
+                window.cancelAnimationFrame(trackSyncFrameRef.current);
+            }
+            trackSyncFrameRef.current = null;
+            trackSyncQueuedRef.current = false;
+        };
+    }, []);
 
     useEffect(() => {
         if (!transport.isPlaying) {
@@ -576,7 +618,7 @@ const App: React.FC = () => {
 
             playbackSilenceGuardRef.current.recovering = true;
 
-            void audioEngine.recoverPlaybackGraph(tracks)
+            void audioEngine.recoverPlaybackGraph(latestTracksRef.current)
                 .catch((error) => {
                     console.warn('Audio silence guard recovery failed.', error);
                 })
@@ -588,7 +630,7 @@ const App: React.FC = () => {
         }, 320);
 
         return () => window.clearInterval(interval);
-    }, [tracks, transport.isPlaying]);
+    }, [transport.isPlaying]);
 
     // --- HELPER: GET PROJECT DURATION ---
     const projectEndBar = useMemo(() => {
@@ -639,6 +681,7 @@ const App: React.FC = () => {
                         loopOnceRemainingRef.current = loopAction.nextOnceRemaining;
                         audioEngine.stop(true);
                         isPlayingRef.current = false;
+                        pauseResumeArmedRef.current = false;
                         setTransport((prev: TransportState) => ({
                             ...prev,
                             isPlaying: false,
@@ -665,59 +708,78 @@ const App: React.FC = () => {
         audioEngine.setMasterPitch(transport.masterTranspose);
     }, [transport.masterTranspose]);
 
+    const beginTransportCommand = useCallback((): number => {
+        transportCommandTokenRef.current += 1;
+        return transportCommandTokenRef.current;
+    }, []);
 
-    // --- TRANSPORT HANDLERS ---
+    const isTransportCommandCurrent = useCallback((token: number): boolean => {
+        return transportCommandTokenRef.current === token;
+    }, []);
 
-    const handlePlay = useCallback(async () => {
-        if (isPlayingRef.current) return;
+    const playFromTransportCursor = useCallback(async (commandToken: number): Promise<boolean> => {
+        if (isPlayingRef.current || audioEngine.getIsPlaying()) {
+            pauseResumeArmedRef.current = false;
+            return true;
+        }
 
         const ready = await audioEngine.ensurePlaybackReady();
+        if (!isTransportCommandCurrent(commandToken)) {
+            return false;
+        }
+
         if (!ready) {
             isPlayingRef.current = false;
             setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
-            return;
+            return false;
         }
 
-        const cursorBarTime = positionToBarTime(transport);
-        const cursorTime = barToSeconds(cursorBarTime, transport.bpm);
+        const cursorTime = Math.max(0, audioEngine.getCurrentTime());
         const projectEndBar = getProjectEndBar();
         const projectEndTime = barToSeconds(projectEndBar, transport.bpm);
         const shouldRestartFromBeginning = shouldRestartAtSongBoundary(cursorTime, projectEndTime);
         const playbackStartTime = shouldRestartFromBeginning ? 0 : cursorTime;
-
-        try {
-            await audioEngine.init();
-        } catch (error) {
-            console.warn('No se pudo inicializar motor de audio desde Play.', error);
-            isPlayingRef.current = false;
-            setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
-            return;
-        }
-
-        const ctx = audioEngine.getContext();
-        if (ctx.state !== 'running') {
-            try {
-                await ctx.resume();
-            } catch (error) {
-                console.warn('No se pudo reanudar AudioContext desde Play.', error);
-                isPlayingRef.current = false;
-                setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
-                return;
-            }
-        }
+        const playbackStartBarTime = Math.max(1, 1 + (playbackStartTime / getSecondsPerBar(transport.bpm)));
+        const playbackStartPosition = barTimeToPosition(playbackStartBarTime);
 
         if (playbackStartTime <= 0.0001) {
             loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
         }
 
+        if (!isTransportCommandCurrent(commandToken)) {
+            return false;
+        }
+
         isPlayingRef.current = true;
-        audioEngine.play(tracks, transport.bpm, 1, playbackStartTime);
+        pauseResumeArmedRef.current = false;
+        audioEngine.play(latestTracksRef.current, transport.bpm, 1, playbackStartTime);
+
+        if (!isTransportCommandCurrent(commandToken)) {
+            return false;
+        }
+
         setTransport((prev: TransportState) => ({
             ...prev,
             isPlaying: true,
-            ...(playbackStartTime <= 0.0001 ? { currentBar: 1, currentBeat: 1, currentSixteenth: 1 } : {})
+            currentBar: playbackStartPosition.currentBar,
+            currentBeat: playbackStartPosition.currentBeat,
+            currentSixteenth: playbackStartPosition.currentSixteenth
         }));
-    }, [tracks, transport, getProjectEndBar]);
+
+        return true;
+    }, [getProjectEndBar, isTransportCommandCurrent, transport]);
+
+
+    // --- TRANSPORT HANDLERS ---
+
+    const handlePlay = useCallback(async () => {
+        if (isPlayingRef.current || audioEngine.getIsPlaying()) {
+            pauseResumeArmedRef.current = false;
+            return;
+        }
+        const commandToken = beginTransportCommand();
+        await playFromTransportCursor(commandToken);
+    }, [beginTransportCommand, playFromTransportCursor]);
 
     const finalizeActiveRecordings = useCallback(async () => {
         const activeRecordingTrackIds = new Set(audioEngine.getActiveRecordingTrackIds());
@@ -772,22 +834,70 @@ const App: React.FC = () => {
     }, [applyTrackMutation, tracks, transport.bpm]);
 
     const handlePause = useCallback(async () => {
-        if (transport.isPlaying) {
-            if (transport.isRecording) {
+        const commandToken = beginTransportCommand();
+        const isTransportRunning = isPlayingRef.current || audioEngine.getIsPlaying() || transport.isPlaying;
+
+        if (isTransportRunning) {
+            const hasActiveRecordings = transport.isRecording || audioEngine.getActiveRecordingTrackIds().length > 0;
+            if (hasActiveRecordings) {
                 await finalizeActiveRecordings();
             }
+
+            if (!isTransportCommandCurrent(commandToken)) {
+                return;
+            }
+
+            const pauseTime = Math.max(0, audioEngine.getCurrentTime());
+            const pauseBarTime = Math.max(1, 1 + (pauseTime / getSecondsPerBar(transport.bpm)));
+            const pausePosition = barTimeToPosition(pauseBarTime);
             audioEngine.pause();
-            setTransport((prev: TransportState) => ({ ...prev, isPlaying: false, isRecording: false }));
+            setTransport((prev: TransportState) => ({
+                ...prev,
+                isPlaying: false,
+                isRecording: false,
+                currentBar: pausePosition.currentBar,
+                currentBeat: pausePosition.currentBeat,
+                currentSixteenth: pausePosition.currentSixteenth
+            }));
             isPlayingRef.current = false;
-        } else if (audioEngine.getCurrentTime() > 0.0001) {
-            handlePlay();
+            pauseResumeArmedRef.current = true;
+            return;
         }
-    }, [transport.isPlaying, transport.isRecording, finalizeActiveRecordings, handlePlay]);
+
+        const canResumeFromPause = pauseResumeArmedRef.current && audioEngine.getCurrentTime() > 0.0001;
+        if (canResumeFromPause) {
+            await playFromTransportCursor(commandToken);
+            return;
+        }
+
+        const fallbackPauseTime = Math.max(0, audioEngine.getCurrentTime());
+        const fallbackPauseBarTime = Math.max(1, 1 + (fallbackPauseTime / getSecondsPerBar(transport.bpm)));
+        const fallbackPausePosition = barTimeToPosition(fallbackPauseBarTime);
+
+        audioEngine.pause();
+        isPlayingRef.current = false;
+        pauseResumeArmedRef.current = fallbackPauseTime > 0.0001;
+        setTransport((prev: TransportState) => ({
+            ...prev,
+            isPlaying: false,
+            isRecording: false,
+            currentBar: fallbackPausePosition.currentBar,
+            currentBeat: fallbackPausePosition.currentBeat,
+            currentSixteenth: fallbackPausePosition.currentSixteenth
+        }));
+    }, [beginTransportCommand, transport.isPlaying, transport.isRecording, transport.bpm, finalizeActiveRecordings, isTransportCommandCurrent, playFromTransportCursor]);
 
     const handleStop = useCallback(async () => {
+        const commandToken = beginTransportCommand();
+
         if (transport.isRecording) {
             await finalizeActiveRecordings();
         }
+
+        if (!isTransportCommandCurrent(commandToken)) {
+            return;
+        }
+
         audioEngine.stop(true); // True resets offset to 0
         loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
         setTransport((prev: TransportState) => ({
@@ -799,40 +909,60 @@ const App: React.FC = () => {
             currentSixteenth: 1
         }));
         isPlayingRef.current = false;
-    }, [transport.loopMode, transport.isRecording, finalizeActiveRecordings]);
+        pauseResumeArmedRef.current = false;
+    }, [beginTransportCommand, transport.loopMode, transport.isRecording, finalizeActiveRecordings, isTransportCommandCurrent]);
 
     const handleSkipStart = useCallback(async () => {
+        const commandToken = beginTransportCommand();
+
         if (transport.isRecording) {
             await finalizeActiveRecordings();
         }
 
-        audioEngine.seek(0, tracks, transport.bpm);
+        if (!isTransportCommandCurrent(commandToken)) {
+            return;
+        }
+
+        audioEngine.seek(0, latestTracksRef.current, transport.bpm);
+        const engineIsPlaying = audioEngine.getIsPlaying() || isPlayingRef.current;
         loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
         setTransport((prev: TransportState) => ({
             ...prev,
+            isPlaying: engineIsPlaying,
             isRecording: false,
             currentBar: 1,
             currentBeat: 1,
             currentSixteenth: 1
         }));
-    }, [tracks, transport.bpm, transport.loopMode, transport.isRecording, finalizeActiveRecordings]);
+    }, [beginTransportCommand, transport.bpm, transport.loopMode, transport.isRecording, finalizeActiveRecordings, isTransportCommandCurrent]);
 
     const handleSkipEnd = useCallback(async () => {
+        const commandToken = beginTransportCommand();
         const endBar = getProjectEndBar();
 
         if (transport.isRecording) {
             await finalizeActiveRecordings();
         }
 
-        const targetBar = Math.max(1, Math.floor(endBar));
-        const targetTime = barToSeconds(targetBar, transport.bpm);
-
-        if (transport.isPlaying) {
-            audioEngine.pause();
-            isPlayingRef.current = false;
+        if (!isTransportCommandCurrent(commandToken)) {
+            return;
         }
 
-        audioEngine.seek(targetTime, tracks, transport.bpm);
+        const targetBarTime = Math.max(1, endBar);
+        const targetTime = barToSeconds(targetBarTime, transport.bpm);
+        const targetPosition = barTimeToPosition(targetBarTime);
+
+        if (isPlayingRef.current || audioEngine.getIsPlaying() || transport.isPlaying) {
+            audioEngine.pause();
+            isPlayingRef.current = false;
+            pauseResumeArmedRef.current = false;
+        }
+
+        if (!isTransportCommandCurrent(commandToken)) {
+            return;
+        }
+
+        audioEngine.seek(targetTime, latestTracksRef.current, transport.bpm);
         if (transport.loopMode === 'once') {
             loopOnceRemainingRef.current = 0;
         }
@@ -840,20 +970,27 @@ const App: React.FC = () => {
         setTransport((prev: TransportState) => ({
             ...prev,
             isPlaying: false,
-            currentBar: targetBar,
-            currentBeat: 1,
-            currentSixteenth: 1
+            isRecording: false,
+            currentBar: targetPosition.currentBar,
+            currentBeat: targetPosition.currentBeat,
+            currentSixteenth: targetPosition.currentSixteenth
         }));
-    }, [tracks, transport.bpm, getProjectEndBar, transport.loopMode, transport.isPlaying, transport.isRecording, finalizeActiveRecordings]);
+    }, [beginTransportCommand, transport.bpm, getProjectEndBar, transport.loopMode, transport.isPlaying, transport.isRecording, finalizeActiveRecordings, isTransportCommandCurrent]);
 
     const handleSeekToBar = useCallback(async (bar: number) => {
+        const commandToken = beginTransportCommand();
         const safeBar = Math.max(1, Number.isFinite(bar) ? bar : 1);
 
         if (transport.isRecording) {
             await finalizeActiveRecordings();
         }
 
-        audioEngine.seek(barToSeconds(safeBar, transport.bpm), tracks, transport.bpm);
+        if (!isTransportCommandCurrent(commandToken)) {
+            return;
+        }
+
+        audioEngine.seek(barToSeconds(safeBar, transport.bpm), latestTracksRef.current, transport.bpm);
+        const engineIsPlaying = audioEngine.getIsPlaying() || isPlayingRef.current;
 
         if (safeBar <= 1.0001 && transport.loopMode === 'once') {
             loopOnceRemainingRef.current = 1;
@@ -862,12 +999,13 @@ const App: React.FC = () => {
         const position = barTimeToPosition(safeBar);
         setTransport((prev: TransportState) => ({
             ...prev,
+            isPlaying: engineIsPlaying,
             isRecording: false,
             currentBar: position.currentBar,
             currentBeat: position.currentBeat,
             currentSixteenth: position.currentSixteenth
         }));
-    }, [finalizeActiveRecordings, tracks, transport.bpm, transport.isRecording, transport.loopMode]);
+    }, [beginTransportCommand, finalizeActiveRecordings, transport.bpm, transport.isRecording, transport.loopMode, isTransportCommandCurrent]);
 
     const handleLoopToggle = useCallback(() => {
         setTransport((prev: TransportState) => {
@@ -1352,11 +1490,31 @@ const App: React.FC = () => {
         }), { recolor: false });
     }, [applyTrackMutation, getPlaybackBarTime, transport.isPlaying]);
 
-    useEffect(() => {
-        let animationFrame = 0;
+    const shouldRunAutomationLoop = useMemo(() => {
+        return tracks.some((track) => {
+            const mode: AutomationMode = track.automationMode ?? 'read';
+            if (mode === 'off') return false;
+            if (mode === 'read') {
+                return Boolean(track.automationLanes && track.automationLanes.length > 0);
+            }
+            return true;
+        });
+    }, [tracks]);
 
-        const tick = () => {
-            if (transport.isPlaying) {
+    useEffect(() => {
+        if (!transport.isPlaying || !shouldRunAutomationLoop) {
+            return;
+        }
+
+        let animationFrame = 0;
+        let lastFrameTime = 0;
+
+        const targetFps = 30;
+        const minFrameDelta = 1000 / targetFps;
+
+        const tick = (timestamp: number) => {
+            if ((timestamp - lastFrameTime) >= minFrameDelta) {
+                lastFrameTime = timestamp;
                 const nowMs = performance.now();
                 const barTime = getPlaybackBarTime();
 
@@ -1418,7 +1576,7 @@ const App: React.FC = () => {
 
         animationFrame = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(animationFrame);
-    }, [applyTrackMutation, getPlaybackBarTime, transport.isPlaying]);
+    }, [applyTrackMutation, getPlaybackBarTime, shouldRunAutomationLoop, transport.isPlaying]);
 
     useEffect(() => {
         if (!transport.isPlaying && wasPlayingRef.current) {
@@ -1707,6 +1865,8 @@ const App: React.FC = () => {
     }, [recallMixSnapshot, storeMixSnapshot, toggleMixSnapshotCompare]);
 
     const handleRecordToggle = useCallback(async () => {
+        const commandToken = beginTransportCommand();
+
         if (transport.isRecording) {
             await finalizeActiveRecordings();
             return;
@@ -1735,17 +1895,26 @@ const App: React.FC = () => {
             armedTracks = [newTrack];
         }
 
-        recordingStartBarRef.current = transport.currentBar;
-
-        if (!transport.isPlaying) {
-            handlePlay();
+        if (!isTransportCommandCurrent(commandToken)) {
+            return;
         }
 
-        setTransport((prev: TransportState) => ({ ...prev, isRecording: true }));
+        const recordingStartSeconds = Math.max(0, audioEngine.getCurrentTime());
+        recordingStartBarRef.current = Math.max(1, 1 + (recordingStartSeconds / getSecondsPerBar(transport.bpm)));
+
+        if (!(isPlayingRef.current || audioEngine.getIsPlaying() || transport.isPlaying)) {
+            const startedPlayback = await playFromTransportCursor(commandToken);
+            if (!startedPlayback || !isTransportCommandCurrent(commandToken)) {
+                return;
+            }
+        }
+
+        pauseResumeArmedRef.current = false;
+        setTransport((prev: TransportState) => ({ ...prev, isPlaying: true, isRecording: true }));
         armedTracks.forEach((track) => {
             void audioEngine.startRecording(track.id, track.inputDeviceId);
         });
-    }, [transport.isRecording, transport.isPlaying, transport.currentBar, tracks, handlePlay, finalizeActiveRecordings, appendTracks]);
+    }, [beginTransportCommand, transport.isRecording, transport.isPlaying, tracks, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm]);
 
     const buildPersistedTracks = useCallback((sourceTracks: Track[]): Track[] => {
         return sourceTracks.map((track) => ({
@@ -1797,6 +1966,7 @@ const App: React.FC = () => {
 
         audioEngine.stop(true);
         isPlayingRef.current = false;
+        pauseResumeArmedRef.current = false;
         setLoadingMessage('Relacionando Archivos...');
 
         const rehydratedTracks = await Promise.all(projectData.tracks.map(async (track: Track) => {
@@ -1949,6 +2119,7 @@ const App: React.FC = () => {
         setActiveModal(null);
         audioEngine.stop(true);
         isPlayingRef.current = false;
+        pauseResumeArmedRef.current = false;
     }, [closeAllToolPanels, replaceTracks]);
 
     const handleNewProject = useCallback(() => { setActiveModal('new-project-confirm'); }, []);
@@ -1992,6 +2163,7 @@ const App: React.FC = () => {
                     audioEngine.pause();
                     setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
                     isPlayingRef.current = false;
+                    pauseResumeArmedRef.current = false;
                 }
                 const projectMetadata = createProjectDataSnapshot({
                     ...transport,
@@ -2506,12 +2678,24 @@ const App: React.FC = () => {
     }, []);
 
     const handleTimelineTimeUpdate = useCallback((bar: number, beat: number, sixteenth: number) => {
+        const engineIsPlaying = audioEngine.getIsPlaying() || isPlayingRef.current;
         setTransport((prev: TransportState) => {
-            if (prev.currentBar === bar && prev.currentBeat === beat && prev.currentSixteenth === sixteenth) {
+            if (
+                prev.currentBar === bar
+                && prev.currentBeat === beat
+                && prev.currentSixteenth === sixteenth
+                && prev.isPlaying === engineIsPlaying
+            ) {
                 return prev;
             }
 
-            return { ...prev, currentBar: bar, currentBeat: beat, currentSixteenth: sixteenth };
+            return {
+                ...prev,
+                isPlaying: engineIsPlaying,
+                currentBar: bar,
+                currentBeat: beat,
+                currentSixteenth: sixteenth
+            };
         });
     }, []);
 
@@ -2666,37 +2850,41 @@ const App: React.FC = () => {
                     {/* Project Input removed in favor of platformService */}
                 </div>
 
-                <AISidebar
-                    isOpen={showAI}
-                    onClose={closeAllToolPanels}
-                    bpm={transport.bpm}
-                    onPatternGenerated={(notes, name) => {
-                        const newTrack = createTrack({
-                            id: `t-ai-${Date.now()}`,
-                            name: name || 'AI Generator',
-                            type: TrackType.MIDI,
-                            color: '#B34BE4',
-                            volume: -6,
-                            clips: [{
-                                id: `c-ai-${Date.now()}`,
-                                name,
-                                color: '#B34BE4',
-                                start: 1,
-                                length: 4,
-                                notes,
-                                offset: 0,
-                                fadeIn: 0,
-                                fadeOut: 0,
-                                gain: 1,
-                                playbackRate: 1
-                            }]
-                        });
+                {hasLoadedAISidebar && (
+                    <React.Suspense fallback={null}>
+                        <AISidebar
+                            isOpen={showAI}
+                            onClose={closeAllToolPanels}
+                            bpm={transport.bpm}
+                            onPatternGenerated={(notes: Note[], name: string) => {
+                                const newTrack = createTrack({
+                                    id: `t-ai-${Date.now()}`,
+                                    name: name || 'AI Generator',
+                                    type: TrackType.MIDI,
+                                    color: '#B34BE4',
+                                    volume: -6,
+                                    clips: [{
+                                        id: `c-ai-${Date.now()}`,
+                                        name,
+                                        color: '#B34BE4',
+                                        start: 1,
+                                        length: 4,
+                                        notes,
+                                        offset: 0,
+                                        fadeIn: 0,
+                                        fadeOut: 0,
+                                        gain: 1,
+                                        playbackRate: 1
+                                    }]
+                                });
 
-                        appendTrack(newTrack);
-                        closeAllToolPanels();
-                    }}
-                    tracks={tracks}
-                />
+                                appendTrack(newTrack);
+                                closeAllToolPanels();
+                            }}
+                            tracks={tracks}
+                        />
+                    </React.Suspense>
+                )}
 
                 <FluidPanel
                     isOpen={showBrowser}
@@ -2717,15 +2905,19 @@ const App: React.FC = () => {
                     keepMounted
                     className="absolute left-[50px] top-0 right-0 bottom-0 z-[80] h-full border-l border-[#333] shadow-2xl bg-[#0a0a0d]/95 backdrop-blur-[2px]"
                 >
-                    <NoteScannerPanel
-                        isOpen={showNoteScanner}
-                        tracks={tracks}
-                        bpm={transport.bpm}
-                        selectedTrackId={selectedTrackId}
-                        onClose={closeAllToolPanels}
-                        onCreateMidiTrack={handleCreateMidiTrackFromScan}
-                        onInsertIntoTrack={handleInsertScanIntoMidiTrack}
-                    />
+                    {hasLoadedNoteScanner && (
+                        <React.Suspense fallback={<div className="h-full w-full bg-[#0a0a0d]" />}>
+                            <NoteScannerPanel
+                                isOpen={showNoteScanner}
+                                tracks={tracks}
+                                bpm={transport.bpm}
+                                selectedTrackId={selectedTrackId}
+                                onClose={closeAllToolPanels}
+                                onCreateMidiTrack={handleCreateMidiTrackFromScan}
+                                onInsertIntoTrack={handleInsertScanIntoMidiTrack}
+                            />
+                        </React.Suspense>
+                    )}
                 </FluidPanel>
 
                 <div className="flex-1 overflow-hidden relative flex flex-col bg-transparent">
@@ -2853,7 +3045,11 @@ const App: React.FC = () => {
                     </div>
                 </div>
             )}
-            <ExportModal isOpen={showExportModal} onClose={() => setShowExportModal(false)} tracks={tracks} totalBars={200} bpm={transport.bpm} />
+            {hasLoadedExportModal && (
+                <React.Suspense fallback={null}>
+                    <ExportModal isOpen={showExportModal} onClose={() => setShowExportModal(false)} tracks={tracks} totalBars={200} bpm={transport.bpm} />
+                </React.Suspense>
+            )}
             <Modal isOpen={activeModal === 'recovery'} onClose={handleDiscardRecoverySnapshot} title="Recuperación automática">
                 <div className="flex flex-col gap-4">
                     <p className="text-xs text-gray-300 leading-relaxed">
