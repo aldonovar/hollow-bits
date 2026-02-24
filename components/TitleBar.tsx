@@ -23,10 +23,10 @@ const TitleBar: React.FC = () => {
         <span className="text-[10px] font-bold tracking-[0.2em] text-gray-400 uppercase flex items-center gap-1">
           <span>HOLLOW</span>
           <span
-            className="normal-case text-[12px] tracking-[0.01em] text-daw-violet"
+            className="normal-case text-[14px] tracking-[0.01em] text-daw-violet"
             style={{
-              fontFamily: "'Brittany', 'Brittany Signature', 'Great Vibes', 'Segoe Script', cursive",
-              transform: 'scaleX(1.15)',
+              fontFamily: "'Brittany', 'Brittany Signature', cursive",
+              transform: 'scaleX(1.2)',
               transformOrigin: 'center center'
             }}
           >

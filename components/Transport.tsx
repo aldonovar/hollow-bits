@@ -430,16 +430,16 @@ const Transport: React.FC<TransportProps> = React.memo(({
                             <AppLogo size={28} withGlow={logoBreathing} />
                         </div>
                     </div>
-                    <div className="flex flex-col justify-center items-center leading-none min-w-[100px]">
+                    <div className="flex flex-col justify-center items-center leading-none min-w-[108px]">
                         <span className="font-black tracking-[0.3em] text-[12px] text-white text-center">HOLLOW</span>
                         <span
-                            className="inline-block text-[17px] -mt-[1px] text-transparent bg-clip-text bg-gradient-to-r from-daw-violet to-daw-ruby text-center"
+                            className="inline-block text-[19px] -mt-[1px] text-transparent bg-clip-text bg-gradient-to-r from-daw-violet to-daw-ruby text-center"
                             style={{
-                                fontFamily: "'Brittany', 'Brittany Signature', 'Great Vibes', 'Segoe Script', cursive",
+                                fontFamily: "'Brittany', 'Brittany Signature', cursive",
                                 letterSpacing: '0.01em',
-                                transform: 'scaleX(1.22)',
+                                transform: 'scaleX(1.26)',
                                 transformOrigin: 'center center',
-                                lineHeight: 0.86
+                                lineHeight: 0.9
                             }}
                         >
                             bits
