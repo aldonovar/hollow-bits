@@ -20,8 +20,19 @@ const TitleBar: React.FC = () => {
         style={{ WebkitAppRegion: 'drag' } as AppRegionStyle}
       >
         <AppLogo size={16} />
-        <span className="text-[10px] font-bold tracking-[0.2em] text-gray-400 uppercase">
-          Hollow Bits <span className="text-gray-600">| Desktop</span>
+        <span className="text-[10px] font-bold tracking-[0.2em] text-gray-400 uppercase flex items-center gap-1">
+          <span>HOLLOW</span>
+          <span
+            className="normal-case text-[11px] tracking-[0.01em] text-daw-violet"
+            style={{
+              fontFamily: "'Brittany', 'Brittany Signature', 'Great Vibes', 'Segoe Script', cursive",
+              transform: 'scaleX(1.12)',
+              transformOrigin: 'center center'
+            }}
+          >
+            bits
+          </span>
+          <span className="text-gray-600">| Desktop</span>
         </span>
       </div>
 
