@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createTrack } from '../../services/projectCoreService';
 import { TrackType } from '../../types';
 
-const STUDIO_SETTINGS_STORAGE_KEY = 'ethereal.studio-settings.v1';
+const STUDIO_SETTINGS_STORAGE_KEY = 'hollowbits.studio-settings.v1';
 
 const seedDefaultListenMode = (mode: 'manual' | 'armed' | 'always') => {
     localStorage.setItem(STUDIO_SETTINGS_STORAGE_KEY, JSON.stringify({

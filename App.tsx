@@ -156,8 +156,10 @@ interface MixSnapshot {
 
 type ToolPanel = 'browser' | 'ai' | 'scanner' | null;
 
-const AUDIO_SETTINGS_STORAGE_KEY = 'ethereal.audio-settings.v1';
-const AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY = 'ethereal.audio-effective-settings.v1';
+const AUDIO_SETTINGS_STORAGE_KEY = 'hollowbits.audio-settings.v1';
+const AUDIO_SETTINGS_STORAGE_KEY_LEGACY = 'ethereal.audio-settings.v1';
+const AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY = 'hollowbits.audio-effective-settings.v1';
+const AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY_LEGACY = 'ethereal.audio-effective-settings.v1';
 const MIN_CLIP_LENGTH_BARS = 0.0625;
 const AUTOSAVE_DEBOUNCE_MS = 1200;
 const IMPORT_AUDIO_CONCURRENCY = 2;
@@ -180,12 +182,38 @@ const sanitizeAudioSettings = (candidate: Partial<AudioSettings> | null | undefi
 const loadAudioSettingsFromStorage = (): AudioSettings => {
     try {
         const raw = localStorage.getItem(AUDIO_SETTINGS_STORAGE_KEY);
-        if (!raw) return getDefaultAudioSettings();
-        const parsed = JSON.parse(raw) as Partial<AudioSettings>;
-        return sanitizeAudioSettings(parsed);
+        if (raw) {
+            const parsed = JSON.parse(raw) as Partial<AudioSettings>;
+            return sanitizeAudioSettings(parsed);
+        }
+
+        const legacyRaw = localStorage.getItem(AUDIO_SETTINGS_STORAGE_KEY_LEGACY);
+        if (!legacyRaw) return getDefaultAudioSettings();
+
+        const parsedLegacy = sanitizeAudioSettings(JSON.parse(legacyRaw) as Partial<AudioSettings>);
+        localStorage.setItem(AUDIO_SETTINGS_STORAGE_KEY, JSON.stringify(parsedLegacy));
+        localStorage.removeItem(AUDIO_SETTINGS_STORAGE_KEY_LEGACY);
+        return parsedLegacy;
     } catch (error) {
         console.warn('No se pudieron leer preferencias de audio guardadas.', error);
         return getDefaultAudioSettings();
+    }
+};
+
+const migrateLegacyEffectiveAudioSettings = (): void => {
+    try {
+        if (localStorage.getItem(AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY)) {
+            localStorage.removeItem(AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY_LEGACY);
+            return;
+        }
+
+        const legacyRaw = localStorage.getItem(AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY_LEGACY);
+        if (!legacyRaw) return;
+
+        localStorage.setItem(AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY, legacyRaw);
+        localStorage.removeItem(AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY_LEGACY);
+    } catch {
+        // Non-blocking migration path.
     }
 };
 
@@ -452,6 +480,7 @@ const App: React.FC = () => {
         audioEngine.init(audioSettings);
         midiService.init();
         assetDb.init().catch(console.error);
+        migrateLegacyEffectiveAudioSettings();
 
         const unsubscribe = midiService.subscribeDevices((devices: MidiDevice[]) => {
             setMidiDevices(devices.filter(d => d.type === 'input'));
@@ -483,6 +512,7 @@ const App: React.FC = () => {
                 bufferSize: audioSettings.bufferSize,
                 updatedAt: Date.now()
             }));
+            localStorage.removeItem(AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY_LEGACY);
         } catch {
             // Non-blocking diagnostics persistence.
         }
@@ -492,6 +522,7 @@ const App: React.FC = () => {
         audioEngine.setAudioConfiguration(audioSettings);
         try {
             localStorage.setItem(AUDIO_SETTINGS_STORAGE_KEY, JSON.stringify(audioSettings));
+            localStorage.removeItem(AUDIO_SETTINGS_STORAGE_KEY_LEGACY);
         } catch (error) {
             console.warn('No se pudieron guardar preferencias de audio.', error);
         }
@@ -1703,7 +1734,7 @@ const App: React.FC = () => {
     const handleCopyCollabInvite = useCallback(async () => {
         if (!collabSessionId) return;
 
-        const invite = `ETHEREAL://session/${collabSessionId}`;
+        const invite = `HOLLOWBITS://session/${collabSessionId}`;
         try {
             await navigator.clipboard.writeText(invite);
             const now = Date.now();

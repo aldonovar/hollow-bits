@@ -1,4 +1,4 @@
-# ETHEREAL STUDIO - QUALITY AND RELEASE GATES
+# HOLLOW BITS - QUALITY AND RELEASE GATES
 
 ## 1) Engineering Gates (Always Required)
 - Type safety gate: `npm run typecheck`

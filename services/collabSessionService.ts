@@ -1,6 +1,22 @@
-const STORAGE_KEY = 'ethereal.collab.host-session.v1';
+const STORAGE_KEY = 'hollowbits.collab.host-session.v1';
+const LEGACY_STORAGE_KEY = 'ethereal.collab.host-session.v1';
 const MAX_ACTIVITY_ENTRIES = 80;
 const MAX_COMMAND_ENTRIES = 240;
+
+const readSnapshotPayload = (): string | null => {
+    const currentRaw = localStorage.getItem(STORAGE_KEY);
+    if (currentRaw) {
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+        return currentRaw;
+    }
+
+    const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!legacyRaw) return null;
+
+    localStorage.setItem(STORAGE_KEY, legacyRaw);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    return legacyRaw;
+};
 
 export interface CollabActivityRecord {
     id: string;
@@ -70,7 +86,7 @@ const sanitizeCommandJournal = (items: unknown): CollabCommandRecord[] => {
 
 export const loadCollabSessionSnapshot = (): CollabSessionSnapshot => {
     try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        const raw = readSnapshotPayload();
         if (!raw) {
             return {
                 sessionId: null,
@@ -117,6 +133,7 @@ export const saveCollabSessionSnapshot = (snapshot: CollabSessionSnapshot): void
         };
 
         localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
     } catch (error) {
         console.warn('No se pudo guardar la sesion de colaboracion.', error);
     }

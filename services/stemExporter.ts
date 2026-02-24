@@ -1,5 +1,5 @@
 // path: src/services/stemExporter.ts
-// Professional Multitrack Stem Exporter for Ethereal Studio
+// Professional multitrack stem exporter for HOLLOW BITS
 // Uses OfflineAudioContext for isolated track rendering + JSZip for packaging
 
 import JSZip from 'jszip';

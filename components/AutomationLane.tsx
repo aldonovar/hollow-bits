@@ -1,5 +1,5 @@
 // path: src/components/AutomationLane.tsx
-// Visual Automation Lane with SVG Bezier Curves for Ethereal Studio
+// Visual Automation Lane with SVG Bezier Curves for HOLLOW BITS
 // Renders parameter automation curves below tracks with drag-and-drop editing
 
 import React, { useState, useRef, useCallback, useMemo } from 'react';

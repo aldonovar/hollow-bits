@@ -10,8 +10,9 @@ import {
     stopRecoverySession
 } from '../../services/projectRecoveryService';
 
-const AUTOSAVE_STORAGE_KEY = 'ethereal.project-autosave.v1';
-const ACTIVE_SESSION_KEY = 'ethereal.session-active.v1';
+const AUTOSAVE_STORAGE_KEY = 'hollowbits.project-autosave.v1';
+const ACTIVE_SESSION_KEY = 'hollowbits.session-active.v1';
+const LEGACY_AUTOSAVE_STORAGE_KEY = 'ethereal.project-autosave.v1';
 
 const transportFixture: TransportState = {
     isPlaying: false,
@@ -83,6 +84,18 @@ describe('projectRecoveryService', () => {
         const remaining = loadAutosaveSnapshots();
         expect(remaining).toHaveLength(1);
         expect(remaining[0].id).toBe('old');
+    });
+
+    it('migrates legacy autosave storage key into hollowbits namespace', () => {
+        localStorage.setItem(LEGACY_AUTOSAVE_STORAGE_KEY, JSON.stringify([
+            createSnapshot('legacy', 7000)
+        ]));
+
+        const migrated = loadAutosaveSnapshots();
+        expect(migrated).toHaveLength(1);
+        expect(migrated[0].id).toBe('legacy');
+        expect(localStorage.getItem(AUTOSAVE_STORAGE_KEY)).not.toBeNull();
+        expect(localStorage.getItem(LEGACY_AUTOSAVE_STORAGE_KEY)).toBeNull();
     });
 
     it('tracks unclean exit markers for recovery sessions', () => {

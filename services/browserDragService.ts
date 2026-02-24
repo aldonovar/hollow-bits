@@ -1,6 +1,7 @@
 import { ScannedFileEntry } from '../types';
 
-export const BROWSER_DRAG_MIME = 'application/x-ethereal-browser-item';
+export const BROWSER_DRAG_MIME = 'application/x-hollowbits-browser-item';
+export const LEGACY_BROWSER_DRAG_MIME = 'application/x-ethereal-browser-item';
 
 export type BrowserDragPayload =
     | {
@@ -50,4 +51,11 @@ export const parseBrowserDragPayload = (value: string | null | undefined): Brows
     } catch {
         return null;
     }
+};
+
+export const readBrowserDragPayload = (dataTransfer: Pick<DataTransfer, 'getData'>): BrowserDragPayload | null => {
+    const current = parseBrowserDragPayload(dataTransfer.getData(BROWSER_DRAG_MIME));
+    if (current) return current;
+
+    return parseBrowserDragPayload(dataTransfer.getData(LEGACY_BROWSER_DRAG_MIME));
 };

@@ -431,8 +431,8 @@ const Transport: React.FC<TransportProps> = React.memo(({
                         </div>
                     </div>
                     <div className="flex flex-col justify-center leading-none">
-                        <span className="font-black tracking-[0.3em] text-[12px] text-white">ETHEREAL</span>
-                        <span className="font-bold tracking-[0.5em] text-[8px] mt-0.5 text-transparent bg-clip-text bg-gradient-to-r from-daw-violet to-daw-ruby">STUDIO</span>
+                        <span className="font-black tracking-[0.3em] text-[12px] text-white">HOLLOW</span>
+                        <span className="font-bold tracking-[0.5em] text-[8px] mt-0.5 text-transparent bg-clip-text bg-gradient-to-r from-daw-violet to-daw-ruby">BITS</span>
                     </div>
                 </div>
 

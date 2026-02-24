@@ -1,5 +1,5 @@
 <div align="center">
-  <img width="800" alt="ETHEREAL STUDIO" src="public/ethereal-banner.svg" />
+  <img width="800" alt="HOLLOW BITS" src="public/hollow-bits-banner.svg" />
 
   <br/>
 
@@ -19,7 +19,7 @@
 
 ## Philosophy
 
-**ETHEREAL STUDIO** is built as a local-first, desktop-first production environment where stability is a product feature, not an afterthought.
+**HOLLOW BITS** is built as a local-first, desktop-first production environment where stability is a product feature, not an afterthought.
 
 The goal is to feel as immediate as top-tier DAWs while exposing deeper engineering diagnostics for faster iteration and stricter release control.
 

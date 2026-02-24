@@ -1,9 +1,9 @@
 {
-  "name": "ethereal",
+  "name": "hollow-bits",
   "private": true,
   "version": "0.0.0",
-  "description": "ETHEREAL STUDIO desktop-first DAW for Windows x64",
-  "author": "ETHEREAL STUDIO",
+  "description": "HOLLOW BITS desktop-first DAW for Windows x64",
+  "author": "HOLLOW BITS",
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
@@ -48,8 +48,8 @@
     "wait-on": "^9.0.3"
   },
   "build": {
-    "appId": "com.etherealstudio.daw",
-    "productName": "ETHEREAL STUDIO",
+    "appId": "com.hollowbits.daw",
+    "productName": "HOLLOW BITS",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -83,7 +83,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
-      "shortcutName": "ETHEREAL STUDIO"
+      "shortcutName": "HOLLOW BITS"
     }
   }
 }

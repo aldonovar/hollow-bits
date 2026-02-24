@@ -21,7 +21,7 @@ const TitleBar: React.FC = () => {
       >
         <AppLogo size={16} />
         <span className="text-[10px] font-bold tracking-[0.2em] text-gray-400 uppercase">
-          Ethereal Studio <span className="text-gray-600">| Desktop</span>
+          Hollow Bits <span className="text-gray-600">| Desktop</span>
         </span>
       </div>
 

@@ -7,7 +7,7 @@ import { audioEngine } from '../services/audioEngine';
 import { trackHeaderMeterStore } from '../services/trackHeaderMeterStore';
 import type { TrackHeaderMeterSnapshot } from '../services/trackHeaderMeterStore';
 import { Scissors, FileAudio, Copy, ArrowRightLeft, AlignLeft, Grid, Magnet } from 'lucide-react';
-import { BROWSER_DRAG_MIME, BrowserDragPayload, parseBrowserDragPayload } from '../services/browserDragService';
+import { BrowserDragPayload, readBrowserDragPayload } from '../services/browserDragService';
 
 interface TimelineMutationOptions {
     noHistory?: boolean;
@@ -348,7 +348,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
 
         event.preventDefault();
 
-        const payload = parseBrowserDragPayload(event.dataTransfer.getData(BROWSER_DRAG_MIME));
+        const payload = readBrowserDragPayload(event.dataTransfer);
         if (!payload) return;
 
         const rect = event.currentTarget.getBoundingClientRect();

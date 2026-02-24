@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { loadStudioSettings, saveStudioSettings } from '../../services/studioSettingsService';
 
+const STUDIO_SETTINGS_STORAGE_KEY = 'hollowbits.studio-settings.v1';
+const LEGACY_STUDIO_SETTINGS_STORAGE_KEY = 'ethereal.studio-settings.v1';
+
 describe('studioSettingsService', () => {
     beforeEach(() => {
         window.localStorage.clear();
@@ -40,7 +43,7 @@ describe('studioSettingsService', () => {
     });
 
     it('sanitizes malformed benchmark history payloads', () => {
-        window.localStorage.setItem('ethereal.studio-settings.v1', JSON.stringify({
+        window.localStorage.setItem(LEGACY_STUDIO_SETTINGS_STORAGE_KEY, JSON.stringify({
             benchmarkHistory: [
                 { id: 'valid', createdAt: 100, gateStatus: 'fail', workletWinRate: 0.1 },
                 { gateStatus: 'warn' },
@@ -53,5 +56,7 @@ describe('studioSettingsService', () => {
         expect(loaded.benchmarkHistory.map((entry) => entry.id)).toEqual(['later', 'valid']);
         expect(loaded.benchmarkHistory[0].gateStatus).toBe('pass');
         expect(loaded.benchmarkHistory[1].gateStatus).toBe('fail');
+        expect(window.localStorage.getItem(STUDIO_SETTINGS_STORAGE_KEY)).not.toBeNull();
+        expect(window.localStorage.getItem(LEGACY_STUDIO_SETTINGS_STORAGE_KEY)).toBeNull();
     });
 });

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Clock3, Play, Square } from 'lucide-react';
 import { Clip, Track, TrackType } from '../types';
 import { audioEngine } from '../services/audioEngine';
-import { BROWSER_DRAG_MIME, BrowserDragPayload, parseBrowserDragPayload } from '../services/browserDragService';
+import { BrowserDragPayload, readBrowserDragPayload } from '../services/browserDragService';
 
 interface SessionViewProps {
     tracks: Track[];
@@ -187,7 +187,7 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, onExternalDrop, 
         if (!onExternalDrop) return;
 
         event.preventDefault();
-        const payload = parseBrowserDragPayload(event.dataTransfer.getData(BROWSER_DRAG_MIME));
+        const payload = readBrowserDragPayload(event.dataTransfer);
         if (!payload) return;
 
         onExternalDrop(trackId, sceneIndex, payload);

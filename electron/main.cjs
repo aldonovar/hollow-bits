@@ -221,9 +221,9 @@ ipcMain.handle('window-get-state', (event) => {
 ipcMain.handle('save-project', async (event, data, defaultName) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
-        title: 'Guardar Proyecto Ethereal',
+        title: 'Guardar Proyecto Hollow Bits',
         defaultPath: defaultName || 'Sin-titulo.esp',
-        filters: [{ name: 'Ethereal Studio Project', extensions: ['esp'] }]
+        filters: [{ name: 'Hollow Bits Project', extensions: ['esp'] }]
     });
 
     if (canceled || !filePath) {
@@ -240,7 +240,7 @@ ipcMain.handle('open-project', async (event) => {
     const { filePaths } = await dialog.showOpenDialog(win, {
         title: 'Abrir Proyecto',
         properties: ['openFile'],
-        filters: [{ name: 'Ethereal Studio Project', extensions: ['esp'] }]
+        filters: [{ name: 'Hollow Bits Project', extensions: ['esp'] }]
     });
 
     if (filePaths && filePaths.length > 0) {
@@ -371,7 +371,7 @@ ipcMain.handle('transcode-audio', async (_event, payload) => {
     const requestedSampleRate = clamp(Number(payload?.sampleRate || 44100), 8000, 192000);
     const sampleRate = format === 'mp3' ? Math.min(48000, requestedSampleRate) : requestedSampleRate;
 
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ethereal-export-'));
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hollowbits-export-'));
     const inputPath = path.join(tempDir, 'input.wav');
     const outputPath = path.join(tempDir, `output.${format}`);
 

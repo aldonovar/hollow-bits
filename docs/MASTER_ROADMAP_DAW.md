@@ -1,4 +1,4 @@
-# ETHEREAL STUDIO - MASTER ROADMAP (PRO EXECUTION)
+# HOLLOW BITS - MASTER ROADMAP (PRO EXECUTION)
 
 ## 1) North Star
 - Objetivo: construir un DAW desktop-first (Windows) con flujo ultra rapido, audio estable y herramientas inteligentes que compitan y superen casos de uso clave de Ableton Live y Logic Pro.

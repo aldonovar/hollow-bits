@@ -1,4 +1,4 @@
-# ETHEREAL STUDIO - P0 EXECUTION BACKLOG (FOUNDATION)
+# HOLLOW BITS - P0 EXECUTION BACKLOG (FOUNDATION)
 
 ## Scope
 P0 = bloquear inestabilidad del core y convertir funciones visibles en funcionalidades realmente confiables.

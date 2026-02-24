@@ -44,7 +44,7 @@ const Browser: React.FC<BrowserProps> = ({ onImport, onImportFromLibrary, onCrea
 
     useEffect(() => {
         const onStorage = (event: StorageEvent) => {
-            if (event.key !== 'ethereal.studio-settings.v1') return;
+            if (event.key !== 'hollowbits.studio-settings.v1' && event.key !== 'ethereal.studio-settings.v1') return;
             refreshLibraryIndex();
         };
 

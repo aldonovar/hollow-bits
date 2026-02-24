@@ -1,6 +1,7 @@
 import { ScannedFileEntry } from '../types';
 
-const STORAGE_KEY = 'ethereal.studio-settings.v1';
+const STORAGE_KEY = 'hollowbits.studio-settings.v1';
+const LEGACY_STORAGE_KEYS = ['ethereal.studio-settings.v1'];
 const MAX_PERSISTED_ENTRIES = 600;
 const MAX_BENCHMARK_HISTORY = 30;
 
@@ -50,6 +51,25 @@ const resolveStorage = (): Storage | null => {
     } catch {
         return null;
     }
+};
+
+const readStudioSettingsPayload = (storage: Storage): string | null => {
+    const currentRaw = storage.getItem(STORAGE_KEY);
+    if (currentRaw) {
+        LEGACY_STORAGE_KEYS.forEach((legacyKey) => storage.removeItem(legacyKey));
+        return currentRaw;
+    }
+
+    for (const legacyKey of LEGACY_STORAGE_KEYS) {
+        const legacyRaw = storage.getItem(legacyKey);
+        if (!legacyRaw) continue;
+
+        storage.setItem(STORAGE_KEY, legacyRaw);
+        storage.removeItem(legacyKey);
+        return legacyRaw;
+    }
+
+    return null;
 };
 
 const sanitizeEntries = (entries: unknown): ScannedFileEntry[] => {
@@ -118,7 +138,7 @@ export const loadStudioSettings = (): StudioSettingsData => {
     if (!storage) return createDefaultStudioSettings();
 
     try {
-        const raw = storage.getItem(STORAGE_KEY);
+        const raw = readStudioSettingsPayload(storage);
         if (!raw) {
             return createDefaultStudioSettings();
         }
@@ -155,6 +175,7 @@ export const saveStudioSettings = (settings: StudioSettingsData): void => {
         };
 
         storage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
+        LEGACY_STORAGE_KEYS.forEach((legacyKey) => storage.removeItem(legacyKey));
     } catch (error) {
         console.warn('No se pudo guardar la configuracion de estudio.', error);
     }

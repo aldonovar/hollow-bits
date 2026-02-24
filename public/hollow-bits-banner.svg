@@ -57,11 +57,11 @@
 
     <!-- Text (Right) -->
     <g transform="translate(130, 20)">
-        <!-- ETHEREAL - White -->
-        <text x="0" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-weight="900" font-size="54" letter-spacing="0.25em" fill="#ffffff">ETHEREAL</text>
+        <!-- HOLLOW - White -->
+        <text x="0" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-weight="900" font-size="54" letter-spacing="0.25em" fill="#ffffff">HOLLOW</text>
         
-        <!-- STUDIO - Gradient -->
-        <text x="2" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-weight="700" font-size="28" letter-spacing="0.55em" fill="url(#gText)">STUDIO</text>
+        <!-- BITS - Gradient -->
+        <text x="2" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-weight="700" font-size="28" letter-spacing="0.55em" fill="url(#gText)">BITS</text>
     </g>
     
   </g>
