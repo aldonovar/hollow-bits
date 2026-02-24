@@ -432,7 +432,17 @@ const Transport: React.FC<TransportProps> = React.memo(({
                     </div>
                     <div className="flex flex-col justify-center leading-none">
                         <span className="font-black tracking-[0.3em] text-[12px] text-white">HOLLOW</span>
-                        <span className="font-bold tracking-[0.5em] text-[8px] mt-0.5 text-transparent bg-clip-text bg-gradient-to-r from-daw-violet to-daw-ruby">BITS</span>
+                        <span
+                            className="inline-block text-[13px] mt-[1px] text-transparent bg-clip-text bg-gradient-to-r from-daw-violet to-daw-ruby"
+                            style={{
+                                fontFamily: "'Great Vibes', 'Segoe Script', cursive",
+                                letterSpacing: '0.06em',
+                                transform: 'scaleX(1.16)',
+                                transformOrigin: 'left center'
+                            }}
+                        >
+                            Bits
+                        </span>
                     </div>
                 </div>
 

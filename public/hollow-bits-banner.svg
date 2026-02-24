@@ -60,8 +60,8 @@
         <!-- HOLLOW - White -->
         <text x="0" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-weight="900" font-size="54" letter-spacing="0.25em" fill="#ffffff">HOLLOW</text>
         
-        <!-- BITS - Gradient -->
-        <text x="2" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-weight="700" font-size="28" letter-spacing="0.55em" fill="url(#gText)">BITS</text>
+        <!-- BITS - Signature -->
+        <text x="4" y="76" font-family="'Great Vibes', 'Brush Script MT', cursive" font-weight="400" font-size="52" letter-spacing="0.04em" textLength="220" lengthAdjust="spacingAndGlyphs" fill="url(#gText)">Bits</text>
     </g>
     
   </g>
