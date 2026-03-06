@@ -1753,22 +1753,23 @@ const App: React.FC = () => {
         }
 
         const trackId = `t-scan-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        const color = getProgressiveTrackColor(tracks.length, tracks.length + 1);
         const newTrack = createTrack({
             id: trackId,
             name: `SCAN ${tracks.length + 1}`,
             type: TrackType.MIDI,
-            color: '#B34BE4',
+            color,
             volume: -6,
-            clips: [buildScannedMidiClip(payload.notes, payload.clipName, '#B34BE4')]
+            clips: [buildScannedMidiClip(payload.notes, payload.clipName, color)]
         });
 
-        appendTrack(newTrack);
+        appendTrack(newTrack, { reason: 'scanner-create-track', recolor: true });
         setSelectedTrackId(trackId);
         setSelectedClipId(newTrack.clips[0]?.id ?? null);
         setMainView('arrange');
         setBottomView('editor');
         closeAllToolPanels();
-    }, [appendTrack, buildScannedMidiClip, closeAllToolPanels, tracks.length]);
+    }, [appendTrack, buildScannedMidiClip, closeAllToolPanels, tracks.length, getProgressiveTrackColor]);
 
     const handleInsertScanIntoMidiTrack = useCallback((trackId: string, payload: ApplyScanPayload) => {
         if (payload.notes.length === 0) {
@@ -2280,7 +2281,7 @@ const App: React.FC = () => {
                 }
             });
 
-            appendTracks([newTrack], { reason: 'record-auto-track' });
+            appendTracks([newTrack], { reason: 'record-auto-track', recolor: true });
             armedTracks = [newTrack];
         }
 
@@ -2812,7 +2813,7 @@ const App: React.FC = () => {
             throw new Error('No se pudo decodificar ningÃºn archivo de audio.');
         }
 
-        appendTracks(validTracks, { reason: 'import-audio-files', recolor: false });
+        appendTracks(validTracks, { reason: 'import-audio-files', recolor: true });
 
         if (validTracks.length < sources.length) {
             alert('Algunos archivos no se pudieron importar, pero el resto se agregÃ³ correctamente.');
@@ -2884,7 +2885,7 @@ const App: React.FC = () => {
             newTrack.sessionClips = [{ id: `slot-${newTrack.id}-${sceneIndex}`, clip, isPlaying: false, isQueued: false }];
         }
 
-        appendTrack(newTrack, { reason: 'browser-drop-library-create-track' });
+        appendTrack(newTrack, { reason: 'browser-drop-library-create-track', recolor: true });
         setSelectedTrackId(newTrack.id);
         setSelectedClipId(clip.id);
     }, [appendTrack, applyTrackMutation, assignClipToSessionSlot, buildAudioClipFromBuffer, tracks, getProgressiveTrackColor]);
@@ -2947,7 +2948,7 @@ const App: React.FC = () => {
             newTrack.sessionClips = [{ id: `slot-${newTrack.id}-${sceneIndex}`, clip, isPlaying: false, isQueued: false }];
         }
 
-        appendTrack(newTrack, { reason: 'browser-drop-generator-create-track' });
+        appendTrack(newTrack, { reason: 'browser-drop-generator-create-track', recolor: true });
         return { trackId: newTrack.id, clipId: clip.id };
     }, [appendTrack, applyTrackMutation, assignClipToSessionSlot, buildAudioClipFromBuffer, tracks]);
 
@@ -3014,7 +3015,7 @@ const App: React.FC = () => {
             const clip = cloneClipForDrop(sourceClip, newTrack.color, bar);
             newTrack.clips.push(clip);
 
-            appendTrack(newTrack, { reason: 'browser-drop-project-clip-create-track' });
+            appendTrack(newTrack, { reason: 'browser-drop-project-clip-create-track', recolor: true });
             setSelectedTrackId(newTrack.id);
             setSelectedClipId(clip.id);
         } catch (error) {
@@ -3082,7 +3083,7 @@ const App: React.FC = () => {
             newTrack.clips.push(clip);
             newTrack.sessionClips = [{ id: `slot-${newTrack.id}-${sceneIndex}`, clip, isPlaying: false, isQueued: false }];
 
-            appendTrack(newTrack, { reason: 'browser-drop-session-create-track' });
+            appendTrack(newTrack, { reason: 'browser-drop-session-create-track', recolor: true });
             setSelectedTrackId(newTrack.id);
             setSelectedClipId(clip.id);
         } catch (error) {
@@ -3356,16 +3357,17 @@ const App: React.FC = () => {
                             onClose={closeAllToolPanels}
                             bpm={transport.bpm}
                             onPatternGenerated={(notes: Note[], name: string) => {
+                                const color = getProgressiveTrackColor(tracks.length, tracks.length + 1);
                                 const newTrack = createTrack({
                                     id: `t-ai-${Date.now()}`,
                                     name: name || 'AI Generator',
                                     type: TrackType.MIDI,
-                                    color: '#B34BE4',
+                                    color,
                                     volume: -6,
                                     clips: [{
                                         id: `c-ai-${Date.now()}`,
                                         name,
-                                        color: '#B34BE4',
+                                        color,
                                         start: 1,
                                         length: 4,
                                         notes,
@@ -3377,7 +3379,7 @@ const App: React.FC = () => {
                                     }]
                                 });
 
-                                appendTrack(newTrack);
+                                appendTrack(newTrack, { reason: 'ai-generator-track', recolor: true });
                                 closeAllToolPanels();
                             }}
                             tracks={tracks}
