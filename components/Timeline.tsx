@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { Track, TrackType, Clip, AutomationPoint, CompSegment, PunchRange } from '../types';
+import { Track, TrackType, Clip, AutomationPoint, PunchRange } from '../types';
 import TrackHeader from './TrackHeader';
 import AutomationLane from './AutomationLane';
 import { audioEngine } from '../services/audioEngine';
@@ -8,7 +8,17 @@ import { trackHeaderMeterStore } from '../services/trackHeaderMeterStore';
 import type { TrackHeaderMeterSnapshot } from '../services/trackHeaderMeterStore';
 import { Scissors, FileAudio, Copy, ArrowRightLeft, AlignLeft, Grid, Magnet, GitMerge } from 'lucide-react';
 import { BrowserDragPayload, readBrowserDragPayload } from '../services/browserDragService';
-import { resolveCrossfadeCommitBars, resolveCrossfadePreviewBars } from '../services/timelineCrossfadeService';
+import {
+    resolveCompBoundaryFadeCommitBars,
+    resolveCompBoundaryFadePreviewBars,
+    resolveCrossfadeCommitBars,
+    resolveCrossfadePreviewBars
+} from '../services/timelineCrossfadeService';
+import {
+    buildCompLaneOverlayModel,
+    type CompBoundaryBlendHandleModel
+} from '../services/compLaneOverlayService';
+import { COMP_CLIP_ID_PREFIX } from '../services/takeCompingService';
 
 interface TimelineMutationOptions {
     noHistory?: boolean;
@@ -47,7 +57,6 @@ const TRACK_VIRTUALIZATION_OVERSCAN_PX = 480;
 const MAX_ACTIVE_METER_TRACKS = 128;
 const WAVEFORM_CACHE_LIMIT = 320;
 const MIDI_DECORATION_CACHE_LIMIT = 640;
-const COMP_CLIP_ID_PREFIX = 'comp-seg-';
 const MIN_CROSSFADE_BARS = 1 / 1024;
 
 const createHistoryGroupId = (prefix: string, trackId: string, clipId: string): string => {
@@ -108,7 +117,20 @@ type CrossfadeDragAction = {
     historyGroupId: string;
 };
 
-type DragAction = ClipDragAction | CrossfadeDragAction;
+type CompBoundaryCrossfadeDragAction = {
+    type: 'comp-boundary-crossfade';
+    leftClipId: string;
+    rightClipId: string;
+    maxFadeBars: number;
+    currentLeftFadeOutBars: number;
+    currentRightFadeInBars: number;
+    initialFadeBars: number;
+    startX: number;
+    startY: number;
+    historyGroupId: string;
+};
+
+type DragAction = ClipDragAction | CrossfadeDragAction | CompBoundaryCrossfadeDragAction;
 
 const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     track,
@@ -133,6 +155,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     const [dragAction, setDragAction] = useState<DragAction | null>(null);
     const dragPreviewRef = useRef<Partial<Clip> | null>(null);
     const crossfadePreviewRef = useRef<number | null>(null);
+    const compBoundaryFadePreviewRef = useRef<number | null>(null);
     const waveformCacheRef = useRef<Map<string, CachedWaveformShape>>(new Map());
     const midiDecorationCacheRef = useRef<Map<string, MidiDecorationBar[]>>(new Map());
 
@@ -160,6 +183,27 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 onClipUpdate(track.id, dragAction.rightClip.id, { fadeIn: nextFadeBars }, {
                     noHistory: true,
                     reason: 'timeline-crossfade-preview-right',
+                    historyGroupId: dragAction.historyGroupId
+                });
+                return;
+            }
+
+            if (dragAction.type === 'comp-boundary-crossfade') {
+                const nextFadeBars = resolveCompBoundaryFadePreviewBars(
+                    dragAction.maxFadeBars,
+                    dragAction.initialFadeBars,
+                    deltaBars
+                );
+                compBoundaryFadePreviewRef.current = nextFadeBars;
+
+                onClipUpdate(track.id, dragAction.leftClipId, { fadeOut: nextFadeBars }, {
+                    noHistory: true,
+                    reason: 'timeline-comp-boundary-crossfade-preview-left',
+                    historyGroupId: dragAction.historyGroupId
+                });
+                onClipUpdate(track.id, dragAction.rightClipId, { fadeIn: nextFadeBars }, {
+                    noHistory: true,
+                    reason: 'timeline-comp-boundary-crossfade-preview-right',
                     historyGroupId: dragAction.historyGroupId
                 });
                 return;
@@ -244,6 +288,31 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 return;
             }
 
+            if (dragAction.type === 'comp-boundary-crossfade') {
+                const fadeBars = typeof compBoundaryFadePreviewRef.current === 'number'
+                    ? compBoundaryFadePreviewRef.current
+                    : resolveCompBoundaryFadeCommitBars(
+                        dragAction.maxFadeBars,
+                        dragAction.currentLeftFadeOutBars,
+                        dragAction.currentRightFadeInBars
+                    );
+
+                onClipUpdate(track.id, dragAction.leftClipId, { fadeOut: fadeBars }, {
+                    reason: 'timeline-comp-boundary-crossfade-finalize-left',
+                    historyGroupId: dragAction.historyGroupId
+                });
+                onClipUpdate(track.id, dragAction.rightClipId, { fadeIn: fadeBars }, {
+                    reason: 'timeline-comp-boundary-crossfade-finalize-right',
+                    historyGroupId: dragAction.historyGroupId
+                });
+
+                compBoundaryFadePreviewRef.current = null;
+                crossfadePreviewRef.current = null;
+                dragPreviewRef.current = null;
+                setDragAction(null);
+                return;
+            }
+
             const updates = dragPreviewRef.current;
             if (updates) {
                 const reasonByType: Record<ClipDragAction['type'], string> = {
@@ -262,6 +331,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
 
             dragPreviewRef.current = null;
             crossfadePreviewRef.current = null;
+            compBoundaryFadePreviewRef.current = null;
             setDragAction(null);
         };
 
@@ -487,31 +557,18 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         };
     }, [zoom, totalWidth, showBeatGrid, showDetailGrid, gridSize]);
 
-    const visibleCompSegments = useMemo(() => {
-        const compLane = (track.takeLanes || []).find((lane) => lane.id === track.activeCompLaneId && lane.isCompLane)
-            || (track.takeLanes || []).find((lane) => lane.isCompLane);
-        if (!compLane?.compSegments?.length) {
-            return [];
-        }
+    const compOverlayModel = useMemo(() => {
+        return buildCompLaneOverlayModel({
+            track,
+            zoom,
+            viewportLeftPx: visibleRect.left,
+            viewportWidthPx: visibleRect.width,
+            viewportPaddingPx: 300
+        });
+    }, [track, zoom, visibleRect.left, visibleRect.width]);
 
-        const clipViewportStartPx = Math.max(0, visibleRect.left - 300);
-        const clipViewportEndPx = visibleRect.left + visibleRect.width + 300;
-
-        return compLane.compSegments
-            .map((segment: CompSegment) => {
-                const segmentLengthBars = Math.max(MIN_CROSSFADE_BARS, segment.sourceEndBar - segment.sourceStartBar);
-                const leftPx = (segment.targetStartBar - 1) * 4 * zoom;
-                const widthPx = segmentLengthBars * 4 * zoom;
-                return {
-                    segment,
-                    leftPx,
-                    widthPx,
-                    takeAlias: segment.takeId.split('-').pop() || segment.takeId
-                };
-            })
-            .filter((segment) => (segment.leftPx + segment.widthPx) > clipViewportStartPx && segment.leftPx < clipViewportEndPx)
-            .sort((left, right) => left.leftPx - right.leftPx);
-    }, [track.takeLanes, track.activeCompLaneId, visibleRect.left, visibleRect.width, zoom]);
+    const visibleCompSegments = compOverlayModel.visibleSegments;
+    const compBoundaryHandles = compOverlayModel.boundaryHandles;
 
     const crossfades = useMemo(() => {
         const fades: Array<{
@@ -529,6 +586,10 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         for (let i = 0; i < sortedClips.length - 1; i++) {
             const current = sortedClips[i];
             const next = sortedClips[i + 1];
+            const isCompPair = current.id.startsWith(COMP_CLIP_ID_PREFIX) && next.id.startsWith(COMP_CLIP_ID_PREFIX);
+            if (isCompPair) {
+                continue;
+            }
 
             const currentEnd = current.start + current.length;
 
@@ -610,6 +671,15 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
             >
                 {visibleCompSegments.length > 0 && (
                     <div className="absolute inset-0 z-[12] pointer-events-none">
+                        <div className="absolute left-1 top-1 h-4 px-1.5 rounded-[2px] border border-daw-violet/45 bg-[#0b0c12]/80 text-[8px] font-black uppercase tracking-wider text-daw-violet/95 flex items-center gap-1.5">
+                            <span>Comp</span>
+                            <span className={`${compOverlayModel.isActiveLane ? 'text-emerald-300' : 'text-amber-300'}`}>
+                                {compOverlayModel.isActiveLane ? 'ACTIVE' : 'STAGED'}
+                            </span>
+                            <span className="text-gray-400">
+                                {compOverlayModel.laneName || 'Lane'}
+                            </span>
+                        </div>
                         {visibleCompSegments.map((item) => (
                             <div
                                 key={`comp-overlay-${item.segment.id}`}
@@ -620,8 +690,13 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                 }}
                             >
                                 <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-daw-violet/80 via-daw-cyan/70 to-transparent" />
-                                <div className="absolute right-1 top-1 text-[8px] uppercase tracking-wide text-daw-violet/90 bg-black/35 px-1 rounded-sm">
-                                    Comp {item.takeAlias}
+                                <div className="absolute top-0 bottom-0 left-0 w-[1px] bg-daw-violet/55" />
+                                <div className="absolute top-0 bottom-0 right-0 w-[1px] bg-daw-violet/35" />
+                                <div className="absolute right-1 top-1 text-[8px] uppercase tracking-wide text-daw-violet/90 bg-black/35 px-1 rounded-sm flex items-center gap-1">
+                                    <span>Comp {item.takeAlias}</span>
+                                    {item.isMutedTake && (
+                                        <span className="text-[7px] text-amber-300">M</span>
+                                    )}
                                 </div>
                             </div>
                         ))}
@@ -822,6 +897,70 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                         </div>
                     );
                 })}
+
+                {compBoundaryHandles.length > 0 && (
+                    <div className="absolute inset-0 z-[34] pointer-events-none">
+                        {compBoundaryHandles.map((handle: CompBoundaryBlendHandleModel) => (
+                            <div
+                                key={handle.id}
+                                className="absolute top-0 bottom-0"
+                                style={{ left: `${handle.boundaryLeftPx}px` }}
+                            >
+                                <div className="absolute top-0 bottom-0 left-0 w-[1px] bg-daw-cyan/45" />
+
+                                {handle.overlayWidthPx > 0 && (
+                                    <div
+                                        className="absolute top-0 bottom-0"
+                                        style={{
+                                            left: `${handle.overlayLeftPx - handle.boundaryLeftPx}px`,
+                                            width: `${handle.overlayWidthPx}px`
+                                        }}
+                                    >
+                                        <svg width={handle.overlayWidthPx} height="100%" preserveAspectRatio="none" className="overflow-visible">
+                                            <path
+                                                d={`M 0 ${trackHeight} C ${handle.overlayWidthPx * 0.25} ${trackHeight}, ${handle.overlayWidthPx * 0.25} 0, ${handle.overlayWidthPx * 0.5} 0`}
+                                                fill="none"
+                                                stroke="#67e8f9"
+                                                strokeOpacity="0.72"
+                                                strokeWidth="1.2"
+                                                vectorEffect="non-scaling-stroke"
+                                            />
+                                            <path
+                                                d={`M ${handle.overlayWidthPx * 0.5} 0 C ${handle.overlayWidthPx * 0.75} 0, ${handle.overlayWidthPx * 0.75} ${trackHeight}, ${handle.overlayWidthPx} ${trackHeight}`}
+                                                fill="none"
+                                                stroke="#a78bfa"
+                                                strokeOpacity="0.72"
+                                                strokeWidth="1.2"
+                                                vectorEffect="non-scaling-stroke"
+                                            />
+                                        </svg>
+                                    </div>
+                                )}
+
+                                <button
+                                    data-handle-type="comp-boundary-crossfade"
+                                    className="pointer-events-auto absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full border border-daw-violet/70 bg-[#090b12] shadow-[0_0_10px_rgba(167,139,250,0.4)] hover:scale-110 transition-transform"
+                                    title={`Comp blend ${handle.currentFadeBars.toFixed(2)} / ${handle.maxFadeBars.toFixed(2)} bars`}
+                                    onMouseDown={(event) => {
+                                        event.stopPropagation();
+                                        setDragAction({
+                                            type: 'comp-boundary-crossfade',
+                                            leftClipId: handle.leftClipId,
+                                            rightClipId: handle.rightClipId,
+                                            maxFadeBars: handle.maxFadeBars,
+                                            currentLeftFadeOutBars: handle.currentLeftFadeOutBars,
+                                            currentRightFadeInBars: handle.currentRightFadeInBars,
+                                            initialFadeBars: handle.currentFadeBars,
+                                            startX: event.clientX,
+                                            startY: event.clientY,
+                                            historyGroupId: createHistoryGroupId('comp-boundary-crossfade', track.id, `${handle.leftClipId}|${handle.rightClipId}`)
+                                        });
+                                    }}
+                                />
+                            </div>
+                        ))}
+                    </div>
+                )}
 
                 {/* AUTOMATIC CROSSFADE OVERLAYS */}
                 {crossfades.map(xfade => (
