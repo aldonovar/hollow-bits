@@ -3468,6 +3468,7 @@ const App: React.FC = () => {
                             <SessionView
                                 tracks={tracks}
                                 bpm={transport.bpm}
+                                engineStats={engineStats}
                                 onClipSelect={handleClipSelect}
                                 onExternalDrop={(trackId, sceneIndex, payload) => {
                                     void handleSessionExternalDrop(trackId, sceneIndex, payload);

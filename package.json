@@ -13,6 +13,8 @@
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
+    "test:block3-regression": "vitest run tests/unit/block3CompingReliabilityService.test.ts",
+    "test:session-hardening": "vitest run tests/unit/sessionPerformanceService.test.ts",
     "perf:gate": "node scripts/audio-performance-gate.mjs",
     "quality:gates": "npm run typecheck && npm run test:unit && npm run build",
     "build": "tsc && vite build",
