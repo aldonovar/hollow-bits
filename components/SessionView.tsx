@@ -7,8 +7,10 @@ import type { SessionLaunchTelemetryEvent } from '../services/engineAdapter';
 import { BrowserDragPayload, readBrowserDragPayload } from '../services/browserDragService';
 import {
     assessSessionOverload,
+    buildSessionLaunchReport,
     buildSessionTrackWindow,
     summarizeSessionLaunchTelemetry,
+    type SessionLaunchReport,
     type SessionLaunchTelemetrySample
 } from '../services/sessionPerformanceService';
 import {
@@ -230,6 +232,20 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
         return summarizeSessionLaunchTelemetry(launchTelemetrySamples, 2);
     }, [launchTelemetrySamples]);
 
+    const launchTelemetryReport = useMemo<SessionLaunchReport>(() => {
+        return buildSessionLaunchReport(
+            launchTelemetrySamples,
+            {
+                name: 'session-launch-live-capture',
+                tracks: sessionTracks.length,
+                scenes: SCENES,
+                quantizeBars: launchQuantizeBars,
+                source: 'live-capture'
+            },
+            2
+        );
+    }, [launchQuantizeBars, launchTelemetrySamples, sessionTracks.length]);
+
     useEffect(() => {
         if (launchTelemetrySummary.sampleCount === 0) return;
 
@@ -239,10 +255,11 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
                 summary: launchTelemetrySummary,
                 samples: launchTelemetrySamples.slice(-200)
             }));
+            localStorage.setItem('hollowbits.session-launch.latest-report.v1', JSON.stringify(launchTelemetryReport));
         } catch {
             // Non-blocking persistence path.
         }
-    }, [launchTelemetrySamples, launchTelemetrySummary]);
+    }, [launchTelemetryReport, launchTelemetrySamples, launchTelemetrySummary]);
 
     const computeLaunchAt = useCallback(() => {
         return engineAdapter.getSessionLaunchTime(launchQuantizeBars);
@@ -513,6 +530,37 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
         setLaunchTelemetrySamples([]);
     }, []);
 
+    const exportLaunchTelemetryReport = useCallback(async () => {
+        if (launchTelemetryReport.summary.sampleCount === 0) return;
+
+        const payload = JSON.stringify(launchTelemetryReport, null, 2);
+        const fileName = 'session-launch-report.json';
+
+        try {
+            if (window.nativeWindows?.saveProject) {
+                await window.nativeWindows.saveProject(payload, fileName);
+                return;
+            }
+
+            if (window.electron?.saveProject) {
+                await window.electron.saveProject(payload, fileName);
+                return;
+            }
+        } catch {
+            // Fallback to browser download.
+        }
+
+        const blob = new Blob([payload], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = fileName;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+    }, [launchTelemetryReport]);
+
     const handleReplaySceneRecording = useCallback(() => {
         if (sceneRecordingEvents.length === 0 || isSceneReplayRunning) return;
 
@@ -683,6 +731,14 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
                             title="Reset Launch Telemetry"
                         >
                             CLR GATE
+                        </button>
+                        <button
+                            onClick={() => { void exportLaunchTelemetryReport(); }}
+                            disabled={launchTelemetrySummary.sampleCount === 0}
+                            className={`h-6 rounded-sm border text-[8px] font-bold tracking-wider ${launchTelemetrySummary.sampleCount > 0 ? 'border-emerald-400/60 bg-emerald-500/12 text-emerald-200 hover:bg-emerald-500/20' : 'border-white/10 bg-[#161a29] text-gray-500 cursor-not-allowed'}`}
+                            title="Export Launch Report JSON"
+                        >
+                            EXP JSON
                         </button>
                     </div>
 

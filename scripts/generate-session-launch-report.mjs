@@ -22,7 +22,8 @@ const parseArgs = (argv) => {
     scenes: DEFAULT_SCENES,
     quantizeBars: DEFAULT_QUANTIZE_BARS,
     gateTargetMs: DEFAULT_GATE_TARGET_MS,
-    seed: DEFAULT_SEED
+    seed: DEFAULT_SEED,
+    source: 'simulated'
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -54,6 +55,11 @@ const parseArgs = (argv) => {
     }
     if (arg === '--seed') {
       options.seed = parseNumber(argv[index + 1], options.seed);
+      index += 1;
+      continue;
+    }
+    if (arg === '--source') {
+      options.source = argv[index + 1] || options.source;
       index += 1;
       continue;
     }
@@ -156,6 +162,7 @@ const main = () => {
   const quantizeBars = Math.max(0.25, options.quantizeBars);
   const gateTargetMs = Math.max(0.1, options.gateTargetMs);
   const seed = Math.max(1, Math.floor(options.seed));
+  const source = options.source === 'live-capture' ? 'live-capture' : 'simulated';
 
   const samples = buildSamples({ tracks, scenes, quantizeBars, seed });
   const summary = summarize(samples, gateTargetMs);
@@ -167,7 +174,8 @@ const main = () => {
       tracks,
       scenes,
       quantizeBars,
-      seed
+      seed,
+      source
     },
     summary,
     samples
@@ -187,4 +195,3 @@ const main = () => {
 };
 
 main();
-

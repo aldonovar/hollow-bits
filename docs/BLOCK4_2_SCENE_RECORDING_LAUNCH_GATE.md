@@ -54,3 +54,17 @@
 - `npm run test:unit`
 - `npm run launch:report:baseline`
 - `npm run launch:gate -- --report benchmarks/session-launch/latest-report.json --out benchmarks/session-launch/latest-gate.json`
+
+## Protocolo de validacion real (48x8)
+1. En Session View, cargar set de `48 tracks / 8 scenes`.
+2. Activar `REC`, disparar escenas y luego usar `REPLAY` para repetir el flujo.
+3. Exportar telemetria con `EXP JSON` (archivo `session-launch-report.json`).
+4. En repo local:
+   - `npm run launch:report:promote`
+   - `npm run launch:gate:strict -- --report benchmarks/session-launch/latest-report.json --out benchmarks/session-launch/latest-gate.json`
+5. Gate esperado:
+   - `sampleCount >= 384`
+   - `scenario tracks >= 48`
+   - `scenario scenes >= 8`
+   - `source = live-capture`
+   - `p95 <= 2ms`

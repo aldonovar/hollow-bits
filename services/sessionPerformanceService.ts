@@ -66,6 +66,21 @@ export interface SessionLaunchTelemetrySummary {
     gatePass: boolean;
 }
 
+export interface SessionLaunchReportScenario {
+    name: string;
+    tracks: number;
+    scenes: number;
+    quantizeBars: number;
+    source: 'live-capture' | 'simulated';
+}
+
+export interface SessionLaunchReport {
+    generatedAt: number;
+    scenario: SessionLaunchReportScenario;
+    summary: SessionLaunchTelemetrySummary;
+    samples: SessionLaunchTelemetrySample[];
+}
+
 const clamp = (value: number, min: number, max: number): number => {
     return Math.max(min, Math.min(max, value));
 };
@@ -261,5 +276,26 @@ export const summarizeSessionLaunchTelemetry = (
         maxLaunchErrorMs,
         gateTargetMs: gateLimit,
         gatePass: p95LaunchErrorMs <= gateLimit
+    };
+};
+
+export const buildSessionLaunchReport = (
+    samples: SessionLaunchTelemetrySample[],
+    scenario: SessionLaunchReportScenario,
+    gateTargetMs = 2
+): SessionLaunchReport => {
+    const normalizedScenario: SessionLaunchReportScenario = {
+        name: scenario.name || 'session-launch-report',
+        tracks: Math.max(1, Math.floor(safeNumber(scenario.tracks, 1))),
+        scenes: Math.max(1, Math.floor(safeNumber(scenario.scenes, 1))),
+        quantizeBars: Math.max(0.25, safeNumber(scenario.quantizeBars, 1)),
+        source: scenario.source === 'simulated' ? 'simulated' : 'live-capture'
+    };
+
+    return {
+        generatedAt: Date.now(),
+        scenario: normalizedScenario,
+        summary: summarizeSessionLaunchTelemetry(samples, gateTargetMs),
+        samples: samples.map((sample) => ({ ...sample }))
     };
 };

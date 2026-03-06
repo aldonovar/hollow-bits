@@ -5,7 +5,9 @@ import path from 'node:path';
 
 const DEFAULT_REPORT_PATH = path.join('benchmarks', 'session-launch', 'latest-report.json');
 const DEFAULT_GATE_TARGET_MS = 2;
-const DEFAULT_MIN_SAMPLES = 16;
+const DEFAULT_MIN_SAMPLES = 384;
+const DEFAULT_MIN_TRACKS = 48;
+const DEFAULT_MIN_SCENES = 8;
 
 const envNumber = (name, fallback) => {
   const raw = process.env[name];
@@ -18,7 +20,8 @@ const parseArgs = (argv) => {
   const options = {
     reportPath: process.env.SESSION_LAUNCH_REPORT || DEFAULT_REPORT_PATH,
     outPath: '',
-    allowMissing: false
+    allowMissing: false,
+    strictLiveCapture: false
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -37,6 +40,10 @@ const parseArgs = (argv) => {
       options.allowMissing = true;
       continue;
     }
+    if (arg === '--strict-live-capture') {
+      options.strictLiveCapture = true;
+      continue;
+    }
   }
 
   return options;
@@ -47,14 +54,20 @@ const safeNumber = (value, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const evaluateGate = (report) => {
+const evaluateGate = (report, options) => {
   const summary = report?.summary || {};
+  const scenario = report?.scenario || {};
   const gateTargetMs = safeNumber(summary.gateTargetMs, envNumber('SESSION_LAUNCH_GATE_TARGET_MS', DEFAULT_GATE_TARGET_MS));
   const minSamples = envNumber('SESSION_LAUNCH_MIN_SAMPLES', DEFAULT_MIN_SAMPLES);
+  const minTracks = envNumber('SESSION_LAUNCH_MIN_TRACKS', DEFAULT_MIN_TRACKS);
+  const minScenes = envNumber('SESSION_LAUNCH_MIN_SCENES', DEFAULT_MIN_SCENES);
   const sampleCount = safeNumber(summary.sampleCount, 0);
   const p95LaunchErrorMs = safeNumber(summary.p95LaunchErrorMs, 0);
   const p99LaunchErrorMs = safeNumber(summary.p99LaunchErrorMs, 0);
   const maxLaunchErrorMs = safeNumber(summary.maxLaunchErrorMs, 0);
+  const scenarioTracks = safeNumber(scenario.tracks, 0);
+  const scenarioScenes = safeNumber(scenario.scenes, 0);
+  const scenarioSource = typeof scenario.source === 'string' ? scenario.source : 'unknown';
 
   const failures = [];
   const warnings = [];
@@ -63,7 +76,19 @@ const evaluateGate = (report) => {
     failures.push('Reporte sin muestras de launch.');
   }
   if (sampleCount < minSamples) {
-    warnings.push(`Muestras insuficientes para confianza alta (${sampleCount}/${minSamples}).`);
+    failures.push(`Muestras insuficientes para gate extremo (${sampleCount}/${minSamples}).`);
+  }
+  if (scenarioTracks < minTracks) {
+    failures.push(`Escenario insuficiente en tracks (${scenarioTracks}/${minTracks}).`);
+  }
+  if (scenarioScenes < minScenes) {
+    failures.push(`Escenario insuficiente en scenes (${scenarioScenes}/${minScenes}).`);
+  }
+  if (scenarioSource !== 'live-capture') {
+    warnings.push(`Source no-live (${scenarioSource}).`);
+    if (options.strictLiveCapture || String(process.env.SESSION_LAUNCH_STRICT_LIVE_CAPTURE || '0') === '1') {
+      failures.push('Reporte no proviene de live-capture (modo estricto activo).');
+    }
   }
   if (p95LaunchErrorMs > gateTargetMs) {
     failures.push(`Launch p95 fuera de gate (${p95LaunchErrorMs.toFixed(3)}ms > ${gateTargetMs.toFixed(3)}ms).`);
@@ -88,7 +113,10 @@ const evaluateGate = (report) => {
       gateTargetMs,
       p95LaunchErrorMs,
       p99LaunchErrorMs,
-      maxLaunchErrorMs
+      maxLaunchErrorMs,
+      scenarioTracks,
+      scenarioScenes,
+      scenarioSource
     },
     failures,
     warnings,
@@ -119,11 +147,12 @@ const main = () => {
     process.exit(2);
   }
 
-  const gate = evaluateGate(report);
+  const gate = evaluateGate(report, options);
   console.log('Session Launch Gate');
   console.log(`- report: ${absoluteReportPath}`);
   console.log(`- status: ${gate.status.toUpperCase()}`);
   console.log(`- sampleCount: ${gate.summary.sampleCount}`);
+  console.log(`- scenario tracks/scenes/source: ${gate.summary.scenarioTracks}/${gate.summary.scenarioScenes}/${gate.summary.scenarioSource}`);
   console.log(`- p95/p99/max: ${gate.summary.p95LaunchErrorMs.toFixed(3)} / ${gate.summary.p99LaunchErrorMs.toFixed(3)} / ${gate.summary.maxLaunchErrorMs.toFixed(3)} ms`);
   console.log(`- target: ${gate.summary.gateTargetMs.toFixed(3)} ms`);
 
@@ -149,4 +178,3 @@ const main = () => {
 };
 
 main();
-

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     assessSessionOverload,
+    buildSessionLaunchReport,
     buildSessionTrackWindow,
     computeLaunchTimingErrorMs,
     summarizeSessionLaunchTelemetry
@@ -159,5 +160,38 @@ describe('sessionPerformanceService.summarizeSessionLaunchTelemetry', () => {
 
         expect(summary.gatePass).toBe(false);
         expect(summary.p95LaunchErrorMs).toBeGreaterThan(2);
+    });
+});
+
+describe('sessionPerformanceService.buildSessionLaunchReport', () => {
+    it('builds a normalized report with scenario metadata and summary', () => {
+        const report = buildSessionLaunchReport(
+            [
+                {
+                    trackId: 't1',
+                    clipId: 'c1',
+                    sceneIndex: 0,
+                    requestedLaunchTimeSec: 10,
+                    effectiveLaunchTimeSec: 10.001,
+                    launchErrorMs: 1,
+                    quantized: true,
+                    wasLate: true,
+                    capturedAtMs: 1
+                }
+            ],
+            {
+                name: 'session-launch-live-capture',
+                tracks: 48,
+                scenes: 8,
+                quantizeBars: 1,
+                source: 'live-capture'
+            },
+            2
+        );
+
+        expect(report.scenario.tracks).toBe(48);
+        expect(report.scenario.scenes).toBe(8);
+        expect(report.summary.sampleCount).toBe(1);
+        expect(report.summary.gatePass).toBe(true);
     });
 });
