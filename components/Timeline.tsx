@@ -6,7 +6,7 @@ import AutomationLane from './AutomationLane';
 import { audioEngine } from '../services/audioEngine';
 import { trackHeaderMeterStore } from '../services/trackHeaderMeterStore';
 import type { TrackHeaderMeterSnapshot } from '../services/trackHeaderMeterStore';
-import { Scissors, FileAudio, Copy, ArrowRightLeft, AlignLeft, Grid, Magnet } from 'lucide-react';
+import { Scissors, FileAudio, Copy, ArrowRightLeft, AlignLeft, Grid, Magnet, GitMerge } from 'lucide-react';
 import { BrowserDragPayload, readBrowserDragPayload } from '../services/browserDragService';
 
 interface TimelineMutationOptions {
@@ -749,6 +749,7 @@ interface TimelineProps {
     onExternalDrop?: (trackId: string, bar: number, payload: BrowserDragPayload) => void;
     onSplitClip?: (track: Track, clip: Clip) => void;
     onDuplicateClip?: (track: Track, clip: Clip) => void;
+    onPromoteToComp?: (track: Track, clip: Clip) => void;
     onAddTrack?: (type?: TrackType) => void; // [UPDATED]
     onTimeUpdate?: (bar: number, beat: number, sixteenth: number) => void; // [NEW] Synced with playhead RAF
     gridSize: number;
@@ -777,6 +778,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     onExternalDrop,
     onSplitClip,
     onDuplicateClip,
+    onPromoteToComp,
     onAddTrack,
     onTimeUpdate, // [NEW] Sync transport with playhead
     gridSize,
@@ -1500,13 +1502,24 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
 
                         {/* NEW EDITING TOOLS */}
                         {contextMenu.track.type === TrackType.AUDIO && (
-                            <button
-                                onClick={() => { onReverse(contextMenu.track, contextMenu.clip); setContextMenu(null); }}
-                                className="w-full text-left px-3 py-1.5 hover:bg-[#222] text-xs text-gray-200 flex items-center gap-2 group"
-                            >
-                                <ArrowRightLeft size={12} className="text-daw-cyan group-hover:text-white" />
-                                Invertir Audio
-                            </button>
+                            <>
+                                <button
+                                    onClick={() => { onReverse(contextMenu.track, contextMenu.clip); setContextMenu(null); }}
+                                    className="w-full text-left px-3 py-1.5 hover:bg-[#222] text-xs text-gray-200 flex items-center gap-2 group"
+                                >
+                                    <ArrowRightLeft size={12} className="text-daw-cyan group-hover:text-white" />
+                                    Invertir Audio
+                                </button>
+                                {onPromoteToComp && (
+                                    <button
+                                        onClick={() => { onPromoteToComp(contextMenu.track, contextMenu.clip); setContextMenu(null); }}
+                                        className="w-full text-left px-3 py-1.5 hover:bg-[#222] text-xs text-gray-200 flex items-center gap-2 group"
+                                    >
+                                        <GitMerge size={12} className="text-daw-violet group-hover:text-white" />
+                                        Enviar a Comp Lane
+                                    </button>
+                                )}
+                            </>
                         )}
 
                         {contextMenu.track.type === TrackType.MIDI && (

@@ -95,6 +95,29 @@ describe('recordingTakeService.buildRecordingTakeCommit', () => {
         expect(commit.laneName).toBe('Take Lane A');
         expect(commit.take.label).toBe('Take 3');
     });
+
+    it('applies source trim offset for punch/count-in capture windows', () => {
+        const track = createTrack({
+            id: 'track-rec-trim',
+            name: 'Vox Trim',
+            type: TrackType.AUDIO
+        });
+
+        const commit = buildRecordingTakeCommit({
+            track,
+            sourceId: 'hash-trim',
+            buffer: makeMockBuffer(8),
+            bpm: 120,
+            recordingStartBar: 3,
+            sourceTrimOffsetBars: 1.5,
+            idFactory: createDeterministicIdFactory()
+        });
+
+        expect(commit.clip.offset).toBeCloseTo(1.5, 6);
+        expect(commit.take.offsetBars).toBeCloseTo(1.5, 6);
+        expect(commit.clip.length).toBeCloseTo(2.5, 6);
+        expect(commit.take.lengthBars).toBeCloseTo(2.5, 6);
+    });
 });
 
 describe('recordingTakeService.commitRecordingTakeBatch', () => {

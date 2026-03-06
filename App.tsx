@@ -60,6 +60,15 @@ import {
     buildRecordingTakeCommit,
     commitRecordingTakeBatch
 } from './services/recordingTakeService';
+import {
+    applyCompClipEdits,
+    isCompDerivedClipId,
+    promoteTakeToComp,
+    resolvePunchRecordingPlan,
+    splitTakeForClip,
+    syncTakeMetadataForClip,
+    updateTrackPunchRange
+} from './services/takeCompingService';
 import { useUndoRedo } from './hooks/useUndoRedo';
 import {
     FolderInput, Settings, Cpu, LayoutGrid, Search, Users, Layers, Sliders, Sparkles, AlertTriangle, Undo2, Redo2, PlayCircle, Folder, HardDrive, Save, Trash2, Piano
@@ -161,6 +170,8 @@ interface MixSnapshot {
 interface RecordingSessionMeta {
     recordingStartBar: number;
     latencyCompensationBars: number;
+    sourceTrimOffsetBars?: number;
+    punchOutBar?: number;
 }
 
 type ToolPanel = 'browser' | 'ai' | 'scanner' | null;
@@ -440,13 +451,23 @@ const App: React.FC = () => {
 
     const updateTrackById = useCallback((trackId: string, updates: Partial<Track>, options?: TrackMutationOptions) => {
         applyTrackMutation((prevTracks) => prevTracks.map((track) => (
-            track.id === trackId ? { ...track, ...updates } : track
+            track.id === trackId
+                ? (
+                    updates.punchRange
+                        ? updateTrackPunchRange({ ...track, ...updates }, updates.punchRange)
+                        : { ...track, ...updates }
+                )
+                : track
         )), options);
     }, [applyTrackMutation]);
 
     const updateClipById = useCallback((trackId: string, clipId: string, updates: Partial<Clip>, options?: TrackMutationOptions) => {
         applyTrackMutation((prevTracks) => prevTracks.map((track) => {
             if (track.id !== trackId) return track;
+
+            if (isCompDerivedClipId(clipId)) {
+                return applyCompClipEdits(track, clipId, updates);
+            }
 
             let clipChanged = false;
             const nextClips = track.clips.map((clip) => {
@@ -469,11 +490,12 @@ const App: React.FC = () => {
                 return track;
             }
 
-            return {
+            const updatedTrack = {
                 ...track,
                 clips: nextClips,
                 sessionClips: nextSessionClips
             };
+            return syncTakeMetadataForClip(updatedTrack, clipId);
         }), options);
     }, [applyTrackMutation]);
 
@@ -943,6 +965,7 @@ const App: React.FC = () => {
                         bpm: transport.bpm,
                         recordingStartBar: sessionMeta?.recordingStartBar ?? fallbackStartBar,
                         latencyCompensationBars: sessionMeta?.latencyCompensationBars ?? fallbackCompensationBars,
+                        sourceTrimOffsetBars: sessionMeta?.sourceTrimOffsetBars ?? 0,
                         recordedAt: Date.now(),
                         idFactory: buildRuntimeId
                     }));
@@ -1171,6 +1194,80 @@ const App: React.FC = () => {
         return positionToBarTime(transport);
     }, [transport.currentBar, transport.currentBeat, transport.currentSixteenth]);
 
+    const toggleSelectedTrackPunch = useCallback(() => {
+        if (!selectedTrackId) return;
+
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== selectedTrackId) return track;
+            return updateTrackPunchRange(track, {
+                enabled: !(track.punchRange?.enabled || false)
+            });
+        }), { recolor: false, reason: 'punch-toggle-selected-track' });
+    }, [applyTrackMutation, selectedTrackId]);
+
+    const setSelectedTrackPunchBoundary = useCallback((boundary: 'in' | 'out') => {
+        if (!selectedTrackId) return;
+        const cursorBar = getTransportCursorBar();
+
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== selectedTrackId) return track;
+
+            const baseRange = track.punchRange || {
+                enabled: true,
+                inBar: 1,
+                outBar: 2,
+                preRollBars: 1,
+                countInBars: 0
+            };
+
+            if (boundary === 'in') {
+                return updateTrackPunchRange(track, {
+                    enabled: true,
+                    inBar: cursorBar,
+                    outBar: Math.max(baseRange.outBar, cursorBar + 0.25)
+                });
+            }
+
+            return updateTrackPunchRange(track, {
+                enabled: true,
+                outBar: Math.max(cursorBar, baseRange.inBar + 0.25)
+            });
+        }), { recolor: false, reason: `punch-set-${boundary}` });
+    }, [applyTrackMutation, getTransportCursorBar, selectedTrackId]);
+
+    useEffect(() => {
+        const handlePunchHotkeys = (event: KeyboardEvent) => {
+            if (!event.altKey || event.ctrlKey || event.metaKey) return;
+
+            const target = event.target as HTMLElement | null;
+            const tagName = target?.tagName;
+            if (tagName === 'INPUT' || tagName === 'TEXTAREA' || target?.isContentEditable) {
+                return;
+            }
+
+            const key = event.key.toLowerCase();
+            if (key === 'p') {
+                event.preventDefault();
+                toggleSelectedTrackPunch();
+                return;
+            }
+
+            if (key === 'i') {
+                event.preventDefault();
+                setSelectedTrackPunchBoundary('in');
+                return;
+            }
+
+            if (key === 'o') {
+                event.preventDefault();
+                setSelectedTrackPunchBoundary('out');
+            }
+        };
+
+        window.addEventListener('keydown', handlePunchHotkeys);
+        return () => window.removeEventListener('keydown', handlePunchHotkeys);
+    }, [setSelectedTrackPunchBoundary, toggleSelectedTrackPunch]);
+
     const handleSplitClipAtCursor = useCallback((track: Track, clip: Clip) => {
         const cursorBar = getTransportCursorBar();
         const clipStart = clip.start;
@@ -1262,9 +1359,7 @@ const App: React.FC = () => {
             nextClips[clipIndex] = leftClip;
             nextClips.splice(clipIndex + 1, 0, rightClip);
 
-            didSplit = true;
-
-            return {
+            let nextTrack: Track = {
                 ...existingTrack,
                 clips: nextClips,
                 sessionClips: existingTrack.sessionClips.map((slot) => {
@@ -1275,6 +1370,11 @@ const App: React.FC = () => {
                     };
                 })
             };
+
+            nextTrack = splitTakeForClip(nextTrack, sourceClip.id, leftClip, rightClip, buildRuntimeId);
+            didSplit = true;
+
+            return nextTrack;
         }), { recolor: false, reason: 'timeline-split-clip-at-cursor' });
 
         if (!didSplit) {
@@ -1320,6 +1420,36 @@ const App: React.FC = () => {
         setSelectedTrackId(track.id);
         setSelectedClipId(duplicateClipId);
         setBottomView('editor');
+    }, [applyTrackMutation]);
+
+    const handlePromoteClipToComp = useCallback((track: Track, clip: Clip) => {
+        let promoted = false;
+        let missingTake = false;
+
+        applyTrackMutation((prevTracks) => prevTracks.map((existingTrack) => {
+            if (existingTrack.id !== track.id) return existingTrack;
+
+            const sourceTake = (existingTrack.recordingTakes || []).find((take) => take.clipId === clip.id);
+            if (!sourceTake) {
+                missingTake = true;
+                return existingTrack;
+            }
+
+            promoted = true;
+            return promoteTakeToComp(existingTrack, sourceTake.id, {
+                replaceExisting: false,
+                idFactory: buildRuntimeId
+            });
+        }), { recolor: false, reason: 'timeline-promote-take-to-comp' });
+
+        if (missingTake) {
+            alert('Este clip no pertenece a una toma grabada.');
+            return;
+        }
+
+        if (!promoted) {
+            alert('No se pudo enviar la toma al Comp Lane.');
+        }
     }, [applyTrackMutation]);
 
     const handleConsolidateClips = useCallback(async (track: Track, clipsToConsolidate: Clip[]) => {
@@ -1377,7 +1507,7 @@ const App: React.FC = () => {
             applyTrackMutation((prevTracks) => prevTracks.map((existingTrack) => {
                 if (existingTrack.id !== track.id) return existingTrack;
 
-                return {
+                const nextTrack: Track = {
                     ...existingTrack,
                     clips: existingTrack.clips.map((existingClip) => {
                         if (existingClip.id !== targetClip.id) return existingClip;
@@ -1398,6 +1528,7 @@ const App: React.FC = () => {
                         };
                     })
                 };
+                return syncTakeMetadataForClip(nextTrack, targetClip.id);
             }), { recolor: false });
         } catch (error) {
             console.error('Consolidate clip failed', error);
@@ -1430,7 +1561,7 @@ const App: React.FC = () => {
         applyTrackMutation((prevTracks) => prevTracks.map((existingTrack) => {
             if (existingTrack.id !== track.id) return existingTrack;
 
-            return {
+            const nextTrack: Track = {
                 ...existingTrack,
                 clips: existingTrack.clips.map((existingClip) => {
                     if (existingClip.id !== clip.id) return existingClip;
@@ -1446,6 +1577,7 @@ const App: React.FC = () => {
                     };
                 })
             };
+            return syncTakeMetadataForClip(nextTrack, clip.id);
         }), { recolor: false });
     }, [applyTrackMutation]);
 
@@ -2046,18 +2178,56 @@ const App: React.FC = () => {
             return;
         }
 
-        const recordingStartSeconds = Math.max(0, engineAdapter.getCurrentTime());
         const secondsPerBar = getSecondsPerBar(transport.bpm);
-        const recordingStartBar = Math.max(1, 1 + (recordingStartSeconds / secondsPerBar));
         const diagnostics = engineAdapter.getDiagnostics();
         const estimatedLatencyCompensationBars = Math.max(0, (diagnostics.latency || 0) / secondsPerBar);
 
-        if (!(isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying)) {
+        const punchPlan = resolvePunchRecordingPlan(armedTracks);
+        const transportWasRunning = isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying;
+
+        if (punchPlan) {
+            const playbackStartBar = punchPlan.startPlaybackBar;
+            const playbackStartTime = barToSeconds(playbackStartBar, transport.bpm);
+            const playbackStartPosition = barTimeToPosition(playbackStartBar);
+
+            engineAdapter.seek(playbackStartTime, latestTracksRef.current, transport.bpm);
+
+            if (!transportWasRunning) {
+                const ready = await engineAdapter.ensurePlaybackReady();
+                if (!ready || !isTransportCommandCurrent(commandToken)) {
+                    return;
+                }
+
+                isPlayingRef.current = true;
+                pauseResumeArmedRef.current = false;
+                engineAdapter.play(latestTracksRef.current, transport.bpm, 1, playbackStartTime);
+
+                if (!engineAdapter.getIsPlaying() || !isTransportCommandCurrent(commandToken)) {
+                    isPlayingRef.current = false;
+                    return;
+                }
+            }
+
+            setTransport((prev: TransportState) => ({
+                ...prev,
+                isPlaying: true,
+                currentBar: playbackStartPosition.currentBar,
+                currentBeat: playbackStartPosition.currentBeat,
+                currentSixteenth: playbackStartPosition.currentSixteenth
+            }));
+        } else if (!transportWasRunning) {
             const startedPlayback = await playFromTransportCursor(commandToken);
             if (!startedPlayback || !isTransportCommandCurrent(commandToken)) {
                 return;
             }
         }
+
+        const recordingStartSeconds = Math.max(0, engineAdapter.getCurrentTime());
+        const recordingCaptureStartBar = Math.max(1, 1 + (recordingStartSeconds / secondsPerBar));
+        const recordingTargetStartBar = punchPlan ? punchPlan.punchInBar : recordingCaptureStartBar;
+        const sourceTrimOffsetBars = punchPlan
+            ? Math.max(0, recordingTargetStartBar - recordingCaptureStartBar)
+            : 0;
 
         pauseResumeArmedRef.current = false;
         setTransport((prev: TransportState) => ({ ...prev, isPlaying: true, isRecording: true }));
@@ -2065,8 +2235,10 @@ const App: React.FC = () => {
             try {
                 await engineAdapter.startRecording(track.id, track.inputDeviceId);
                 recordingSessionMetaRef.current.set(track.id, {
-                    recordingStartBar,
-                    latencyCompensationBars: estimatedLatencyCompensationBars
+                    recordingStartBar: recordingTargetStartBar,
+                    latencyCompensationBars: estimatedLatencyCompensationBars,
+                    sourceTrimOffsetBars,
+                    punchOutBar: punchPlan?.punchOutBar
                 });
             } catch (error) {
                 console.error(`No se pudo iniciar grabacion para ${track.name}.`, error);
@@ -2085,6 +2257,42 @@ const App: React.FC = () => {
             setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
         }
     }, [beginTransportCommand, transport.isPlaying, tracks, hasActiveRecordingSessions, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm]);
+
+    useEffect(() => {
+        if (!transport.isRecording) return;
+
+        let animationFrame = 0;
+        const checkPunchAutoStop = () => {
+            if (!transport.isRecording) return;
+
+            const activeRecordingTrackIds = engineAdapter.getActiveRecordingTrackIds();
+            if (activeRecordingTrackIds.length === 0) {
+                animationFrame = requestAnimationFrame(checkPunchAutoStop);
+                return;
+            }
+
+            const punchOutBars = activeRecordingTrackIds
+                .map((trackId) => recordingSessionMetaRef.current.get(trackId)?.punchOutBar)
+                .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+
+            if (punchOutBars.length === 0) {
+                animationFrame = requestAnimationFrame(checkPunchAutoStop);
+                return;
+            }
+
+            const targetPunchOutBar = Math.max(...punchOutBars);
+            const currentBar = Math.max(1, 1 + (Math.max(0, engineAdapter.getCurrentTime()) / getSecondsPerBar(transport.bpm)));
+            if (currentBar >= targetPunchOutBar - 0.0005) {
+                void finalizeActiveRecordings();
+                return;
+            }
+
+            animationFrame = requestAnimationFrame(checkPunchAutoStop);
+        };
+
+        animationFrame = requestAnimationFrame(checkPunchAutoStop);
+        return () => cancelAnimationFrame(animationFrame);
+    }, [transport.isRecording, transport.bpm, finalizeActiveRecordings]);
 
     const buildPersistedTracks = useCallback((sourceTracks: Track[]): Track[] => {
         return sourceTracks.map((track) => ({
@@ -3117,6 +3325,7 @@ const App: React.FC = () => {
                                 onQuantize={handleQuantizeClip}
                                 onSplitClip={handleSplitClipAtCursor}
                                 onDuplicateClip={handleDuplicateClip}
+                                onPromoteToComp={handlePromoteClipToComp}
                                 onGridChange={handleTimelineGridChange}
                                 onExternalDrop={handleTimelineExternalDrop}
                                 onAddTrack={handleTimelineAddTrack}

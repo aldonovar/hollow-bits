@@ -11,6 +11,7 @@ export interface BuildRecordingTakeCommitInput {
     bpm: number;
     recordingStartBar: number;
     latencyCompensationBars?: number;
+    sourceTrimOffsetBars?: number;
     recordedAt?: number;
     idFactory?: (prefix: string) => string;
 }
@@ -79,8 +80,11 @@ export const buildRecordingTakeCommit = (input: BuildRecordingTakeCommitInput): 
     const idFactory = input.idFactory || buildRuntimeId;
     const recordedAt = input.recordedAt || Date.now();
     const secondsPerBar = getSecondsPerBar(input.bpm);
-    const lengthBars = Math.max(MIN_TAKE_LENGTH_BARS, input.buffer.duration / secondsPerBar);
+    const rawLengthBars = Math.max(MIN_TAKE_LENGTH_BARS, input.buffer.duration / secondsPerBar);
+    const sourceTrimOffsetBars = Math.max(0, input.sourceTrimOffsetBars || 0);
+    const lengthBars = Math.max(MIN_TAKE_LENGTH_BARS, rawLengthBars - sourceTrimOffsetBars);
     const placement = resolveCompensatedPlacement(input.recordingStartBar, input.latencyCompensationBars || 0);
+    const finalOffsetBars = placement.clipOffsetBars + sourceTrimOffsetBars;
     const { laneId, laneName } = resolveTakeLane(input.track, idFactory);
 
     const clipId = idFactory('rec');
@@ -101,7 +105,7 @@ export const buildRecordingTakeCommit = (input: BuildRecordingTakeCommitInput): 
             sourceId: input.sourceId,
             notes: [],
             originalBpm: input.bpm,
-            offset: placement.clipOffsetBars,
+            offset: finalOffsetBars,
             fadeIn: 0,
             fadeOut: 0,
             gain: 1,
@@ -115,7 +119,7 @@ export const buildRecordingTakeCommit = (input: BuildRecordingTakeCommitInput): 
             sourceId: input.sourceId,
             startBar: placement.clipStartBar,
             lengthBars,
-            offsetBars: placement.clipOffsetBars,
+            offsetBars: finalOffsetBars,
             createdAt: recordedAt,
             label: `Take ${takeNumber}`,
             gain: 1,

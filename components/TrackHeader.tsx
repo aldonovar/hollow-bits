@@ -34,6 +34,14 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
     const showKnobs = height >= 70;
     const showMonitor = height >= 140;
     const isCompact = height < 100;
+    const punchRange = track.punchRange || {
+        enabled: false,
+        inBar: 1,
+        outBar: 2,
+        preRollBars: 1,
+        countInBars: 0
+    };
+    const punchEnabled = Boolean(punchRange.enabled);
 
     const peakMeterLevel = track.isMuted ? 0 : dbToMeterNormalized(meterSnapshot.peakDb);
     const rmsMeterLevel = track.isMuted ? 0 : Math.min(peakMeterLevel, dbToMeterNormalized(meterSnapshot.rmsDb));
@@ -90,7 +98,7 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
                         </div>
                     )}
 
-                    <div className="grid grid-cols-3 gap-1 h-5 relative">
+                    <div className="grid grid-cols-4 gap-1 h-5 relative">
                         <button onClick={(e) => { e.stopPropagation(); onUpdate({ isMuted: !track.isMuted }) }} className={`rounded-[1px] flex items-center justify-center font-bold text-[9px] border ${track.isMuted ? 'bg-[#eab308] text-black border-[#eab308]' : 'bg-[#2a2a2a] text-[#eab308] border-[#333]'}`}>M</button>
                         <button onClick={(e) => { e.stopPropagation(); onUpdate({ isSoloed: !track.isSoloed }) }} className={`rounded-[1px] flex items-center justify-center font-bold text-[9px] border ${track.isSoloed ? 'bg-[#3b82f6] text-white border-[#3b82f6]' : 'bg-[#2a2a2a] text-[#3b82f6] border-[#333]'}`}>S</button>
                         <button
@@ -98,6 +106,21 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
                             className={`rounded-[1px] flex items-center justify-center border transition-all ${track.isArmed ? 'bg-daw-ruby text-white border-daw-ruby animate-pulse' : 'bg-[#2a2a2a] text-daw-ruby border-[#333]'}`}
                         >
                             <Circle size={7} fill={track.isArmed ? "currentColor" : "none"} strokeWidth={3} />
+                        </button>
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onUpdate({
+                                    punchRange: {
+                                        ...punchRange,
+                                        enabled: !punchEnabled
+                                    }
+                                });
+                            }}
+                            title={`Punch ${punchEnabled ? 'ON' : 'OFF'} (${punchRange.inBar.toFixed(2)}-${punchRange.outBar.toFixed(2)})`}
+                            className={`rounded-[1px] flex items-center justify-center font-bold text-[9px] border transition-all ${punchEnabled ? 'bg-daw-violet text-white border-daw-violet' : 'bg-[#2a2a2a] text-daw-violet border-[#333]'}`}
+                        >
+                            P
                         </button>
                     </div>
                 </div>
