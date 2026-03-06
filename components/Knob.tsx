@@ -7,6 +7,7 @@ interface KnobProps {
   max: number;
   size?: number;
   label?: string;
+  showLabel?: boolean;
   unit?: string;
   onChange: (val: number) => void;
   color?: string;
@@ -20,6 +21,7 @@ const Knob: React.FC<KnobProps> = ({
   max,
   size = 46,
   label,
+  showLabel = true,
   unit = '',
   onChange,
   color = '#f0003c',
@@ -234,7 +236,7 @@ const Knob: React.FC<KnobProps> = ({
         <div className="absolute inset-0 z-10 rounded-full" />
       </div>
 
-      {label && (
+      {label && showLabel && (
         <div className={`text-[9px] font-bold font-sans uppercase tracking-wider transition-colors ${isDragging ? 'text-white' : 'text-gray-500'}`}>
           {label}
         </div>

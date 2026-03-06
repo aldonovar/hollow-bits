@@ -32,8 +32,11 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
     };
 
     const showKnobs = height >= 70;
-    const showMonitor = height >= 120;
+    const showMonitor = height >= 86;
     const isCompact = height < 100;
+    const compactControls = height < 120;
+    const knobSize = compactControls ? 18 : 24;
+    const showKnobLabels = !compactControls;
     const punchRange = track.punchRange || {
         enabled: false,
         inBar: 1,
@@ -84,9 +87,9 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
 
                 {showKnobs && (
                     <div className="flex-1 flex items-center justify-between px-1 min-h-0 my-0.5">
-                        <Knob label="VOL" value={track.volume} min={-60} max={6} defaultValue={0} size={24} color={track.color} onChange={(val) => onUpdate({ volume: val })} />
-                        <Knob label="PAN" value={track.pan} min={-50} max={50} defaultValue={0} size={24} color="#00fff2" bipolar={true} onChange={(val) => onUpdate({ pan: Math.round(val) })} />
-                        <Knob label="REV" value={track.reverb} min={0} max={100} defaultValue={0} size={24} color="#f43f5e" onChange={(val) => onUpdate({ reverb: val })} />
+                        <Knob label="VOL" showLabel={showKnobLabels} value={track.volume} min={-60} max={6} defaultValue={0} size={knobSize} color={track.color} onChange={(val) => onUpdate({ volume: val })} />
+                        <Knob label="PAN" showLabel={showKnobLabels} value={track.pan} min={-50} max={50} defaultValue={0} size={knobSize} color="#00fff2" bipolar={true} onChange={(val) => onUpdate({ pan: Math.round(val) })} />
+                        <Knob label="REV" showLabel={showKnobLabels} value={track.reverb} min={0} max={100} defaultValue={0} size={knobSize} color="#f43f5e" onChange={(val) => onUpdate({ reverb: val })} />
                     </div>
                 )}
 
@@ -94,8 +97,8 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
 
                 <div className="mt-auto flex flex-col gap-1 shrink-0">
                     {showMonitor && (
-                        <div className="flex items-center gap-1 bg-[#121212] p-0.5 rounded-sm border border-[#333] mb-0.5 h-4">
-                            <span className="text-[7px] font-bold text-gray-600 uppercase pl-1">In</span>
+                        <div className={`flex items-center gap-1 bg-[#121212] p-0.5 rounded-sm border border-[#333] mb-0.5 ${compactControls ? 'h-3.5' : 'h-4'}`}>
+                            {!compactControls && <span className="text-[7px] font-bold text-gray-600 uppercase pl-1">In</span>}
                             <div className="flex-1 flex gap-[1px]">
                                 {monitorModes.map((mode) => (
                                     <button key={mode} onClick={(e) => { e.stopPropagation(); onUpdate({ monitor: mode }); }} className={`flex-1 py-0 text-[7px] font-bold uppercase rounded-[1px] transition-all ${track.monitor === mode ? 'bg-daw-cyan text-black' : 'bg-[#1a1a1a] text-gray-500 hover:bg-[#222]'}`}>{mode}</button>
@@ -104,9 +107,9 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
                         </div>
                     )}
 
-                    <div className="grid grid-cols-4 gap-1 h-5 relative">
-                        <button onClick={(e) => { e.stopPropagation(); onUpdate({ isMuted: !track.isMuted }) }} className={`rounded-[1px] flex items-center justify-center font-bold text-[9px] border ${track.isMuted ? 'bg-[#eab308] text-black border-[#eab308]' : 'bg-[#2a2a2a] text-[#eab308] border-[#333]'}`}>M</button>
-                        <button onClick={(e) => { e.stopPropagation(); onUpdate({ isSoloed: !track.isSoloed }) }} className={`rounded-[1px] flex items-center justify-center font-bold text-[9px] border ${track.isSoloed ? 'bg-[#3b82f6] text-white border-[#3b82f6]' : 'bg-[#2a2a2a] text-[#3b82f6] border-[#333]'}`}>S</button>
+                    <div className={`grid grid-cols-4 gap-1 relative ${compactControls ? 'h-4' : 'h-5'}`}>
+                        <button onClick={(e) => { e.stopPropagation(); onUpdate({ isMuted: !track.isMuted }) }} className={`rounded-[1px] flex items-center justify-center font-bold ${compactControls ? 'text-[8px]' : 'text-[9px]'} border ${track.isMuted ? 'bg-[#eab308] text-black border-[#eab308]' : 'bg-[#2a2a2a] text-[#eab308] border-[#333]'}`}>M</button>
+                        <button onClick={(e) => { e.stopPropagation(); onUpdate({ isSoloed: !track.isSoloed }) }} className={`rounded-[1px] flex items-center justify-center font-bold ${compactControls ? 'text-[8px]' : 'text-[9px]'} border ${track.isSoloed ? 'bg-[#3b82f6] text-white border-[#3b82f6]' : 'bg-[#2a2a2a] text-[#3b82f6] border-[#333]'}`}>S</button>
                         <button
                             onClick={(e) => { e.stopPropagation(); onUpdate({ isArmed: !track.isArmed }) }}
                             className={`rounded-[1px] flex items-center justify-center border transition-all ${track.isArmed ? 'bg-daw-ruby text-white border-daw-ruby animate-pulse' : 'bg-[#2a2a2a] text-daw-ruby border-[#333]'}`}
@@ -124,7 +127,7 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
                                 });
                             }}
                             title={`Punch ${punchEnabled ? 'ON' : 'OFF'} (${punchRange.inBar.toFixed(2)}-${punchRange.outBar.toFixed(2)})`}
-                            className={`rounded-[1px] flex items-center justify-center font-bold text-[9px] border transition-all ${punchEnabled ? 'bg-daw-violet text-white border-daw-violet' : 'bg-[#2a2a2a] text-daw-violet border-[#333]'}`}
+                            className={`rounded-[1px] flex items-center justify-center font-bold ${compactControls ? 'text-[8px]' : 'text-[9px]'} border transition-all ${punchEnabled ? 'bg-daw-violet text-white border-daw-violet' : 'bg-[#2a2a2a] text-daw-violet border-[#333]'}`}
                         >
                             P
                         </button>
