@@ -31,8 +31,9 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
         return Math.pow(normalized, 1.35);
     };
 
-    const showKnobs = height >= 70;
+    const showKnobs = height >= 108;
     const showMonitor = height >= 86;
+    const showCompactMonitor = showMonitor && !showKnobs;
     const isCompact = height < 100;
     const punchRange = track.punchRange || {
         enabled: false,
@@ -94,8 +95,8 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
 
                 <div className="mt-auto flex flex-col gap-1 shrink-0">
                     {showMonitor && (
-                        <div className="flex items-center gap-1 bg-[#121212] p-0.5 rounded-sm border border-[#333] mb-0.5 h-4">
-                            <span className="text-[7px] font-bold text-gray-600 uppercase pl-1">In</span>
+                        <div className={`flex items-center gap-1 bg-[#121212] p-0.5 rounded-sm border border-[#333] mb-0.5 ${showCompactMonitor ? 'h-3.5' : 'h-4'}`}>
+                            {!showCompactMonitor && <span className="text-[7px] font-bold text-gray-600 uppercase pl-1">In</span>}
                             <div className="flex-1 flex gap-[1px]">
                                 {monitorModes.map((mode) => (
                                     <button key={mode} onClick={(e) => { e.stopPropagation(); onUpdate({ monitor: mode }); }} className={`flex-1 py-0 text-[7px] font-bold uppercase rounded-[1px] transition-all ${track.monitor === mode ? 'bg-daw-cyan text-black' : 'bg-[#1a1a1a] text-gray-500 hover:bg-[#222]'}`}>{mode}</button>
