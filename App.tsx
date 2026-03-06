@@ -89,6 +89,8 @@ const AISidebar = React.lazy(() => import('./components/AISidebar'));
 const NoteScannerPanel = React.lazy(() => import('./components/NoteScannerPanel'));
 const ExportModal = React.lazy(() => import('./components/ExportModal'));
 
+const TRACK_COLOR_GRADIENT_TARGET = 48;
+
 // --- ATOMIC COMPONENTS (Extracted for Performance) ---
 
 interface SidebarItemProps {
@@ -426,6 +428,11 @@ const App: React.FC = () => {
         });
 
         return changed ? recoloredTracks : sourceTracks;
+    }, []);
+
+    const getProgressiveTrackColor = useCallback((position: number, projectedTotal = position + 1): string => {
+        const gradientTotal = Math.max(TRACK_COLOR_GRADIENT_TARGET, projectedTotal);
+        return getTrackColorByPosition(position, gradientTotal);
     }, []);
 
     const toggleToolPanel = useCallback((panel: Exclude<ToolPanel, null>) => {
@@ -2261,7 +2268,7 @@ const App: React.FC = () => {
                 id: buildRuntimeId('t-rec'),
                 name: `REC VOCAL ${tracks.length + 1}`,
                 type: TrackType.AUDIO,
-                color: getTrackColorByPosition(tracks.length, tracks.length + 1),
+                color: getProgressiveTrackColor(tracks.length, tracks.length + 1),
                 isArmed: true,
                 monitor: 'in',
                 micSettings: {
@@ -2359,7 +2366,7 @@ const App: React.FC = () => {
         if (activeRecordingTrackIds.size === 0) {
             setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
         }
-    }, [beginTransportCommand, transport.isPlaying, tracks, hasActiveRecordingSessions, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm]);
+    }, [beginTransportCommand, transport.isPlaying, tracks, hasActiveRecordingSessions, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm, getProgressiveTrackColor]);
 
     useEffect(() => {
         if (!transport.isRecording) return;
@@ -2761,7 +2768,7 @@ const App: React.FC = () => {
                     id: `t-imp-${importStamp}-${index}`,
                     name: source.name.replace(/\.[^/.]+$/, '').substring(0, 12),
                     type: TrackType.AUDIO,
-                    color: getTrackColorByPosition(tracks.length + index, totalTrackCountAfterImport),
+                    color: getProgressiveTrackColor(tracks.length + index, totalTrackCountAfterImport),
                     volume: -3
                 });
 
@@ -2810,7 +2817,7 @@ const App: React.FC = () => {
         if (validTracks.length < sources.length) {
             alert('Algunos archivos no se pudieron importar, pero el resto se agregÃ³ correctamente.');
         }
-    }, [appendTracks, buildAudioClipFromBuffer, tracks.length]);
+    }, [appendTracks, buildAudioClipFromBuffer, tracks.length, getProgressiveTrackColor]);
 
     const importLibraryEntryIntoDestination = useCallback(async (
         entry: ScannedFileEntry,
@@ -2867,7 +2874,7 @@ const App: React.FC = () => {
             id: buildRuntimeId('t-lib'),
             name: fileData.name.replace(/\.[^/.]+$/, "").substring(0, 12) || 'Library Audio',
             type: TrackType.AUDIO,
-            color: getTrackColorByPosition(tracks.length, tracks.length + 1),
+            color: getProgressiveTrackColor(tracks.length, tracks.length + 1),
             volume: -3
         });
 
@@ -2880,7 +2887,7 @@ const App: React.FC = () => {
         appendTrack(newTrack, { reason: 'browser-drop-library-create-track' });
         setSelectedTrackId(newTrack.id);
         setSelectedClipId(clip.id);
-    }, [appendTrack, applyTrackMutation, assignClipToSessionSlot, buildAudioClipFromBuffer, tracks]);
+    }, [appendTrack, applyTrackMutation, assignClipToSessionSlot, buildAudioClipFromBuffer, tracks, getProgressiveTrackColor]);
 
     const handleImportLibraryEntry = useCallback(async (entry: ScannedFileEntry) => {
         try {
@@ -3197,11 +3204,11 @@ const App: React.FC = () => {
             id: buildRuntimeId(`t-${type.toLowerCase()}`),
             name: baseName,
             type,
-            color: getTrackColorByPosition(tracks.length, tracks.length + 1)
+            color: getProgressiveTrackColor(tracks.length, tracks.length + 1)
         });
 
         appendTrack(newTrack, { reason: 'timeline-add-track', recolor: false });
-    }, [appendTrack, tracks]);
+    }, [appendTrack, tracks, getProgressiveTrackColor]);
 
     const handleMixerCreateGroup = useCallback(() => {
         const count = tracks.filter((track) => track.type === TrackType.GROUP).length + 1;
@@ -3209,11 +3216,11 @@ const App: React.FC = () => {
             id: buildRuntimeId('t-group'),
             name: `Group ${count}`,
             type: TrackType.GROUP,
-            color: getTrackColorByPosition(tracks.length, tracks.length + 1)
+            color: getProgressiveTrackColor(tracks.length, tracks.length + 1)
         });
 
         appendTrack(newTrack, { reason: 'mixer-create-group', recolor: false });
-    }, [appendTrack, tracks]);
+    }, [appendTrack, tracks, getProgressiveTrackColor]);
 
     const isScannerImmersive = showNoteScanner;
     const selectedTrack = tracks.find((track) => track.id === selectedTrackId) || null;
