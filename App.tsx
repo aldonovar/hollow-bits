@@ -6,6 +6,7 @@ import Timeline from './components/Timeline';
 import Mixer from './components/Mixer';
 import Editor from './components/Editor';
 import Browser from './components/Browser';
+import TakeLanesPanel from './components/TakeLanesPanel';
 import type { ApplyScanPayload } from './components/NoteScannerPanel';
 import AppLogo from './components/AppLogo';
 import SessionView from './components/SessionView';
@@ -66,15 +67,23 @@ import {
     normalizePunchRange,
     promoteTakeToComp,
     resolvePunchRecordingPlan,
+    shouldFinalizePunchRecording,
     splitTakeForClip,
     syncTakeMetadataForClip,
     updateTrackPunchRange
 } from './services/takeCompingService';
+import {
+    setTrackActiveCompLane,
+    setTrackActiveTake,
+    toggleTrackTakeMute,
+    toggleTrackTakeSolo
+} from './services/takeLaneControlService';
 import { useUndoRedo } from './hooks/useUndoRedo';
 import {
     FolderInput, Settings, Cpu, LayoutGrid, Search, Users, Layers, Sliders, Sparkles, AlertTriangle, Undo2, Redo2, PlayCircle, Folder, HardDrive, Save, Trash2, Piano
 } from 'lucide-react';
 import { HardwareSettingsModal } from './components/HardwareSettingsModal';
+import { audioEngine } from './services/audioEngine';
 
 const AISidebar = React.lazy(() => import('./components/AISidebar'));
 const NoteScannerPanel = React.lazy(() => import('./components/NoteScannerPanel'));
@@ -431,15 +440,14 @@ const App: React.FC = () => {
         noHistory?: boolean;
         recolor?: boolean;
         reason?: string;
+        historyGroupId?: string;
     }
 
     const applyTrackMutation = useCallback((
         recipe: (currentTracks: Track[]) => Track[],
         options?: TrackMutationOptions
     ) => {
-        const updater = options?.noHistory ? setTracksNoHistory : setTracks;
-
-        updater((prevTracks) => {
+        const commitMutation = (prevTracks: Track[]) => {
             const nextTracks = recipe(prevTracks);
             if (nextTracks === prevTracks) return prevTracks;
             if (!options?.noHistory) {
@@ -447,6 +455,15 @@ const App: React.FC = () => {
                 setProjectCommandCount((count) => count + 1);
             }
             return options?.recolor ? applyTrackGradientColors(nextTracks) : nextTracks;
+        };
+
+        if (options?.noHistory) {
+            setTracksNoHistory(commitMutation);
+            return;
+        }
+
+        setTracks(commitMutation, {
+            groupKey: options?.historyGroupId || undefined
         });
     }, [applyTrackGradientColors, setTracks, setTracksNoHistory]);
 
@@ -1244,6 +1261,82 @@ const App: React.FC = () => {
             return updateTrackPunchRange(track, updates);
         }), { recolor: false, reason: 'transport-punch-panel-update' });
     }, [applyTrackMutation, selectedTrackId]);
+
+    const handleSelectTakeFromPanel = useCallback((trackId: string, takeId: string) => {
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== trackId) return track;
+            return setTrackActiveTake(track, takeId);
+        }), { recolor: false, reason: 'take-panel-select-active' });
+
+        const targetTrack = latestTracksRef.current.find((track) => track.id === trackId);
+        const targetTake = (targetTrack?.recordingTakes || []).find((take) => take.id === takeId);
+        if (targetTake) {
+            setSelectedTrackId(trackId);
+            setSelectedClipId(targetTake.clipId);
+            setBottomView('editor');
+        }
+    }, [applyTrackMutation]);
+
+    const handleToggleTakeMuteFromPanel = useCallback((trackId: string, takeId: string) => {
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== trackId) return track;
+            return toggleTrackTakeMute(track, takeId);
+        }), { recolor: false, reason: 'take-panel-toggle-mute' });
+    }, [applyTrackMutation]);
+
+    const handleToggleTakeSoloFromPanel = useCallback((trackId: string, takeId: string) => {
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== trackId) return track;
+            return toggleTrackTakeSolo(track, takeId);
+        }), { recolor: false, reason: 'take-panel-toggle-solo' });
+    }, [applyTrackMutation]);
+
+    const handleSetCompLaneFromPanel = useCallback((trackId: string, laneId: string) => {
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== trackId) return track;
+            return setTrackActiveCompLane(track, laneId);
+        }), { recolor: false, reason: 'take-panel-activate-comp-lane' });
+    }, [applyTrackMutation]);
+
+    const handleAuditionTakeFromPanel = useCallback(async (trackId: string, takeId: string) => {
+        const targetTrack = latestTracksRef.current.find((track) => track.id === trackId);
+        if (!targetTrack || targetTrack.type !== TrackType.AUDIO) return;
+
+        const targetTake = (targetTrack.recordingTakes || []).find((take) => take.id === takeId);
+        if (!targetTake) return;
+
+        const targetClip = targetTrack.clips.find((clip) => clip.id === targetTake.clipId);
+        if (!targetClip) return;
+
+        if (targetClip.buffer) {
+            audioEngine.previewBuffer(targetClip.buffer);
+            return;
+        }
+
+        if (!targetClip.sourceId) return;
+
+        try {
+            const storedBlob = await assetDb.getFile(targetClip.sourceId);
+            if (!storedBlob) return;
+
+            const decodedBuffer = await engineAdapter.decodeAudioData(await storedBlob.arrayBuffer());
+            audioEngine.previewBuffer(decodedBuffer);
+
+            applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+                if (track.id !== trackId) return track;
+                return {
+                    ...track,
+                    clips: track.clips.map((clip) => (
+                        clip.id === targetClip.id
+                            ? { ...clip, buffer: decodedBuffer, isOffline: false }
+                            : clip
+                    ))
+                };
+            }), { noHistory: true, recolor: false, reason: 'take-panel-audition-cache-buffer' });
+        } catch (error) {
+            console.error('No se pudo audicionar la toma seleccionada.', error);
+        }
+    }, [applyTrackMutation]);
 
     useEffect(() => {
         const handlePunchHotkeys = (event: KeyboardEvent) => {
@@ -2281,23 +2374,14 @@ const App: React.FC = () => {
                 return;
             }
 
-            const punchOutBars = activeRecordingTrackIds
-                .map((trackId) => recordingSessionMetaRef.current.get(trackId)?.punchOutBar)
-                .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-
-            if (punchOutBars.length === 0) {
+            const currentBar = Math.max(1, 1 + (Math.max(0, engineAdapter.getCurrentTime()) / getSecondsPerBar(transport.bpm)));
+            const punchDecision = shouldFinalizePunchRecording(currentBar, activeRecordingTrackIds, recordingSessionMetaRef.current);
+            if (!punchDecision.shouldFinalize) {
                 animationFrame = requestAnimationFrame(checkPunchAutoStop);
                 return;
             }
 
-            const targetPunchOutBar = Math.max(...punchOutBars);
-            const currentBar = Math.max(1, 1 + (Math.max(0, engineAdapter.getCurrentTime()) / getSecondsPerBar(transport.bpm)));
-            if (currentBar >= targetPunchOutBar - 0.0005) {
-                void finalizeActiveRecordings();
-                return;
-            }
-
-            animationFrame = requestAnimationFrame(checkPunchAutoStop);
+            void finalizeActiveRecordings();
         };
 
         animationFrame = requestAnimationFrame(checkPunchAutoStop);
@@ -3054,17 +3138,23 @@ const App: React.FC = () => {
         setSelectedTrackId(trackId);
         setSelectedClipId(clipId);
         setBottomView('editor');
-    }, []);
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== trackId) return track;
+            const matchedTake = (track.recordingTakes || []).find((take) => take.clipId === clipId);
+            if (!matchedTake) return track;
+            return setTrackActiveTake(track, matchedTake.id);
+        }), { noHistory: true, recolor: false, reason: 'clip-select-active-take-sync' });
+    }, [applyTrackMutation]);
 
     const handleTimelineSeek = useCallback((bar: number) => {
         void handleSeekToBar(bar);
     }, [handleSeekToBar]);
 
-    const handleTimelineTrackUpdate = useCallback((id: string, updates: Partial<Track>, options?: { noHistory?: boolean; reason?: string }) => {
+    const handleTimelineTrackUpdate = useCallback((id: string, updates: Partial<Track>, options?: { noHistory?: boolean; reason?: string; historyGroupId?: string }) => {
         updateTrackById(id, updates, { recolor: false, ...options });
     }, [updateTrackById]);
 
-    const handleTimelineClipUpdate = useCallback((trackId: string, clipId: string, updates: Partial<Clip>, options?: { noHistory?: boolean; reason?: string }) => {
+    const handleTimelineClipUpdate = useCallback((trackId: string, clipId: string, updates: Partial<Clip>, options?: { noHistory?: boolean; reason?: string; historyGroupId?: string }) => {
         updateClipById(trackId, clipId, updates, { recolor: false, ...options });
     }, [updateClipById]);
 
@@ -3324,35 +3414,54 @@ const App: React.FC = () => {
 
                 <div className="flex-1 overflow-hidden relative flex flex-col bg-transparent">
                     {mainView === 'arrange' ? (
-                        <div key="arrange" ref={timelineContainerRef} className="flex-1 overflow-auto bg-transparent relative animate-view-enter" style={{ scrollBehavior: 'auto' }}>
-                            <Timeline
-                                tracks={tracks}
-                                bars={totalProjectBars}
-                                zoom={zoom}
-                                trackHeight={trackHeight}
-                                bpm={transport.bpm}
-                                onSeek={handleTimelineSeek}
-                                onTrackSelect={handleTrackSelect}
-                                onClipSelect={handleClipSelect}
-                                onTrackUpdate={handleTimelineTrackUpdate}
-                                onTrackDelete={removeTrackWithRoutingCleanup}
-                                onClipUpdate={handleTimelineClipUpdate}
-                                onConsolidate={handleConsolidateClips}
-                                onReverse={handleReverseClip}
-                                onQuantize={handleQuantizeClip}
-                                onSplitClip={handleSplitClipAtCursor}
-                                onDuplicateClip={handleDuplicateClip}
-                                onPromoteToComp={handlePromoteClipToComp}
-                                onGridChange={handleTimelineGridChange}
-                                onExternalDrop={handleTimelineExternalDrop}
-                                onAddTrack={handleTimelineAddTrack}
-                                gridSize={transport.gridSize}
-                                snapToGrid={transport.snapToGrid}
-                                isPlaying={transport.isPlaying}
-                                selectedTrackId={selectedTrackId}
-                                containerRef={timelineContainerRef}
-                                onTimeUpdate={handleTimelineTimeUpdate}
-                            />
+                        <div key="arrange" className="flex-1 overflow-hidden bg-transparent relative animate-view-enter">
+                            <div
+                                ref={timelineContainerRef}
+                                className="absolute left-0 top-0 bottom-0 right-[292px] overflow-auto bg-transparent"
+                                style={{ scrollBehavior: 'auto' }}
+                            >
+                                <Timeline
+                                    tracks={tracks}
+                                    bars={totalProjectBars}
+                                    zoom={zoom}
+                                    trackHeight={trackHeight}
+                                    bpm={transport.bpm}
+                                    onSeek={handleTimelineSeek}
+                                    onTrackSelect={handleTrackSelect}
+                                    onClipSelect={handleClipSelect}
+                                    onTrackUpdate={handleTimelineTrackUpdate}
+                                    onTrackDelete={removeTrackWithRoutingCleanup}
+                                    onClipUpdate={handleTimelineClipUpdate}
+                                    onConsolidate={handleConsolidateClips}
+                                    onReverse={handleReverseClip}
+                                    onQuantize={handleQuantizeClip}
+                                    onSplitClip={handleSplitClipAtCursor}
+                                    onDuplicateClip={handleDuplicateClip}
+                                    onPromoteToComp={handlePromoteClipToComp}
+                                    onGridChange={handleTimelineGridChange}
+                                    onExternalDrop={handleTimelineExternalDrop}
+                                    onAddTrack={handleTimelineAddTrack}
+                                    gridSize={transport.gridSize}
+                                    snapToGrid={transport.snapToGrid}
+                                    isPlaying={transport.isPlaying}
+                                    selectedTrackId={selectedTrackId}
+                                    selectedTrackPunchRange={selectedTrackPunchRange}
+                                    selectedTrackColor={selectedAudioTrack?.color || null}
+                                    containerRef={timelineContainerRef}
+                                    onTimeUpdate={handleTimelineTimeUpdate}
+                                />
+                            </div>
+                            <div className="absolute right-0 top-0 bottom-0 w-[292px] z-[85]">
+                                <TakeLanesPanel
+                                    track={selectedAudioTrack}
+                                    selectedClipId={selectedClipId}
+                                    onSelectTake={handleSelectTakeFromPanel}
+                                    onToggleTakeMute={handleToggleTakeMuteFromPanel}
+                                    onToggleTakeSolo={handleToggleTakeSoloFromPanel}
+                                    onAuditionTake={(trackId, takeId) => { void handleAuditionTakeFromPanel(trackId, takeId); }}
+                                    onSetCompLane={handleSetCompLaneFromPanel}
+                                />
+                            </div>
                         </div>
                     ) : mainView === 'session' ? (
                         <div key="session" className="flex-1 overflow-hidden animate-view-enter">

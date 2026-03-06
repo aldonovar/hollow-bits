@@ -6,6 +6,7 @@ import {
     promoteTakeToComp,
     rebuildCompDerivedClips,
     resolvePunchRecordingPlan,
+    shouldFinalizePunchRecording,
     splitTakeForClip,
     syncTakeMetadataForClip,
     updateTrackPunchRange
@@ -71,6 +72,23 @@ describe('takeCompingService.resolvePunchRecordingPlan', () => {
         expect(plan?.countInBars).toBe(2);
         expect(plan?.startPlaybackBar).toBe(3);
         expect(plan?.sourceTrimOffsetBars).toBe(5);
+    });
+});
+
+describe('takeCompingService.shouldFinalizePunchRecording', () => {
+    it('finalizes only when transport reaches the max punch out of active recording tracks', () => {
+        const sessionMeta = new Map([
+            ['track-a', { punchOutBar: 12 }],
+            ['track-b', { punchOutBar: 16 }]
+        ]);
+
+        const beforeTarget = shouldFinalizePunchRecording(15.8, ['track-a', 'track-b'], sessionMeta);
+        const atTarget = shouldFinalizePunchRecording(16, ['track-a', 'track-b'], sessionMeta);
+
+        expect(beforeTarget.targetPunchOutBar).toBe(16);
+        expect(beforeTarget.shouldFinalize).toBe(false);
+        expect(atTarget.targetPunchOutBar).toBe(16);
+        expect(atTarget.shouldFinalize).toBe(true);
     });
 });
 
@@ -313,5 +331,60 @@ describe('takeCompingService.applyCompClipEdits', () => {
         expect(compClip?.start).toBe(11);
         expect(compClip?.length).toBe(2);
         expect(compClip?.offset).toBe(1);
+    });
+});
+
+describe('takeCompingService.integrationMetadataNoLoss', () => {
+    it('keeps all take records after split + metadata sync operations', () => {
+        const sourceClip = makeAudioClip('clip-meta', 1, 4);
+        const sourceTrack = createTrack({
+            id: 'track-meta',
+            name: 'META',
+            type: TrackType.AUDIO,
+            clips: [sourceClip],
+            recordingTakes: [
+                {
+                    id: 'take-meta',
+                    clipId: 'clip-meta',
+                    trackId: 'track-meta',
+                    laneId: 'lane-rec',
+                    startBar: 1,
+                    lengthBars: 4,
+                    offsetBars: 0,
+                    createdAt: 1
+                }
+            ],
+            takeLanes: [
+                {
+                    id: 'lane-rec',
+                    name: 'Take Lane 1',
+                    trackId: 'track-meta',
+                    takeIds: ['take-meta']
+                }
+            ]
+        });
+
+        const leftClip = { ...sourceClip, id: 'clip-meta-L', length: 2 };
+        const rightClip = { ...sourceClip, id: 'clip-meta-R', start: 3, length: 2, offset: 2 };
+
+        const preSplitTrack = {
+            ...sourceTrack,
+            clips: [leftClip, rightClip]
+        };
+        const split = splitTakeForClip(preSplitTrack, 'clip-meta', leftClip, rightClip, makeIdFactory());
+        const editedLeft = {
+            ...split,
+            clips: split.clips.map((clip) => (
+                clip.id === 'clip-meta-L'
+                    ? { ...clip, start: 1.25, length: 1.75, offset: 0.25 }
+                    : clip
+            ))
+        };
+
+        const synced = syncTakeMetadataForClip(editedLeft, 'clip-meta-L');
+        expect(synced.recordingTakes).toHaveLength(2);
+        expect(new Set((synced.recordingTakes || []).map((take) => take.id)).size).toBe(2);
+        expect(synced.takeLanes?.find((lane) => lane.id === 'lane-rec')?.takeIds).toHaveLength(2);
+        expect(synced.recordingTakes?.find((take) => take.clipId === 'clip-meta-L')?.startBar).toBeCloseTo(1.25, 6);
     });
 });

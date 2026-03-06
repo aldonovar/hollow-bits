@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { Track, TrackType, Clip, AutomationPoint, CompSegment } from '../types';
+import { Track, TrackType, Clip, AutomationPoint, CompSegment, PunchRange } from '../types';
 import TrackHeader from './TrackHeader';
 import AutomationLane from './AutomationLane';
 import { audioEngine } from '../services/audioEngine';
@@ -8,10 +8,12 @@ import { trackHeaderMeterStore } from '../services/trackHeaderMeterStore';
 import type { TrackHeaderMeterSnapshot } from '../services/trackHeaderMeterStore';
 import { Scissors, FileAudio, Copy, ArrowRightLeft, AlignLeft, Grid, Magnet, GitMerge } from 'lucide-react';
 import { BrowserDragPayload, readBrowserDragPayload } from '../services/browserDragService';
+import { resolveCrossfadeCommitBars, resolveCrossfadePreviewBars } from '../services/timelineCrossfadeService';
 
 interface TimelineMutationOptions {
     noHistory?: boolean;
     reason?: string;
+    historyGroupId?: string;
 }
 
 interface TrackLaneProps {
@@ -47,6 +49,10 @@ const WAVEFORM_CACHE_LIMIT = 320;
 const MIDI_DECORATION_CACHE_LIMIT = 640;
 const COMP_CLIP_ID_PREFIX = 'comp-seg-';
 const MIN_CROSSFADE_BARS = 1 / 1024;
+
+const createHistoryGroupId = (prefix: string, trackId: string, clipId: string): string => {
+    return `${prefix}:${trackId}:${clipId}:${Date.now()}:${Math.floor(Math.random() * 100000)}`;
+};
 
 interface TimelineViewportRect {
     left: number;
@@ -88,6 +94,7 @@ type ClipDragAction = {
     clip: Clip;
     startX: number;
     startY: number;
+    historyGroupId: string;
 };
 
 type CrossfadeDragAction = {
@@ -98,6 +105,7 @@ type CrossfadeDragAction = {
     initialFadeBars: number;
     startX: number;
     startY: number;
+    historyGroupId: string;
 };
 
 type DragAction = ClipDragAction | CrossfadeDragAction;
@@ -137,17 +145,22 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
             const deltaBars = dx / zoom / 4;
 
             if (dragAction.type === 'crossfade') {
-                const maxFadeBars = Math.max(MIN_CROSSFADE_BARS, dragAction.overlapLengthBars);
-                const nextFadeBars = Math.max(0, Math.min(maxFadeBars, dragAction.initialFadeBars + deltaBars));
+                const nextFadeBars = resolveCrossfadePreviewBars(
+                    dragAction.overlapLengthBars,
+                    dragAction.initialFadeBars,
+                    deltaBars
+                );
 
                 crossfadePreviewRef.current = nextFadeBars;
                 onClipUpdate(track.id, dragAction.leftClip.id, { fadeOut: nextFadeBars }, {
                     noHistory: true,
-                    reason: 'timeline-crossfade-preview-left'
+                    reason: 'timeline-crossfade-preview-left',
+                    historyGroupId: dragAction.historyGroupId
                 });
                 onClipUpdate(track.id, dragAction.rightClip.id, { fadeIn: nextFadeBars }, {
                     noHistory: true,
-                    reason: 'timeline-crossfade-preview-right'
+                    reason: 'timeline-crossfade-preview-right',
+                    historyGroupId: dragAction.historyGroupId
                 });
                 return;
             }
@@ -200,21 +213,29 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 dragPreviewRef.current = updates;
                 onClipUpdate(track.id, clip.id, updates, {
                     noHistory: true,
-                    reason: 'timeline-clip-gesture-preview'
+                    reason: 'timeline-clip-gesture-preview',
+                    historyGroupId: dragAction.historyGroupId
                 });
             }
         };
 
         const handleGlobalUp = () => {
             if (dragAction.type === 'crossfade') {
-                const fadeBars = crossfadePreviewRef.current;
+                const fadeBars = typeof crossfadePreviewRef.current === 'number'
+                    ? crossfadePreviewRef.current
+                    : resolveCrossfadeCommitBars(
+                        dragAction.overlapLengthBars,
+                        dragAction.leftClip.fadeOut || 0,
+                        dragAction.rightClip.fadeIn || 0
+                    );
                 if (typeof fadeBars === 'number') {
                     onClipUpdate(track.id, dragAction.leftClip.id, { fadeOut: fadeBars }, {
-                        noHistory: true,
-                        reason: 'timeline-crossfade-finalize-left'
+                        reason: 'timeline-crossfade-finalize-left',
+                        historyGroupId: dragAction.historyGroupId
                     });
                     onClipUpdate(track.id, dragAction.rightClip.id, { fadeIn: fadeBars }, {
-                        reason: 'timeline-crossfade-adjust'
+                        reason: 'timeline-crossfade-adjust',
+                        historyGroupId: dragAction.historyGroupId
                     });
                 }
                 crossfadePreviewRef.current = null;
@@ -234,7 +255,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 };
 
                 onClipUpdate(track.id, dragAction.clip.id, updates, {
-                    reason: reasonByType[dragAction.type]
+                    reason: reasonByType[dragAction.type],
+                    historyGroupId: dragAction.historyGroupId
                 });
             }
 
@@ -657,7 +679,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                             type: 'trim-left',
                                             clip,
                                             startX: e.clientX,
-                                            startY: e.clientY
+                                            startY: e.clientY,
+                                            historyGroupId: createHistoryGroupId('trim-left', track.id, clip.id)
                                         });
                                     }}
                                 >
@@ -681,7 +704,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                             type: e.altKey ? 'stretch' : 'trim-right',
                                             clip,
                                             startX: e.clientX,
-                                            startY: e.clientY
+                                            startY: e.clientY,
+                                            historyGroupId: createHistoryGroupId(e.altKey ? 'stretch' : 'trim-right', track.id, clip.id)
                                         });
                                     }}
                                 >
@@ -703,7 +727,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                             type: 'fade-in',
                                             clip,
                                             startX: e.clientX,
-                                            startY: e.clientY
+                                            startY: e.clientY,
+                                            historyGroupId: createHistoryGroupId('fade-in', track.id, clip.id)
                                         });
                                     }}
                                 >
@@ -729,7 +754,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                             type: 'fade-out',
                                             clip,
                                             startX: e.clientX,
-                                            startY: e.clientY
+                                            startY: e.clientY,
+                                            historyGroupId: createHistoryGroupId('fade-out', track.id, clip.id)
                                         });
                                     }}
                                 >
@@ -841,7 +867,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                     overlapLengthBars: xfade.overlapLengthBars,
                                     initialFadeBars: xfade.fadeLengthBars,
                                     startX: event.clientX,
-                                    startY: event.clientY
+                                    startY: event.clientY,
+                                    historyGroupId: createHistoryGroupId('crossfade', track.id, `${xfade.leftClip.id}|${xfade.rightClip.id}`)
                                 });
                             }}
                         />
@@ -896,6 +923,8 @@ interface TimelineProps {
     gridSize: number;
     snapToGrid: boolean;
     selectedTrackId: string | null;
+    selectedTrackPunchRange?: PunchRange | null;
+    selectedTrackColor?: string | null;
     containerRef: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -925,6 +954,8 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     gridSize,
     snapToGrid,
     selectedTrackId,
+    selectedTrackPunchRange,
+    selectedTrackColor,
     containerRef
 }) => {
     const totalBeats = bars * 4;
@@ -1125,6 +1156,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         startX: number;
         originalStartBar: number;
         clip: Clip | null; // Reference to the clip being dragged
+        historyGroupId: string;
     } | null>(null);
     const dragStartPreviewRef = useRef<number | null>(null);
 
@@ -1243,14 +1275,16 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
             dragStartPreviewRef.current = newStart;
             onClipUpdate(dragging.trackId, dragging.clipId, { start: newStart }, {
                 noHistory: true,
-                reason: 'timeline-drag-clip-preview'
+                reason: 'timeline-drag-clip-preview',
+                historyGroupId: dragging.historyGroupId
             });
         };
 
         const handleMouseUp = () => {
             if (dragging && dragStartPreviewRef.current !== null) {
                 onClipUpdate(dragging.trackId, dragging.clipId, { start: dragStartPreviewRef.current }, {
-                    reason: 'timeline-drag-clip'
+                    reason: 'timeline-drag-clip',
+                    historyGroupId: dragging.historyGroupId
                 });
             }
 
@@ -1281,7 +1315,8 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
             trackId: trackId,
             startX: e.clientX,
             originalStartBar: clip.start,
-            clip: clip // Reference for ghost preview
+            clip: clip, // Reference for ghost preview
+            historyGroupId: createHistoryGroupId('drag-clip', trackId, clip.id)
         });
 
         // Initialize ghost preview
@@ -1313,6 +1348,20 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         const clickedBar = (beats / 4) + 1;
         onSeek(clickedBar);
     };
+
+    const selectedPunchWindow = useMemo(() => {
+        if (!selectedTrackPunchRange?.enabled) return null;
+
+        const inBar = Math.max(1, Number.isFinite(selectedTrackPunchRange.inBar) ? selectedTrackPunchRange.inBar : 1);
+        const outBarCandidate = Number.isFinite(selectedTrackPunchRange.outBar) ? selectedTrackPunchRange.outBar : inBar + 0.25;
+        const outBar = Math.max(inBar + 0.25, outBarCandidate);
+
+        return {
+            inBar,
+            outBar,
+            widthBars: outBar - inBar
+        };
+    }, [selectedTrackPunchRange]);
 
     // Grid Menu State
     const [isGridMenuOpen, setIsGridMenuOpen] = useState(false); // [NEW]
@@ -1431,6 +1480,37 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
                     }}
                 >
                 </div>
+
+                {selectedPunchWindow && (
+                    <>
+                        <div
+                            className="absolute inset-y-0 pointer-events-none z-[18]"
+                            style={{
+                                left: HEADER_WIDTH + ((selectedPunchWindow.inBar - 1) * 4 * zoom),
+                                width: selectedPunchWindow.widthBars * 4 * zoom,
+                                background: 'linear-gradient(to right, rgba(244,63,94,0.16), rgba(239,68,68,0.08), rgba(244,63,94,0.16))'
+                            }}
+                        />
+                        <div
+                            className="absolute top-0 bottom-0 w-[1px] pointer-events-none z-[19]"
+                            style={{
+                                left: HEADER_WIDTH + ((selectedPunchWindow.inBar - 1) * 4 * zoom),
+                                backgroundColor: selectedTrackColor || '#f43f5e'
+                            }}
+                        >
+                            <span className="absolute top-[10px] -left-3 text-[8px] font-black tracking-wider text-white bg-[#7f1d1d]/90 border border-red-400/60 px-1 rounded-sm">IN</span>
+                        </div>
+                        <div
+                            className="absolute top-0 bottom-0 w-[1px] pointer-events-none z-[19]"
+                            style={{
+                                left: HEADER_WIDTH + ((selectedPunchWindow.outBar - 1) * 4 * zoom),
+                                backgroundColor: selectedTrackColor || '#f43f5e'
+                            }}
+                        >
+                            <span className="absolute top-[10px] -left-3 text-[8px] font-black tracking-wider text-white bg-[#7f1d1d]/90 border border-red-400/60 px-1 rounded-sm">OUT</span>
+                        </div>
+                    </>
+                )}
 
                 {/* Playhead Triangle - NOW ALIGNED WITH CURSOR LINE */}
                 <div

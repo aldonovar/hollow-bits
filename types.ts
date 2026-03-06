@@ -159,6 +159,8 @@ export interface Track {
   recordingTakes?: RecordingTake[];
   takeLanes?: TakeLane[];
   activeCompLaneId?: string;
+  activeTakeId?: string;
+  soloTakeId?: string;
   punchRange?: PunchRange;
 }
 

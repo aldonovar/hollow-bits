@@ -25,6 +25,10 @@ export interface PunchRecordingPlan {
     sourceTrimOffsetBars: number;
 }
 
+export interface PunchRecordingSessionMetaLike {
+    punchOutBar?: number;
+}
+
 interface PromoteTakeToCompOptions {
     replaceExisting?: boolean;
     sourceStartBar?: number;
@@ -201,6 +205,36 @@ export const resolvePunchRecordingPlan = (armedTracks: Track[]): PunchRecordingP
         countInBars,
         startPlaybackBar,
         sourceTrimOffsetBars: Math.max(0, punchInBar - startPlaybackBar)
+    };
+};
+
+export const shouldFinalizePunchRecording = (
+    currentBar: number,
+    activeRecordingTrackIds: string[],
+    sessionMetaByTrackId: Map<string, PunchRecordingSessionMetaLike>
+): { shouldFinalize: boolean; targetPunchOutBar: number | null } => {
+    if (!Number.isFinite(currentBar) || activeRecordingTrackIds.length === 0) {
+        return {
+            shouldFinalize: false,
+            targetPunchOutBar: null
+        };
+    }
+
+    const punchOutBars = activeRecordingTrackIds
+        .map((trackId) => sessionMetaByTrackId.get(trackId)?.punchOutBar)
+        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+
+    if (punchOutBars.length === 0) {
+        return {
+            shouldFinalize: false,
+            targetPunchOutBar: null
+        };
+    }
+
+    const targetPunchOutBar = Math.max(...punchOutBars);
+    return {
+        shouldFinalize: currentBar >= targetPunchOutBar - 0.0005,
+        targetPunchOutBar
     };
 };
 

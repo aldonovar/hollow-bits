@@ -27,6 +27,8 @@ interface CreateTrackOptions {
     recordingTakes?: Track['recordingTakes'];
     takeLanes?: Track['takeLanes'];
     activeCompLaneId?: Track['activeCompLaneId'];
+    activeTakeId?: Track['activeTakeId'];
+    soloTakeId?: Track['soloTakeId'];
     punchRange?: Track['punchRange'];
     micSettings?: Track['micSettings'];
 }
@@ -102,6 +104,8 @@ export const createTrack = (options: CreateTrackOptions): Track => {
         recordingTakes: cloneRecordingTakes(options.recordingTakes),
         takeLanes: cloneTakeLanes(options.takeLanes),
         activeCompLaneId: options.activeCompLaneId,
+        activeTakeId: options.activeTakeId,
+        soloTakeId: options.soloTakeId,
         punchRange: options.punchRange ? { ...options.punchRange } : undefined,
         micSettings: options.micSettings
             ? { ...options.micSettings }
@@ -125,6 +129,8 @@ export const withTrackRuntimeDefaults = (track: Track): Track => {
         recordingTakes: cloneRecordingTakes(track.recordingTakes),
         takeLanes: cloneTakeLanes(track.takeLanes),
         activeCompLaneId: track.activeCompLaneId,
+        activeTakeId: track.activeTakeId,
+        soloTakeId: track.soloTakeId,
         punchRange: track.punchRange
             ? { ...track.punchRange }
             : {

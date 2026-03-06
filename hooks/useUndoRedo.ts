@@ -1,10 +1,14 @@
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 
 interface HistoryState<T> {
   past: T[];
   present: T;
   future: T[];
+}
+
+interface HistoryMutationOptions {
+  groupKey?: string;
 }
 
 export function useUndoRedo<T>(initialState: T, maxHistory: number = 50) {
@@ -13,16 +17,27 @@ export function useUndoRedo<T>(initialState: T, maxHistory: number = 50) {
     present: initialState,
     future: [],
   });
+  const lastGroupKeyRef = useRef<string | null>(null);
 
   const canUndo = history.past.length > 0;
   const canRedo = history.future.length > 0;
 
-  const setState = useCallback((newState: T | ((currentState: T) => T)) => {
+  const setState = useCallback((newState: T | ((currentState: T) => T), options?: HistoryMutationOptions) => {
+    const groupKey = options?.groupKey || null;
     setHistory((curr) => {
       const resolvedState = newState instanceof Function ? newState(curr.present) : newState;
       
       // If state hasn't actually changed (deep check optional, usually ref check is enough in React), return
       if (resolvedState === curr.present) return curr;
+
+      const shouldMergeIntoCurrent = Boolean(groupKey && lastGroupKeyRef.current === groupKey && curr.past.length > 0);
+      if (shouldMergeIntoCurrent) {
+        return {
+          ...curr,
+          present: resolvedState,
+          future: [], // Preserve undo stack but drop redo branch.
+        };
+      }
 
       const newPast = [...curr.past, curr.present];
       if (newPast.length > maxHistory) {
@@ -35,6 +50,7 @@ export function useUndoRedo<T>(initialState: T, maxHistory: number = 50) {
         future: [], // New action clears future redo stack
       };
     });
+    lastGroupKeyRef.current = groupKey;
   }, [maxHistory]);
 
   const setStateNoHistory = useCallback((newState: T | ((currentState: T) => T)) => {
@@ -62,6 +78,7 @@ export function useUndoRedo<T>(initialState: T, maxHistory: number = 50) {
         future: [curr.present, ...curr.future],
       };
     });
+    lastGroupKeyRef.current = null;
   }, []);
 
   const redo = useCallback(() => {
@@ -77,6 +94,7 @@ export function useUndoRedo<T>(initialState: T, maxHistory: number = 50) {
         future: newFuture,
       };
     });
+    lastGroupKeyRef.current = null;
   }, []);
 
   return {
