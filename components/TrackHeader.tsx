@@ -59,7 +59,13 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
       `}
             onClick={(e) => { e.stopPropagation(); onSelect(); }}
         >
-            <div className="w-1.5 h-full shrink-0" style={{ backgroundColor: track.color }}></div>
+            <div
+                className="w-2.5 h-full shrink-0 rounded-r-[1px]"
+                style={{
+                    backgroundColor: track.color,
+                    boxShadow: `0 0 10px ${track.color}55`
+                }}
+            ></div>
 
             <div className="flex-1 flex flex-col min-w-0 relative h-full pl-2">
                 <div className={`flex items-center justify-between shrink-0 h-4 ${showKnobs ? 'mb-0.5' : 'mb-0'}`}>

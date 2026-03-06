@@ -3,8 +3,8 @@ import { Track, TrackType, Device } from './types';
 
 // --- TRACK COLOR SYSTEM (RUBY -> LILAC, SOFT GRADIENT) ---
 const TRACK_RUBY_HUE = 352;
-const TRACK_LILAC_HUE = 272;
-const TRACK_HUE_MIN = 268;
+const TRACK_LILAC_HUE = 264;
+const TRACK_HUE_MIN = 260;
 const TRACK_HUE_MAX = 354;
 
 const clamp = (value: number, min: number, max: number): number => {
@@ -57,10 +57,6 @@ const hslToHex = (h: number, s: number, l: number): string => {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
 };
 
-const easeInOutSine = (t: number): number => {
-  return 0.5 - (Math.cos(Math.PI * t) / 2);
-};
-
 const getGradientT = (index: number, total: number): number => {
   if (total <= 1) return 0;
   const clampedIndex = Math.min(Math.max(index, 0), total - 1);
@@ -69,20 +65,19 @@ const getGradientT = (index: number, total: number): number => {
 
 export const getTrackColorByPosition = (index: number, total: number, offset = 0): string => {
   const t = getGradientT(index, Math.max(1, total));
-  const eased = easeInOutSine(t);
 
   // Ordered progressive gradient (no jumps) in the ruby-lilac corridor.
   const baseHue = TRACK_RUBY_HUE + ((TRACK_LILAC_HUE - TRACK_RUBY_HUE) * t);
   const offsetHue = offset === 0 ? 0 : (((offset % 7) - 3) * 0.35);
   const hue = clamp(baseHue + offsetHue, TRACK_HUE_MIN, TRACK_HUE_MAX);
 
-  const saturationBase = 88 - (16 * eased);
+  const saturationBase = 94 - (34 * t);
   const saturationOffset = offset === 0 ? 0 : (((offset % 5) - 2) * 0.4);
-  const saturation = clamp(saturationBase + saturationOffset, 64, 92);
+  const saturation = clamp(saturationBase + saturationOffset, 56, 96);
 
-  const lightnessBase = 43 + (17 * eased);
+  const lightnessBase = 36 + (30 * t);
   const lightnessOffset = offset === 0 ? 0 : (((offset % 3) - 1) * 0.6);
-  const lightness = clamp(lightnessBase + lightnessOffset, 36, 72);
+  const lightness = clamp(lightnessBase + lightnessOffset, 34, 72);
 
   return hslToHex(hue, saturation, lightness);
 };
