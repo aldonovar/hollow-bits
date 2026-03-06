@@ -3207,7 +3207,7 @@ const App: React.FC = () => {
             color: getProgressiveTrackColor(tracks.length, tracks.length + 1)
         });
 
-        appendTrack(newTrack, { reason: 'timeline-add-track', recolor: false });
+        appendTrack(newTrack, { reason: 'timeline-add-track', recolor: true });
     }, [appendTrack, tracks, getProgressiveTrackColor]);
 
     const handleMixerCreateGroup = useCallback(() => {
@@ -3219,7 +3219,7 @@ const App: React.FC = () => {
             color: getProgressiveTrackColor(tracks.length, tracks.length + 1)
         });
 
-        appendTrack(newTrack, { reason: 'mixer-create-group', recolor: false });
+        appendTrack(newTrack, { reason: 'mixer-create-group', recolor: true });
     }, [appendTrack, tracks, getProgressiveTrackColor]);
 
     const isScannerImmersive = showNoteScanner;
