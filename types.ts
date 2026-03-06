@@ -88,6 +88,49 @@ export interface AutomationLane {
   maxValue?: number; // Parameter maximum (default 1)
 }
 
+export interface RecordingTake {
+  id: string;
+  clipId: string;
+  trackId: string;
+  laneId: string;
+  sourceId?: string;
+  startBar: number;
+  lengthBars: number;
+  offsetBars: number;
+  createdAt: number;
+  label?: string;
+  gain?: number;
+  muted?: boolean;
+}
+
+export interface CompSegment {
+  id: string;
+  takeId: string;
+  sourceStartBar: number;
+  sourceEndBar: number;
+  targetStartBar: number;
+  fadeInBars?: number;
+  fadeOutBars?: number;
+}
+
+export interface TakeLane {
+  id: string;
+  name: string;
+  trackId: string;
+  isCompLane?: boolean;
+  isMuted?: boolean;
+  takeIds: string[];
+  compSegments?: CompSegment[];
+}
+
+export interface PunchRange {
+  enabled: boolean;
+  inBar: number;
+  outBar: number;
+  preRollBars?: number;
+  countInBars?: number;
+}
+
 export interface Track {
   id: string;
   name: string;
@@ -113,6 +156,10 @@ export interface Track {
   sessionClips: ClipSlot[];
   devices: Device[];
   automationLanes?: AutomationLane[];
+  recordingTakes?: RecordingTake[];
+  takeLanes?: TakeLane[];
+  activeCompLaneId?: string;
+  punchRange?: PunchRange;
 }
 
 export type MicInputProfile = 'studio-voice' | 'podcast' | 'raw';
@@ -151,6 +198,35 @@ export interface AudioSettings {
   inputDeviceId?: string;
   outputDeviceId?: string;
   lastFailedOutputDeviceId?: string;
+}
+
+export type EngineBackendRoute = 'webaudio' | 'worker-dsp' | 'native-sidecar';
+
+export interface EngineRouteKpiSnapshot {
+  route: EngineBackendRoute;
+  timestamp: number;
+  contextState: AudioContextState | 'closed';
+  monitorLatencyMs: number;
+  schedulerP95TickDriftMs: number;
+  schedulerP99TickDriftMs: number;
+  schedulerP99LoopMs: number;
+  schedulerCpuLoadP95Percent: number;
+  schedulerOverrunRatio: number;
+  schedulerUnderrunCount: number;
+  schedulerDropoutCount: number;
+}
+
+export interface Block1RouteEvaluation {
+  route: EngineBackendRoute;
+  implementationStatus: 'native' | 'simulated';
+  cpuAudioP95Ms: number;
+  cpuAudioP95ImprovementRatio: number;
+  dropouts: number;
+  dropoutReductionRatio: number;
+  driftP99Ms: number;
+  monitorLatencyP95Ms: number;
+  passesGate: boolean;
+  notes: string[];
 }
 
 // LIGHTWEIGHT PROJECT MANIFEST

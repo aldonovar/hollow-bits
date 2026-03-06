@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clock3, Play, Square } from 'lucide-react';
 import { Clip, Track, TrackType } from '../types';
-import { audioEngine } from '../services/audioEngine';
+import { engineAdapter } from '../services/engineAdapter';
 import { BrowserDragPayload, readBrowserDragPayload } from '../services/browserDragService';
 
 interface SessionViewProps {
@@ -73,13 +73,13 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, onExternalDrop, 
     }, []);
 
     const computeLaunchAt = useCallback(() => {
-        return audioEngine.getSessionLaunchTime(launchQuantizeBars);
+        return engineAdapter.getSessionLaunchTime(launchQuantizeBars);
     }, [launchQuantizeBars]);
 
     const queueClipLaunch = useCallback((track: Track, clip: Clip, launchAt: number) => {
         if (track.type !== TrackType.AUDIO || !clip.buffer) return;
 
-        const now = audioEngine.getContext().currentTime;
+        const now = engineAdapter.getContext().currentTime;
         const delayMs = Math.max(0, Math.round((launchAt - now) * 1000));
 
         setTrackLaunchState((prev) => ({
@@ -90,7 +90,7 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, onExternalDrop, 
             }
         }));
 
-        audioEngine.launchClip(track, clip, launchAt);
+        engineAdapter.launchClip(track, clip, launchAt);
 
         scheduleUiUpdate(() => {
             setTrackLaunchState((prev) => ({
@@ -104,10 +104,10 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, onExternalDrop, 
     }, [scheduleUiUpdate]);
 
     const stopTrackLaunch = useCallback((trackId: string, launchAt: number) => {
-        const now = audioEngine.getContext().currentTime;
+        const now = engineAdapter.getContext().currentTime;
         const delayMs = Math.max(0, Math.round((launchAt - now) * 1000));
 
-        audioEngine.stopTrackClips(trackId, launchAt);
+        engineAdapter.stopTrackClips(trackId, launchAt);
 
         scheduleUiUpdate(() => {
             setTrackLaunchState((prev) => ({
@@ -329,3 +329,4 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, onExternalDrop, 
 };
 
 export default SessionView;
+

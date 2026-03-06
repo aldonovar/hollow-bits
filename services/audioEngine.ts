@@ -128,6 +128,10 @@ export interface EngineDiagnostics {
     schedulerP95TickDriftMs?: number;
     schedulerP99TickDriftMs?: number;
     schedulerP99LoopMs?: number;
+    schedulerCpuLoadP95Percent?: number;
+    schedulerOverrunRatio?: number;
+    schedulerUnderrunCount?: number;
+    schedulerDropoutCount?: number;
     schedulerQueueEntries?: number;
     schedulerQueueActive?: number;
     schedulerQueueP95Candidates?: number;
@@ -150,6 +154,12 @@ export interface SchedulerTelemetrySnapshot {
     p99TickDriftMs: number;
     maxTickDriftMs: number;
     overrunCount: number;
+    underrunCount?: number;
+    dropoutCount?: number;
+    overrunRatio?: number;
+    avgCpuLoadPercent?: number;
+    p95CpuLoadPercent?: number;
+    p99CpuLoadPercent?: number;
     lastTickAtMs: number;
     windowSamples: number;
     queueEntryCount?: number;
@@ -241,9 +251,12 @@ class AudioEngine {
     schedulerTickCount: number = 0;
     schedulerSkippedTickCount: number = 0;
     schedulerOverrunCount: number = 0;
+    schedulerUnderrunCount: number = 0;
+    schedulerDropoutCount: number = 0;
     schedulerLoopDurationSamplesMs: number[] = [];
     schedulerTickIntervalSamplesMs: number[] = [];
     schedulerTickDriftSamplesMs: number[] = [];
+    schedulerCpuLoadSamplesPercent: number[] = [];
     schedulerQueueCandidateSamples: number[] = [];
     schedulerQueueEntriesByStart: SchedulerClipQueueEntry[] = [];
     schedulerQueueEntriesByEnd: SchedulerClipQueueEntry[] = [];
@@ -408,9 +421,12 @@ class AudioEngine {
         this.schedulerTickCount = 0;
         this.schedulerSkippedTickCount = 0;
         this.schedulerOverrunCount = 0;
+        this.schedulerUnderrunCount = 0;
+        this.schedulerDropoutCount = 0;
         this.schedulerLoopDurationSamplesMs = [];
         this.schedulerTickIntervalSamplesMs = [];
         this.schedulerTickDriftSamplesMs = [];
+        this.schedulerCpuLoadSamplesPercent = [];
         this.schedulerQueueCandidateSamples = [];
         this.schedulerQueueRebuildCount = 0;
     }
@@ -717,6 +733,10 @@ class AudioEngine {
 
     getSchedulerTelemetry(): SchedulerTelemetrySnapshot {
         const tickDriftSamples = this.schedulerTickDriftSamplesMs;
+        const cpuLoadSamples = this.schedulerCpuLoadSamplesPercent;
+        const overrunRatio = this.schedulerTickCount > 0
+            ? this.schedulerOverrunCount / this.schedulerTickCount
+            : 0;
 
         return {
             mode: this.getEffectiveSchedulerMode(),
@@ -733,6 +753,12 @@ class AudioEngine {
             p99TickDriftMs: this.percentileOf(tickDriftSamples, 0.99),
             maxTickDriftMs: tickDriftSamples.length > 0 ? Math.max(...tickDriftSamples) : 0,
             overrunCount: this.schedulerOverrunCount,
+            underrunCount: this.schedulerUnderrunCount,
+            dropoutCount: this.schedulerDropoutCount,
+            overrunRatio,
+            avgCpuLoadPercent: this.averageOf(cpuLoadSamples),
+            p95CpuLoadPercent: this.percentileOf(cpuLoadSamples, 0.95),
+            p99CpuLoadPercent: this.percentileOf(cpuLoadSamples, 0.99),
             lastTickAtMs: this.schedulerLastTickAtMs,
             windowSamples: this.schedulerLoopDurationSamplesMs.length,
             queueEntryCount: this.schedulerQueueEntriesByStart.length,
@@ -2774,6 +2800,10 @@ class AudioEngine {
             schedulerP95TickDriftMs: scheduler.p95TickDriftMs,
             schedulerP99TickDriftMs: scheduler.p99TickDriftMs,
             schedulerP99LoopMs: scheduler.p99LoopMs,
+            schedulerCpuLoadP95Percent: scheduler.p95CpuLoadPercent ?? 0,
+            schedulerOverrunRatio: scheduler.overrunRatio ?? 0,
+            schedulerUnderrunCount: scheduler.underrunCount ?? 0,
+            schedulerDropoutCount: scheduler.dropoutCount ?? 0,
             schedulerQueueEntries: scheduler.queueEntryCount,
             schedulerQueueActive: scheduler.queueActiveCount,
             schedulerQueueP95Candidates: scheduler.p95QueueCandidateCount
@@ -3234,9 +3264,12 @@ class AudioEngine {
         } finally {
             const loopEndedAtMs = performance.now();
             const loopDurationMs = Math.max(0, loopEndedAtMs - loopStartedAtMs);
+            const safeIntervalMs = Math.max(1, this.schedulerIntervalMs);
+            const cpuLoadPercent = this.clamp((loopDurationMs / safeIntervalMs) * 100, 0, 400);
 
             this.schedulerTickCount += 1;
             this.pushSchedulerSample(this.schedulerLoopDurationSamplesMs, loopDurationMs);
+            this.pushSchedulerSample(this.schedulerCpuLoadSamplesPercent, cpuLoadPercent);
 
             if (this.schedulerLastTickAtMs > 0) {
                 const tickIntervalMs = Math.max(0, loopStartedAtMs - this.schedulerLastTickAtMs);
@@ -3247,6 +3280,17 @@ class AudioEngine {
                     : this.schedulerLastTickAtMs + this.schedulerIntervalMs;
                 const tickDriftMs = Math.max(0, loopStartedAtMs - expectedTickAtMs);
                 this.pushSchedulerSample(this.schedulerTickDriftSamplesMs, tickDriftMs);
+
+                if (tickDriftMs > Math.max(18, safeIntervalMs * 1.35)) {
+                    this.schedulerUnderrunCount += 1;
+                }
+
+                if (
+                    tickDriftMs > Math.max(95, safeIntervalMs * 2.8)
+                    || loopDurationMs > Math.max(75, safeIntervalMs * 2)
+                ) {
+                    this.schedulerDropoutCount += 1;
+                }
             }
 
             if (loopDurationMs > (this.schedulerIntervalMs * 0.9)) {

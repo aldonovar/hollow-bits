@@ -1,4 +1,4 @@
-import { ScannedFileEntry } from '../types';
+import { EngineBackendRoute, ScannedFileEntry } from '../types';
 
 const STORAGE_KEY = 'hollowbits.studio-settings.v1';
 const LEGACY_STORAGE_KEYS = ['ethereal.studio-settings.v1'];
@@ -32,6 +32,8 @@ export interface AudioPerformanceBenchmarkHistoryRecord {
     maxWorkletP99TickDriftMs: number;
     maxWorkletP95LagMs: number;
     maxWorkletP99LoopMs: number;
+    recommendedRoute?: EngineBackendRoute;
+    recommendedRouteImplementationStatus?: 'native' | 'simulated';
 }
 
 const createDefaultStudioSettings = (): StudioSettingsData => ({
@@ -127,7 +129,15 @@ const sanitizeBenchmarkHistory = (history: unknown): AudioPerformanceBenchmarkHi
                 maxWorkletP95TickDriftMs: Number.isFinite(entry.maxWorkletP95TickDriftMs) ? Number(entry.maxWorkletP95TickDriftMs) : 0,
                 maxWorkletP99TickDriftMs: Number.isFinite(entry.maxWorkletP99TickDriftMs) ? Number(entry.maxWorkletP99TickDriftMs) : 0,
                 maxWorkletP95LagMs: Number.isFinite(entry.maxWorkletP95LagMs) ? Number(entry.maxWorkletP95LagMs) : 0,
-                maxWorkletP99LoopMs: Number.isFinite(entry.maxWorkletP99LoopMs) ? Number(entry.maxWorkletP99LoopMs) : 0
+                maxWorkletP99LoopMs: Number.isFinite(entry.maxWorkletP99LoopMs) ? Number(entry.maxWorkletP99LoopMs) : 0,
+                recommendedRoute:
+                    entry.recommendedRoute === 'worker-dsp' || entry.recommendedRoute === 'native-sidecar'
+                        ? entry.recommendedRoute
+                        : 'webaudio',
+                recommendedRouteImplementationStatus:
+                    entry.recommendedRouteImplementationStatus === 'native'
+                        ? 'native'
+                        : 'simulated'
             };
         })
         .sort((a, b) => b.createdAt - a.createdAt);

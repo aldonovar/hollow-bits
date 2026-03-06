@@ -1,4 +1,4 @@
-// path: src/App.tsx
+﻿// path: src/App.tsx
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Transport from './components/Transport';
 import DeviceRack from './components/DeviceRack';
@@ -15,7 +15,7 @@ import AsciiPerformerDock from './components/AsciiPerformerDock';
 import CollabPanel, { CollabActivityEntry } from './components/CollabPanel';
 import { INITIAL_TRACKS, getTrackColorByPosition } from './constants';
 import { LoopMode, Note, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry } from './types';
-import { audioEngine, type EngineDiagnostics } from './services/audioEngine';
+import { engineAdapter, type EngineDiagnostics } from './services/engineAdapter';
 import { midiService, MidiDevice } from './services/MidiService';
 import { platformService } from './services/platformService';
 import { assetDb } from './services/db';
@@ -160,6 +160,7 @@ const AUDIO_SETTINGS_STORAGE_KEY = 'hollowbits.audio-settings.v1';
 const AUDIO_SETTINGS_STORAGE_KEY_LEGACY = 'ethereal.audio-settings.v1';
 const AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY = 'hollowbits.audio-effective-settings.v1';
 const AUDIO_EFFECTIVE_SETTINGS_STORAGE_KEY_LEGACY = 'ethereal.audio-effective-settings.v1';
+const BLOCK1_KPI_STORAGE_KEY = 'hollowbits.block1-kpi.v1';
 const MIN_CLIP_LENGTH_BARS = 0.0625;
 const AUTOSAVE_DEBOUNCE_MS = 1200;
 const IMPORT_AUDIO_CONCURRENCY = 2;
@@ -226,7 +227,7 @@ const App: React.FC = () => {
     const initialCollabSnapshot = useMemo(() => loadCollabSessionSnapshot(), []);
 
     // --- STATE ---
-    const [projectName, setProjectName] = useState("Sin Título");
+    const [projectName, setProjectName] = useState("Sin TÃ­tulo");
     const [loadingProject, setLoadingProject] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState("");
     const [importProgress, setImportProgress] = useState<{ total: number; completed: number; currentFile: string | null } | null>(null);
@@ -307,7 +308,7 @@ const App: React.FC = () => {
         bufferStrategy: 'auto',
         lookaheadMs: 25,
         scheduleAheadTimeMs: 100,
-        schedulerMode: audioEngine.getSchedulerMode(),
+        schedulerMode: engineAdapter.getSchedulerMode(),
         schedulerP95TickDriftMs: 0,
         schedulerP99TickDriftMs: 0,
         schedulerP99LoopMs: 0
@@ -477,7 +478,7 @@ const App: React.FC = () => {
 
     // --- INIT & LOOPS ---
     useEffect(() => {
-        audioEngine.init(audioSettings);
+        engineAdapter.init(audioSettings);
         midiService.init();
         assetDb.init().catch(console.error);
         migrateLegacyEffectiveAudioSettings();
@@ -487,7 +488,26 @@ const App: React.FC = () => {
         });
 
         const interval = setInterval(() => {
-            setEngineStats(audioEngine.getDiagnostics());
+            const diagnostics = engineAdapter.getDiagnostics();
+            setEngineStats(diagnostics);
+
+            try {
+                localStorage.setItem(BLOCK1_KPI_STORAGE_KEY, JSON.stringify({
+                    timestamp: Date.now(),
+                    route: engineAdapter.getBackendRoute(),
+                    schedulerMode: diagnostics.schedulerMode || 'interval',
+                    driftP95Ms: diagnostics.schedulerP95TickDriftMs || 0,
+                    driftP99Ms: diagnostics.schedulerP99TickDriftMs || 0,
+                    loopP99Ms: diagnostics.schedulerP99LoopMs || 0,
+                    cpuLoadP95Percent: diagnostics.schedulerCpuLoadP95Percent || 0,
+                    overrunRatio: diagnostics.schedulerOverrunRatio || 0,
+                    underrunCount: diagnostics.schedulerUnderrunCount || 0,
+                    dropoutCount: diagnostics.schedulerDropoutCount || 0,
+                    monitorLatencyMs: (diagnostics.latency || 0) * 1000
+                }));
+            } catch {
+                // Non-blocking KPI persistence path.
+            }
         }, 1000);
 
         const handleClickOutside = (event: MouseEvent) => {
@@ -519,7 +539,7 @@ const App: React.FC = () => {
     }, [audioSettings.bufferSize, audioSettings.latencyHint, engineStats.activeSampleRate]);
 
     useEffect(() => {
-        audioEngine.setAudioConfiguration(audioSettings);
+        engineAdapter.setAudioConfiguration(audioSettings);
         try {
             localStorage.setItem(AUDIO_SETTINGS_STORAGE_KEY, JSON.stringify(audioSettings));
             localStorage.removeItem(AUDIO_SETTINGS_STORAGE_KEY_LEGACY);
@@ -611,7 +631,7 @@ const App: React.FC = () => {
         trackSyncFrameRef.current = window.requestAnimationFrame(() => {
             trackSyncQueuedRef.current = false;
             trackSyncFrameRef.current = null;
-            audioEngine.updateTracks(latestTracksRef.current);
+            engineAdapter.updateTracks(latestTracksRef.current);
         });
     }, [tracks]);
 
@@ -633,8 +653,8 @@ const App: React.FC = () => {
         }
 
         const interval = window.setInterval(() => {
-            const diagnostics = audioEngine.getRuntimeDiagnostics();
-            const meter = audioEngine.getMasterMeter();
+            const diagnostics = engineAdapter.getRuntimeDiagnostics();
+            const meter = engineAdapter.getMasterMeter();
             const audible = meter.peakDb > -58 || meter.rmsDb > -62;
 
             if (audible || diagnostics.activeSourceCount === 0) {
@@ -649,7 +669,7 @@ const App: React.FC = () => {
 
             playbackSilenceGuardRef.current.recovering = true;
 
-            void audioEngine.recoverPlaybackGraph(latestTracksRef.current)
+            void engineAdapter.recoverPlaybackGraph(latestTracksRef.current)
                 .catch((error) => {
                     console.warn('Audio silence guard recovery failed.', error);
                 })
@@ -689,7 +709,7 @@ const App: React.FC = () => {
 
         const checkLoopAndEnd = () => {
             if (transport.isPlaying) {
-                const currentProjectTime = audioEngine.getCurrentTime();
+                const currentProjectTime = engineAdapter.getCurrentTime();
 
                 // Check for Loop / End of Song
                 const endBar = getProjectEndBar();
@@ -700,7 +720,7 @@ const App: React.FC = () => {
 
                     if (loopAction.action === 'restart') {
                         loopOnceRemainingRef.current = loopAction.nextOnceRemaining;
-                        audioEngine.seek(0, tracks, transport.bpm);
+                        engineAdapter.seek(0, tracks, transport.bpm);
                         setTransport((prev: TransportState) => ({
                             ...prev,
                             currentBar: 1,
@@ -710,7 +730,7 @@ const App: React.FC = () => {
                         }));
                     } else {
                         loopOnceRemainingRef.current = loopAction.nextOnceRemaining;
-                        audioEngine.stop(true);
+                        engineAdapter.stop(true);
                         isPlayingRef.current = false;
                         pauseResumeArmedRef.current = false;
                         setTransport((prev: TransportState) => ({
@@ -736,7 +756,7 @@ const App: React.FC = () => {
     }, [transport.isPlaying, transport.bpm, transport.loopMode, tracks, getProjectEndBar]);
 
     useEffect(() => {
-        audioEngine.setMasterPitch(transport.masterTranspose);
+        engineAdapter.setMasterPitch(transport.masterTranspose);
     }, [transport.masterTranspose]);
 
     const beginTransportCommand = useCallback((): number => {
@@ -749,12 +769,12 @@ const App: React.FC = () => {
     }, []);
 
     const playFromTransportCursor = useCallback(async (commandToken: number): Promise<boolean> => {
-        if (isPlayingRef.current || audioEngine.getIsPlaying()) {
+        if (isPlayingRef.current || engineAdapter.getIsPlaying()) {
             pauseResumeArmedRef.current = false;
             return true;
         }
 
-        const ready = await audioEngine.ensurePlaybackReady();
+        const ready = await engineAdapter.ensurePlaybackReady();
         if (!isTransportCommandCurrent(commandToken)) {
             return false;
         }
@@ -784,9 +804,9 @@ const App: React.FC = () => {
 
         isPlayingRef.current = true;
         pauseResumeArmedRef.current = false;
-        audioEngine.play(latestTracksRef.current, transport.bpm, 1, playbackStartTime);
+        engineAdapter.play(latestTracksRef.current, transport.bpm, 1, playbackStartTime);
 
-        if (!audioEngine.getIsPlaying()) {
+        if (!engineAdapter.getIsPlaying()) {
             isPlayingRef.current = false;
             pauseResumeArmedRef.current = false;
             setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
@@ -812,7 +832,7 @@ const App: React.FC = () => {
     // --- TRANSPORT HANDLERS ---
 
     const handlePlay = useCallback(async () => {
-        if (isPlayingRef.current || audioEngine.getIsPlaying()) {
+        if (isPlayingRef.current || engineAdapter.getIsPlaying()) {
             pauseResumeArmedRef.current = false;
             return;
         }
@@ -821,7 +841,7 @@ const App: React.FC = () => {
     }, [beginTransportCommand, playFromTransportCursor]);
 
     const finalizeActiveRecordings = useCallback(async () => {
-        const activeRecordingTrackIds = new Set(audioEngine.getActiveRecordingTrackIds());
+        const activeRecordingTrackIds = new Set(engineAdapter.getActiveRecordingTrackIds());
         if (activeRecordingTrackIds.size === 0) {
             setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
             return;
@@ -832,7 +852,7 @@ const App: React.FC = () => {
         for (const track of tracks) {
             if (!activeRecordingTrackIds.has(track.id)) continue;
 
-            const result = await audioEngine.stopRecording(track.id);
+            const result = await engineAdapter.stopRecording(track.id);
             if (!result) continue;
 
             const hash = await assetDb.saveFile(result.blob);
@@ -874,10 +894,10 @@ const App: React.FC = () => {
 
     const handlePause = useCallback(async () => {
         const commandToken = beginTransportCommand();
-        const isTransportRunning = isPlayingRef.current || audioEngine.getIsPlaying() || transport.isPlaying;
+        const isTransportRunning = isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying;
 
         if (isTransportRunning) {
-            const hasActiveRecordings = transport.isRecording || audioEngine.getActiveRecordingTrackIds().length > 0;
+            const hasActiveRecordings = transport.isRecording || engineAdapter.getActiveRecordingTrackIds().length > 0;
             if (hasActiveRecordings) {
                 await finalizeActiveRecordings();
             }
@@ -886,10 +906,10 @@ const App: React.FC = () => {
                 return;
             }
 
-            const pauseTime = Math.max(0, audioEngine.getCurrentTime());
+            const pauseTime = Math.max(0, engineAdapter.getCurrentTime());
             const pauseBarTime = Math.max(1, 1 + (pauseTime / getSecondsPerBar(transport.bpm)));
             const pausePosition = barTimeToPosition(pauseBarTime);
-            audioEngine.pause();
+            engineAdapter.pause();
             setTransport((prev: TransportState) => ({
                 ...prev,
                 isPlaying: false,
@@ -903,17 +923,17 @@ const App: React.FC = () => {
             return;
         }
 
-        const canResumeFromPause = pauseResumeArmedRef.current && audioEngine.getCurrentTime() > 0.0001;
+        const canResumeFromPause = pauseResumeArmedRef.current && engineAdapter.getCurrentTime() > 0.0001;
         if (canResumeFromPause) {
             await playFromTransportCursor(commandToken);
             return;
         }
 
-        const fallbackPauseTime = Math.max(0, audioEngine.getCurrentTime());
+        const fallbackPauseTime = Math.max(0, engineAdapter.getCurrentTime());
         const fallbackPauseBarTime = Math.max(1, 1 + (fallbackPauseTime / getSecondsPerBar(transport.bpm)));
         const fallbackPausePosition = barTimeToPosition(fallbackPauseBarTime);
 
-        audioEngine.pause();
+        engineAdapter.pause();
         isPlayingRef.current = false;
         pauseResumeArmedRef.current = fallbackPauseTime > 0.0001;
         setTransport((prev: TransportState) => ({
@@ -937,7 +957,7 @@ const App: React.FC = () => {
             return;
         }
 
-        audioEngine.stop(true); // True resets offset to 0
+        engineAdapter.stop(true); // True resets offset to 0
         loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
         setTransport((prev: TransportState) => ({
             ...prev,
@@ -962,8 +982,8 @@ const App: React.FC = () => {
             return;
         }
 
-        audioEngine.seek(0, latestTracksRef.current, transport.bpm);
-        const engineIsPlaying = audioEngine.getIsPlaying() || isPlayingRef.current;
+        engineAdapter.seek(0, latestTracksRef.current, transport.bpm);
+        const engineIsPlaying = engineAdapter.getIsPlaying() || isPlayingRef.current;
         loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
         setTransport((prev: TransportState) => ({
             ...prev,
@@ -991,8 +1011,8 @@ const App: React.FC = () => {
         const targetTime = barToSeconds(targetBarTime, transport.bpm);
         const targetPosition = barTimeToPosition(targetBarTime);
 
-        if (isPlayingRef.current || audioEngine.getIsPlaying() || transport.isPlaying) {
-            audioEngine.pause();
+        if (isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying) {
+            engineAdapter.pause();
             isPlayingRef.current = false;
             pauseResumeArmedRef.current = false;
         }
@@ -1001,7 +1021,7 @@ const App: React.FC = () => {
             return;
         }
 
-        audioEngine.seek(targetTime, latestTracksRef.current, transport.bpm);
+        engineAdapter.seek(targetTime, latestTracksRef.current, transport.bpm);
         if (transport.loopMode === 'once') {
             loopOnceRemainingRef.current = 0;
         }
@@ -1028,8 +1048,8 @@ const App: React.FC = () => {
             return;
         }
 
-        audioEngine.seek(barToSeconds(safeBar, transport.bpm), latestTracksRef.current, transport.bpm);
-        const engineIsPlaying = audioEngine.getIsPlaying() || isPlayingRef.current;
+        engineAdapter.seek(barToSeconds(safeBar, transport.bpm), latestTracksRef.current, transport.bpm);
+        const engineIsPlaying = engineAdapter.getIsPlaying() || isPlayingRef.current;
 
         if (safeBar <= 1.0001 && transport.loopMode === 'once') {
             loopOnceRemainingRef.current = 1;
@@ -1056,7 +1076,7 @@ const App: React.FC = () => {
     const handleBpmChange = useCallback((newBpm: number) => {
         const clamped = Math.max(20, Math.min(999, newBpm));
         setTransport((prev: TransportState) => ({ ...prev, bpm: clamped }));
-        audioEngine.setBpm(clamped);
+        engineAdapter.setBpm(clamped);
     }, []);
 
     const getTransportCursorBar = useCallback(() => {
@@ -1304,7 +1324,7 @@ const App: React.FC = () => {
         }
 
         const srcBuffer = clip.buffer;
-        const reverseCtx = audioEngine.getContext();
+        const reverseCtx = engineAdapter.getContext();
         const reversedBuffer = reverseCtx.createBuffer(
             srcBuffer.numberOfChannels,
             srcBuffer.length,
@@ -1466,7 +1486,7 @@ const App: React.FC = () => {
 
     const getPlaybackBarTime = useCallback(() => {
         const secondsPerBar = getSecondsPerBar(transport.bpm);
-        const currentSeconds = audioEngine.getCurrentTime();
+        const currentSeconds = engineAdapter.getCurrentTime();
         return (currentSeconds / Math.max(0.0001, secondsPerBar)) + 1;
     }, [transport.bpm]);
 
@@ -1648,7 +1668,7 @@ const App: React.FC = () => {
 
         const snapshot: MixSnapshot = {
             capturedAt: Date.now(),
-            masterVolumeDb: audioEngine.getMasterVolumeDb(),
+            masterVolumeDb: engineAdapter.getMasterVolumeDb(),
             tracks: tracksSnapshot
         };
 
@@ -1680,7 +1700,7 @@ const App: React.FC = () => {
             };
         }), { recolor: false });
 
-        audioEngine.setMasterVolumeDb(snapshot.masterVolumeDb);
+        engineAdapter.setMasterVolumeDb(snapshot.masterVolumeDb);
         setActiveMixSnapshot(slot);
     }, [applyTrackMutation, mixSnapshots]);
 
@@ -1853,7 +1873,7 @@ const App: React.FC = () => {
         }), { recolor: false });
 
         if (macroId === 'headroom-safe') {
-            audioEngine.setMasterVolumeDb(Math.min(audioEngine.getMasterVolumeDb(), -3));
+            engineAdapter.setMasterVolumeDb(Math.min(engineAdapter.getMasterVolumeDb(), -3));
         }
     }, [applyTrackMutation]);
 
@@ -1938,10 +1958,10 @@ const App: React.FC = () => {
             return;
         }
 
-        const recordingStartSeconds = Math.max(0, audioEngine.getCurrentTime());
+        const recordingStartSeconds = Math.max(0, engineAdapter.getCurrentTime());
         recordingStartBarRef.current = Math.max(1, 1 + (recordingStartSeconds / getSecondsPerBar(transport.bpm)));
 
-        if (!(isPlayingRef.current || audioEngine.getIsPlaying() || transport.isPlaying)) {
+        if (!(isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying)) {
             const startedPlayback = await playFromTransportCursor(commandToken);
             if (!startedPlayback || !isTransportCommandCurrent(commandToken)) {
                 return;
@@ -1951,7 +1971,7 @@ const App: React.FC = () => {
         pauseResumeArmedRef.current = false;
         setTransport((prev: TransportState) => ({ ...prev, isPlaying: true, isRecording: true }));
         armedTracks.forEach((track) => {
-            void audioEngine.startRecording(track.id, track.inputDeviceId);
+            void engineAdapter.startRecording(track.id, track.inputDeviceId);
         });
     }, [beginTransportCommand, transport.isRecording, transport.isPlaying, tracks, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm]);
 
@@ -2003,7 +2023,7 @@ const App: React.FC = () => {
             throw new Error('Formato de archivo invalido');
         }
 
-        audioEngine.stop(true);
+        engineAdapter.stop(true);
         isPlayingRef.current = false;
         pauseResumeArmedRef.current = false;
         setLoadingMessage('Relacionando Archivos...');
@@ -2014,7 +2034,7 @@ const App: React.FC = () => {
                     const blob = await assetDb.getFile(clip.sourceId);
                     if (blob) {
                         const arrayBuffer = await blob.arrayBuffer();
-                        const buffer = await audioEngine.decodeAudioData(arrayBuffer);
+                        const buffer = await engineAdapter.decodeAudioData(arrayBuffer);
                         return { ...clip, buffer, isOffline: false };
                     }
 
@@ -2052,10 +2072,10 @@ const App: React.FC = () => {
 
         setTransport(normalizedTransport);
         setAudioSettings(sanitizeAudioSettings(projectData.audioSettings || getDefaultAudioSettings()));
-        setProjectName(preferredName || projectData.name || 'Sin Título');
+        setProjectName(preferredName || projectData.name || 'Sin TÃ­tulo');
 
-        audioEngine.setBpm(normalizedTransport.bpm);
-        audioEngine.setMasterPitch(normalizedTransport.masterTranspose);
+        engineAdapter.setBpm(normalizedTransport.bpm);
+        engineAdapter.setMasterPitch(normalizedTransport.masterTranspose);
 
         setSelectedTrackId(rehydratedTracks[0]?.id || null);
         setSelectedClipId(rehydratedTracks[0]?.clips[0]?.id || null);
@@ -2138,7 +2158,7 @@ const App: React.FC = () => {
 
     const resetProjectToEmpty = useCallback(() => {
         replaceTracks([], { recolor: false });
-        setProjectName("Sin Título");
+        setProjectName("Sin TÃ­tulo");
         setSelectedTrackId(null);
         setSelectedClipId(null);
         closeAllToolPanels();
@@ -2156,7 +2176,7 @@ const App: React.FC = () => {
             scaleType: 'minor'
         }));
         setActiveModal(null);
-        audioEngine.stop(true);
+        engineAdapter.stop(true);
         isPlayingRef.current = false;
         pauseResumeArmedRef.current = false;
     }, [closeAllToolPanels, replaceTracks]);
@@ -2183,7 +2203,7 @@ const App: React.FC = () => {
 
         } catch (err) {
             console.error("Open Project Error", err);
-            alert("Error crítico al leer el archivo. El formato puede estar corrupto.");
+            alert("Error crÃ­tico al leer el archivo. El formato puede estar corrupto.");
         } finally {
             setLoadingProject(false);
             setLoadingMessage("");
@@ -2199,7 +2219,7 @@ const App: React.FC = () => {
         setTimeout(async () => {
             try {
                 if (transport.isPlaying) {
-                    audioEngine.pause();
+                    engineAdapter.pause();
                     setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
                     isPlayingRef.current = false;
                     pauseResumeArmedRef.current = false;
@@ -2307,7 +2327,7 @@ const App: React.FC = () => {
 
             try {
                 const arrayBuffer = source.arrayBuffer.slice(0);
-                const audioBuffer = await audioEngine.decodeAudioData(arrayBuffer);
+                const audioBuffer = await engineAdapter.decodeAudioData(arrayBuffer);
 
                 let sourceId: string | undefined;
                 try {
@@ -2362,13 +2382,13 @@ const App: React.FC = () => {
 
         const validTracks = importedTracks.filter((track): track is Track => track !== null);
         if (validTracks.length === 0) {
-            throw new Error('No se pudo decodificar ningún archivo de audio.');
+            throw new Error('No se pudo decodificar ningÃºn archivo de audio.');
         }
 
         appendTracks(validTracks, { reason: 'import-audio-files', recolor: false });
 
         if (validTracks.length < sources.length) {
-            alert('Algunos archivos no se pudieron importar, pero el resto se agregó correctamente.');
+            alert('Algunos archivos no se pudieron importar, pero el resto se agregÃ³ correctamente.');
         }
     }, [appendTracks, buildAudioClipFromBuffer, tracks.length]);
 
@@ -2387,7 +2407,7 @@ const App: React.FC = () => {
             return;
         }
 
-        const decoded = await audioEngine.decodeAudioData(fileData.data.slice(0));
+        const decoded = await engineAdapter.decodeAudioData(fileData.data.slice(0));
         let sourceId: string | undefined;
         try {
             sourceId = await assetDb.saveFile(new Blob([fileData.data], { type: 'application/octet-stream' }));
@@ -2458,8 +2478,8 @@ const App: React.FC = () => {
         const isNoise = type === 'noise';
         const clipName = isNoise ? 'White Noise Burst' : 'Sine 440Hz';
         const clipBuffer = isNoise
-            ? audioEngine.createNoiseBuffer(4)
-            : audioEngine.createSineBuffer(440, 4);
+            ? engineAdapter.createNoiseBuffer(4)
+            : engineAdapter.createSineBuffer(440, 4);
         const destinationTrack = destination?.trackId
             ? tracks.find((track) => track.id === destination.trackId)
             : undefined;
@@ -2717,7 +2737,7 @@ const App: React.FC = () => {
     }, []);
 
     const handleTimelineTimeUpdate = useCallback((bar: number, beat: number, sixteenth: number) => {
-        const engineIsPlaying = audioEngine.getIsPlaying() || isPlayingRef.current;
+        const engineIsPlaying = engineAdapter.getIsPlaying() || isPlayingRef.current;
         setTransport((prev: TransportState) => {
             if (
                 prev.currentBar === bar
@@ -2833,7 +2853,7 @@ const App: React.FC = () => {
                 <div className="w-[50px] bg-[#1a1a1a] border-r border-daw-border flex flex-col items-center py-3 gap-3 z-[100] shrink-0 relative shadow-xl">
                     {/* ... Sidebar Icons (unchanged) ... */}
                     <div className="relative group" ref={fileMenuRef}>
-                        <button onClick={() => setShowFileMenu(!showFileMenu)} className={`w-10 h-10 flex items-center justify-center rounded-sm transition-all duration-100 relative ${showFileMenu ? 'bg-[#333] text-white' : 'text-gray-400 hover:text-white hover:bg-[#222]'}`} title="Menú de Proyecto">
+                        <button onClick={() => setShowFileMenu(!showFileMenu)} className={`w-10 h-10 flex items-center justify-center rounded-sm transition-all duration-100 relative ${showFileMenu ? 'bg-[#333] text-white' : 'text-gray-400 hover:text-white hover:bg-[#222]'}`} title="MenÃº de Proyecto">
                             <Folder size={20} strokeWidth={1.5} />
                         </button>
                         {showFileMenu && (
@@ -2866,14 +2886,14 @@ const App: React.FC = () => {
                     <div className="w-6 h-px bg-white/5 my-1"></div>
                     <div className="flex flex-col gap-2 w-full items-center">
                         <SidebarItem icon={LayoutGrid} label="Vista de Arreglo" active={mainView === 'arrange'} onClick={() => setMainView('arrange')} />
-                        <SidebarItem icon={PlayCircle} label="Vista de Sesión (Live)" active={mainView === 'session'} onClick={() => setMainView('session')} color="text-daw-ruby" />
+                        <SidebarItem icon={PlayCircle} label="Vista de SesiÃ³n (Live)" active={mainView === 'session'} onClick={() => setMainView('session')} color="text-daw-ruby" />
                         <SidebarItem icon={Sliders} label="Mezclador" active={mainView === 'mixer'} onClick={() => setMainView('mixer')} />
                     </div>
                     <div className="w-6 h-px bg-white/5 my-1"></div>
                     <div className="flex flex-col gap-2 w-full items-center">
                         <SidebarItem icon={Cpu} label="Rack de Dispositivos" onClick={() => setBottomView('devices')} active={bottomView === 'devices'} />
                         <SidebarItem icon={Layers} label="Editor de Notas/Audio" onClick={() => setBottomView('editor')} active={bottomView === 'editor'} />
-                        <button onClick={handleImportAudio} className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-white hover:bg-white/5 rounded-md transition-all" title="Importar Rápido">
+                        <button onClick={handleImportAudio} className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-white hover:bg-white/5 rounded-md transition-all" title="Importar RÃ¡pido">
                             <FolderInput size={18} />
                         </button>
                     </div>
@@ -2882,7 +2902,7 @@ const App: React.FC = () => {
                         <button onClick={redo} disabled={!canRedo} className={`w-8 h-8 flex items-center justify-center rounded-md transition-all ${!canRedo ? 'text-gray-700 cursor-not-allowed opacity-30' : 'text-gray-400 hover:text-white hover:bg-white/5'}`} title="Rehacer (Ctrl+Y)"><Redo2 size={16} /></button>
                     </div>
                     <div className="mt-auto flex flex-col gap-3 w-full items-center pb-3">
-                        <SidebarItem icon={Users} label="Colaboración" onClick={() => setActiveModal('collab')} active={activeModal === 'collab'} />
+                        <SidebarItem icon={Users} label="ColaboraciÃ³n" onClick={() => setActiveModal('collab')} active={activeModal === 'collab'} />
                         <SidebarItem icon={Settings} label="Preferencias de Audio/MIDI" onClick={() => setShowSettings(true)} active={showSettings} />
                     </div>
                     <input type="file" ref={fileInputRef} className="hidden" multiple accept=".wav,.mp3,.aif,.aiff,.ogg,.flac" onChange={handleFileImport} />
@@ -3089,14 +3109,14 @@ const App: React.FC = () => {
                     <ExportModal isOpen={showExportModal} onClose={() => setShowExportModal(false)} tracks={tracks} totalBars={200} bpm={transport.bpm} />
                 </React.Suspense>
             )}
-            <Modal isOpen={activeModal === 'recovery'} onClose={handleDiscardRecoverySnapshot} title="Recuperación automática">
+            <Modal isOpen={activeModal === 'recovery'} onClose={handleDiscardRecoverySnapshot} title="RecuperaciÃ³n automÃ¡tica">
                 <div className="flex flex-col gap-4">
                     <p className="text-xs text-gray-300 leading-relaxed">
-                        Detectamos un cierre inesperado en la sesión anterior. Puedes restaurar el último autosave para continuar donde te quedaste.
+                        Detectamos un cierre inesperado en la sesiÃ³n anterior. Puedes restaurar el Ãºltimo autosave para continuar donde te quedaste.
                     </p>
                     {recoverySnapshot && (
                         <div className="rounded-sm border border-white/10 bg-white/[0.03] p-3">
-                            <div className="text-[10px] uppercase tracking-wider text-gray-500">Último autosave</div>
+                            <div className="text-[10px] uppercase tracking-wider text-gray-500">Ãšltimo autosave</div>
                             <div className="mt-2 text-xs text-gray-200 font-semibold">{recoverySnapshot.projectName}</div>
                             <div className="mt-1 text-[10px] text-gray-500 font-mono">{new Date(recoverySnapshot.timestamp).toLocaleString()}</div>
                             <div className="mt-1 text-[10px] text-daw-cyan">{recoverySnapshot.reason}</div>
@@ -3120,9 +3140,9 @@ const App: React.FC = () => {
                     </div>
                 </div>
             </Modal>
-            <Modal isOpen={activeModal === 'new-project-confirm'} onClose={() => setActiveModal(null)} title="Nuevo Proyecto"><div className="flex flex-col gap-6"><div className="flex items-start gap-4 text-white"><div className="p-3 bg-daw-ruby/20 rounded-full shrink-0"><AlertTriangle className="text-daw-ruby" size={24} /></div><div><h3 className="font-bold text-lg mb-1">¿Deseas guardar los cambios?</h3><p className="text-gray-400 text-xs leading-relaxed">Si continúas sin guardar, perderás todo el trabajo actual para abrir un espacio de trabajo limpio.</p></div></div><div className="flex flex-col gap-2"><button onClick={async () => { await handleSaveProject(); resetProjectToEmpty(); }} className="w-full flex items-center justify-between px-4 py-3 bg-white text-black rounded-sm font-bold text-xs hover:bg-gray-200 transition-all group"><div className="flex items-center gap-3"><Save size={16} /><span>GUARDAR Y CREAR NUEVO</span></div></button><button onClick={resetProjectToEmpty} className="w-full flex items-center gap-3 px-4 py-3 bg-[#222] text-daw-ruby border border-daw-ruby/30 rounded-sm font-bold text-xs hover:bg-daw-ruby hover:text-white transition-all"><Trash2 size={16} /><span>CONTINUAR SIN GUARDAR</span></button><button onClick={() => setActiveModal(null)} className="w-full py-2 text-gray-500 hover:text-white text-[10px] font-bold uppercase tracking-widest mt-2">CANCELAR</button></div></div></Modal>
+            <Modal isOpen={activeModal === 'new-project-confirm'} onClose={() => setActiveModal(null)} title="Nuevo Proyecto"><div className="flex flex-col gap-6"><div className="flex items-start gap-4 text-white"><div className="p-3 bg-daw-ruby/20 rounded-full shrink-0"><AlertTriangle className="text-daw-ruby" size={24} /></div><div><h3 className="font-bold text-lg mb-1">Â¿Deseas guardar los cambios?</h3><p className="text-gray-400 text-xs leading-relaxed">Si continÃºas sin guardar, perderÃ¡s todo el trabajo actual para abrir un espacio de trabajo limpio.</p></div></div><div className="flex flex-col gap-2"><button onClick={async () => { await handleSaveProject(); resetProjectToEmpty(); }} className="w-full flex items-center justify-between px-4 py-3 bg-white text-black rounded-sm font-bold text-xs hover:bg-gray-200 transition-all group"><div className="flex items-center gap-3"><Save size={16} /><span>GUARDAR Y CREAR NUEVO</span></div></button><button onClick={resetProjectToEmpty} className="w-full flex items-center gap-3 px-4 py-3 bg-[#222] text-daw-ruby border border-daw-ruby/30 rounded-sm font-bold text-xs hover:bg-daw-ruby hover:text-white transition-all"><Trash2 size={16} /><span>CONTINUAR SIN GUARDAR</span></button><button onClick={() => setActiveModal(null)} className="w-full py-2 text-gray-500 hover:text-white text-[10px] font-bold uppercase tracking-widest mt-2">CANCELAR</button></div></div></Modal>
 
-            <Modal isOpen={activeModal === 'collab'} onClose={() => setActiveModal(null)} title="Colaboración">
+            <Modal isOpen={activeModal === 'collab'} onClose={() => setActiveModal(null)} title="ColaboraciÃ³n">
                 <CollabPanel
                     sessionId={collabSessionId}
                     userName={collabUserName}
@@ -3139,3 +3159,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

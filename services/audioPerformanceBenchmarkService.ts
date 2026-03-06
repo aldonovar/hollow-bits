@@ -1,11 +1,19 @@
-import { AudioSettings, Clip, Track, TrackType } from '../types';
+﻿import {
+    AudioSettings,
+    Block1RouteEvaluation,
+    Clip,
+    EngineBackendRoute,
+    Track,
+    TrackType
+} from '../types';
 import {
-    audioEngine,
+    engineAdapter,
     EngineDiagnostics,
+    EngineRouteImplementationStatus,
     EngineSchedulerMode,
     GraphUpdateStats,
     SchedulerTelemetrySnapshot
-} from './audioEngine';
+} from './engineAdapter';
 import { createTrack } from './projectCoreService';
 
 export type AudioPerformanceBenchmarkStatus = 'pass' | 'warn' | 'fail';
@@ -13,6 +21,7 @@ export type AudioPerformanceBenchmarkStatus = 'pass' | 'warn' | 'fail';
 export interface AudioPerformanceBenchmarkCaseConfig {
     id: string;
     label: string;
+    route?: EngineBackendRoute;
     schedulerMode: EngineSchedulerMode;
     audioTrackCount: number;
     groupTrackCount: number;
@@ -61,6 +70,8 @@ export interface AudioPerformanceBenchmarkAssessment {
 
 export interface AudioPerformanceBenchmarkCaseResult {
     caseConfig: AudioPerformanceBenchmarkCaseConfig;
+    route: EngineBackendRoute;
+    routeImplementationStatus: EngineRouteImplementationStatus;
     status: AudioPerformanceBenchmarkStatus;
     metrics: AudioPerformanceBenchmarkCaseMetrics;
     issues: string[];
@@ -89,6 +100,8 @@ export interface AudioPerformanceBenchmarkReport {
     restoreFailed: boolean;
     restoreError: string | null;
     comparisons: AudioPerformanceBenchmarkABComparison[];
+    routeEvaluations: Block1RouteEvaluation[];
+    recommendedRoute: EngineBackendRoute;
     results: AudioPerformanceBenchmarkCaseResult[];
 }
 
@@ -166,6 +179,8 @@ export interface AudioPerformanceBenchmarkHistoryEntry {
     maxWorkletP99TickDriftMs: number;
     maxWorkletP95LagMs: number;
     maxWorkletP99LoopMs: number;
+    recommendedRoute: EngineBackendRoute;
+    recommendedRouteImplementationStatus: EngineRouteImplementationStatus;
 }
 
 export const DEFAULT_AUDIO_PERFORMANCE_GATE_THRESHOLDS: AudioPerformanceGateThresholds = {
@@ -179,11 +194,21 @@ export const DEFAULT_AUDIO_PERFORMANCE_GATE_THRESHOLDS: AudioPerformanceGateThre
     minWorkletWinRate: 0.6
 };
 
-const DEFAULT_CASES: AudioPerformanceBenchmarkCaseConfig[] = [
+const BENCHMARK_ROUTES: EngineBackendRoute[] = ['webaudio', 'worker-dsp', 'native-sidecar'];
+const BENCHMARK_SCHEDULER_MODES: EngineSchedulerMode[] = ['interval', 'worklet-clock'];
+
+const BASE_SCENARIOS: Array<{
+    key: string;
+    audioTrackCount: number;
+    groupTrackCount: number;
+    returnTrackCount: number;
+    clipsPerTrack: number;
+    durationMs: number;
+    bpm: number;
+    bars: number;
+}> = [
     {
-        id: 'interval-medium',
-        label: 'Interval · Medium',
-        schedulerMode: 'interval',
+        key: 'medium',
         audioTrackCount: 48,
         groupTrackCount: 4,
         returnTrackCount: 2,
@@ -193,21 +218,7 @@ const DEFAULT_CASES: AudioPerformanceBenchmarkCaseConfig[] = [
         bars: 24
     },
     {
-        id: 'worklet-medium',
-        label: 'Worklet · Medium',
-        schedulerMode: 'worklet-clock',
-        audioTrackCount: 48,
-        groupTrackCount: 4,
-        returnTrackCount: 2,
-        clipsPerTrack: 2,
-        durationMs: 3400,
-        bpm: 124,
-        bars: 24
-    },
-    {
-        id: 'interval-high',
-        label: 'Interval · High',
-        schedulerMode: 'interval',
+        key: 'high',
         audioTrackCount: 96,
         groupTrackCount: 8,
         returnTrackCount: 4,
@@ -217,33 +228,7 @@ const DEFAULT_CASES: AudioPerformanceBenchmarkCaseConfig[] = [
         bars: 24
     },
     {
-        id: 'worklet-high',
-        label: 'Worklet · High',
-        schedulerMode: 'worklet-clock',
-        audioTrackCount: 96,
-        groupTrackCount: 8,
-        returnTrackCount: 4,
-        clipsPerTrack: 2,
-        durationMs: 4200,
-        bpm: 126,
-        bars: 24
-    },
-    {
-        id: 'interval-extreme',
-        label: 'Interval · Extreme',
-        schedulerMode: 'interval',
-        audioTrackCount: 160,
-        groupTrackCount: 12,
-        returnTrackCount: 4,
-        clipsPerTrack: 3,
-        durationMs: 5200,
-        bpm: 128,
-        bars: 32
-    },
-    {
-        id: 'worklet-extreme',
-        label: 'Worklet · Extreme',
-        schedulerMode: 'worklet-clock',
+        key: 'extreme',
         audioTrackCount: 160,
         groupTrackCount: 12,
         returnTrackCount: 4,
@@ -253,6 +238,34 @@ const DEFAULT_CASES: AudioPerformanceBenchmarkCaseConfig[] = [
         bars: 32
     }
 ];
+
+const getRouteLabel = (route: EngineBackendRoute): string => {
+    if (route === 'worker-dsp') return 'Worker DSP';
+    if (route === 'native-sidecar') return 'Native Sidecar';
+    return 'WebAudio';
+};
+
+const getSchedulerLabel = (mode: EngineSchedulerMode): string => {
+    return mode === 'interval' ? 'Interval' : 'Worklet';
+};
+
+const DEFAULT_CASES: AudioPerformanceBenchmarkCaseConfig[] = BENCHMARK_ROUTES.flatMap((route) => {
+    return BASE_SCENARIOS.flatMap((scenario) => {
+        return BENCHMARK_SCHEDULER_MODES.map((schedulerMode) => ({
+            id: `${route}-${schedulerMode}-${scenario.key}`,
+            label: `${getRouteLabel(route)} · ${getSchedulerLabel(schedulerMode)} · ${scenario.key.toUpperCase()}`,
+            route,
+            schedulerMode,
+            audioTrackCount: scenario.audioTrackCount,
+            groupTrackCount: scenario.groupTrackCount,
+            returnTrackCount: scenario.returnTrackCount,
+            clipsPerTrack: scenario.clipsPerTrack,
+            durationMs: scenario.durationMs,
+            bpm: scenario.bpm,
+            bars: scenario.bars
+        }));
+    });
+});
 
 const createAbortError = (): Error => {
     const error = new Error('Audio performance benchmark aborted');
@@ -287,7 +300,7 @@ const percentileOf = (values: number[], percentile: number): number => {
 };
 
 const collectRuntimeSnapshot = (): AudioPerformanceRuntimeSnapshot => {
-    const runtime = audioEngine.getRuntimeDiagnostics();
+    const runtime = engineAdapter.getRuntimeDiagnostics();
     return {
         contextState: runtime.contextState,
         hasMasterGraph: runtime.hasMasterGraph,
@@ -331,7 +344,7 @@ const monitorEventLoopLag = async (durationMs: number, signal?: AbortSignal): Pr
 
 const buildBenchmarkTracks = (caseConfig: AudioPerformanceBenchmarkCaseConfig): Track[] => {
     const toneSeconds = Math.max(4, (caseConfig.bars * 4 * 60) / caseConfig.bpm + 2);
-    const baseBuffer = audioEngine.createSineBuffer(220, toneSeconds);
+    const baseBuffer = engineAdapter.createSineBuffer(220, toneSeconds);
 
     const returnTracks: Track[] = Array.from({ length: caseConfig.returnTrackCount }, (_value, index) => {
         return createTrack({
@@ -431,16 +444,32 @@ export const buildAudioPerformanceBenchmarkCases = (): AudioPerformanceBenchmark
     return DEFAULT_CASES.map((caseConfig) => ({ ...caseConfig }));
 };
 
+const resolveCaseRoute = (caseConfig: AudioPerformanceBenchmarkCaseConfig): EngineBackendRoute => {
+    return caseConfig.route || 'webaudio';
+};
+
 const deriveScenarioKey = (caseConfig: AudioPerformanceBenchmarkCaseConfig): string => {
+    const route = resolveCaseRoute(caseConfig);
+    const intervalPrefix = `${route}-interval-`;
+    const workletPrefix = `${route}-worklet-clock-`;
+
+    if (caseConfig.id.startsWith(intervalPrefix)) {
+        return `${route}:${caseConfig.id.replace(intervalPrefix, '')}`;
+    }
+
+    if (caseConfig.id.startsWith(workletPrefix)) {
+        return `${route}:${caseConfig.id.replace(workletPrefix, '')}`;
+    }
+
     if (caseConfig.id.startsWith('interval-')) {
-        return caseConfig.id.replace('interval-', '');
+        return `${route}:${caseConfig.id.replace('interval-', '')}`;
     }
 
     if (caseConfig.id.startsWith('worklet-')) {
-        return caseConfig.id.replace('worklet-', '');
+        return `${route}:${caseConfig.id.replace('worklet-', '')}`;
     }
 
-    return caseConfig.id;
+    return `${route}:${caseConfig.id}`;
 };
 
 const getStatusWeight = (status: AudioPerformanceBenchmarkStatus): number => {
@@ -526,6 +555,131 @@ const buildABComparisons = (
     });
 
     return comparisons.sort((a, b) => a.scenarioKey.localeCompare(b.scenarioKey));
+};
+
+const computeRouteSnapshot = (results: AudioPerformanceBenchmarkCaseResult[]): {
+    cpuAudioP95: number;
+    dropouts: number;
+    driftP99: number;
+    monitorLatencyP95Ms: number;
+} => {
+    if (results.length === 0) {
+        return {
+            cpuAudioP95: 0,
+            dropouts: 0,
+            driftP99: 0,
+            monitorLatencyP95Ms: 0
+        };
+    }
+
+    const cpuAudioP95 = results.reduce((max, result) => {
+        return Math.max(max, result.metrics.scheduler.p95CpuLoadPercent || 0);
+    }, 0);
+
+    const dropouts = results.reduce((max, result) => {
+        const dropoutCount = result.metrics.scheduler.dropoutCount
+            ?? result.metrics.diagnostics.schedulerDropoutCount
+            ?? 0;
+        return Math.max(max, dropoutCount);
+    }, 0);
+
+    const driftP99 = results.reduce((max, result) => {
+        return Math.max(max, result.metrics.scheduler.p99TickDriftMs);
+    }, 0);
+
+    const monitorLatencyP95Ms = results.reduce((max, result) => {
+        return Math.max(max, (result.metrics.diagnostics.latency || 0) * 1000);
+    }, 0);
+
+    return {
+        cpuAudioP95,
+        dropouts,
+        driftP99,
+        monitorLatencyP95Ms
+    };
+};
+
+const buildRouteEvaluations = (results: AudioPerformanceBenchmarkCaseResult[]): Block1RouteEvaluation[] => {
+    const perRoute = new Map<EngineBackendRoute, AudioPerformanceBenchmarkCaseResult[]>();
+
+    results.forEach((result) => {
+        const route = result.route;
+        const current = perRoute.get(route) || [];
+        current.push(result);
+        perRoute.set(route, current);
+    });
+
+    const baselineSnapshot = computeRouteSnapshot(perRoute.get('webaudio') || []);
+    const baselineCpu = Math.max(0.0001, baselineSnapshot.cpuAudioP95);
+    const baselineDropouts = Math.max(1, baselineSnapshot.dropouts);
+
+    const evaluations: Block1RouteEvaluation[] = BENCHMARK_ROUTES.map((route) => {
+        const routeResults = perRoute.get(route) || [];
+        const routeSnapshot = computeRouteSnapshot(routeResults);
+        const implementationStatus = engineAdapter.getBackendImplementationStatus(route);
+
+        const cpuAudioP95ImprovementRatio = baselineSnapshot.cpuAudioP95 > 0
+            ? Math.max(-1, (baselineSnapshot.cpuAudioP95 - routeSnapshot.cpuAudioP95) / baselineCpu)
+            : 0;
+
+        const dropoutReductionRatio = baselineSnapshot.dropouts > 0
+            ? Math.max(-1, (baselineSnapshot.dropouts - routeSnapshot.dropouts) / baselineDropouts)
+            : 0;
+
+        const notes: string[] = [];
+        if (implementationStatus === 'simulated') {
+            notes.push('Ruta simulada sobre backend webaudio para comparacion tecnica.');
+        }
+
+        if (routeResults.length === 0) {
+            notes.push('Sin resultados de benchmark para esta ruta.');
+        }
+
+        const passesGate =
+            cpuAudioP95ImprovementRatio >= 0.25
+            && dropoutReductionRatio >= 0.6
+            && routeSnapshot.driftP99 <= 5
+            && routeSnapshot.monitorLatencyP95Ms <= 12;
+
+        if (!passesGate && notes.length === 0) {
+            notes.push('No supera gate de Bloque 1 con los umbrales actuales.');
+        }
+
+        return {
+            route,
+            implementationStatus,
+            cpuAudioP95Ms: routeSnapshot.cpuAudioP95,
+            cpuAudioP95ImprovementRatio,
+            dropouts: routeSnapshot.dropouts,
+            dropoutReductionRatio,
+            driftP99Ms: routeSnapshot.driftP99,
+            monitorLatencyP95Ms: routeSnapshot.monitorLatencyP95Ms,
+            passesGate,
+            notes
+        };
+    });
+
+    return evaluations;
+};
+
+const chooseRecommendedRoute = (evaluations: Block1RouteEvaluation[]): EngineBackendRoute => {
+    const passingNative = evaluations
+        .filter((entry) => entry.passesGate && entry.implementationStatus === 'native')
+        .sort((a, b) => b.cpuAudioP95ImprovementRatio - a.cpuAudioP95ImprovementRatio);
+
+    if (passingNative.length > 0) {
+        return passingNative[0].route;
+    }
+
+    const passingAny = evaluations
+        .filter((entry) => entry.passesGate)
+        .sort((a, b) => b.cpuAudioP95ImprovementRatio - a.cpuAudioP95ImprovementRatio);
+
+    if (passingAny.length > 0) {
+        return passingAny[0].route;
+    }
+
+    return 'webaudio';
 };
 
 const summarizePerformanceReport = (report: AudioPerformanceBenchmarkReport): AudioPerformanceGateSummary => {
@@ -659,7 +813,9 @@ export const createAudioPerformanceBenchmarkHistoryEntry = (
         maxWorkletP95TickDriftMs: gate.summary.maxWorkletP95TickDriftMs,
         maxWorkletP99TickDriftMs: gate.summary.maxWorkletP99TickDriftMs,
         maxWorkletP95LagMs: gate.summary.maxWorkletP95LagMs,
-        maxWorkletP99LoopMs: gate.summary.maxWorkletP99LoopMs
+        maxWorkletP99LoopMs: gate.summary.maxWorkletP99LoopMs,
+        recommendedRoute: report.recommendedRoute,
+        recommendedRouteImplementationStatus: engineAdapter.getBackendImplementationStatus(report.recommendedRoute)
     };
 };
 
@@ -731,8 +887,9 @@ export const runAudioPerformanceBenchmark = async (
         : buildAudioPerformanceBenchmarkCases();
 
     const startedAt = Date.now();
-    const initialSettings = audioEngine.getSettings();
-    const initialSchedulerMode = audioEngine.getSchedulerMode();
+    const initialSettings = engineAdapter.getSettings();
+    const initialSchedulerMode = engineAdapter.getSchedulerMode();
+    const initialRoute = engineAdapter.getBackendRoute();
     const results: AudioPerformanceBenchmarkCaseResult[] = [];
     let aborted = false;
     let restoreFailed = false;
@@ -769,60 +926,73 @@ export const runAudioPerformanceBenchmark = async (
                     bufferSize: caseConfig.bufferSize ?? initialSettings.bufferSize,
                     latencyHint: caseConfig.latencyHint ?? initialSettings.latencyHint
                 };
+                const route = resolveCaseRoute(caseConfig);
+                const routeImplementationStatus = engineAdapter.getBackendImplementationStatus(route);
 
-                await audioEngine.restartEngine(nextSettings);
-                audioEngine.setSchedulerMode(caseConfig.schedulerMode);
+                engineAdapter.setBackendRoute(route);
+                await engineAdapter.restartEngine(nextSettings);
+                engineAdapter.setSchedulerMode(caseConfig.schedulerMode);
                 await wait(140);
                 throwIfAborted(options.signal);
 
                 const benchmarkTracks = buildBenchmarkTracks(caseConfig);
-                audioEngine.updateTracks(benchmarkTracks);
-                audioEngine.play(benchmarkTracks, caseConfig.bpm, 0, 0);
+                engineAdapter.updateTracks(benchmarkTracks);
+                engineAdapter.play(benchmarkTracks, caseConfig.bpm, 0, 0);
 
                 const eventLoop = await monitorEventLoopLag(caseConfig.durationMs, options.signal);
 
                 const metrics: AudioPerformanceBenchmarkCaseMetrics = {
-                    diagnostics: audioEngine.getDiagnostics(),
+                    diagnostics: engineAdapter.getDiagnostics(),
                     runtime: collectRuntimeSnapshot(),
-                    scheduler: audioEngine.getSchedulerTelemetry(),
+                    scheduler: engineAdapter.getSchedulerTelemetry(),
                     eventLoop,
-                    graphUpdate: audioEngine.getLastGraphUpdateStats()
+                    graphUpdate: engineAdapter.getLastGraphUpdateStats()
                 };
 
-                audioEngine.stop(false);
-                audioEngine.updateTracks([]);
+                engineAdapter.stop(false);
+                engineAdapter.updateTracks([]);
 
                 const assessment = assessAudioPerformanceBenchmarkCase(caseConfig, metrics);
+                const warnings = [...assessment.warnings];
+                if (routeImplementationStatus === 'simulated') {
+                    warnings.push('Ruta simulada: resultado util para comparacion tecnica, no para decision final de migracion.');
+                }
                 const result: AudioPerformanceBenchmarkCaseResult = {
                     caseConfig,
+                    route,
+                    routeImplementationStatus,
                     status: assessment.status,
                     metrics,
                     issues: assessment.issues,
                     criticalIssues: assessment.criticalIssues,
-                    warnings: assessment.warnings,
+                    warnings,
                     elapsedMs: Date.now() - caseStartedAt
                 };
 
                 results.push(result);
                 progress(null, null, result);
             } catch (error) {
-                audioEngine.stop(false);
+                engineAdapter.stop(false);
 
                 if (error instanceof Error && error.name === 'AbortError') {
                     aborted = true;
                     break;
                 }
 
-                const diagnostics = audioEngine.getDiagnostics();
+                const diagnostics = engineAdapter.getDiagnostics();
                 const runtime = collectRuntimeSnapshot();
-                const scheduler = audioEngine.getSchedulerTelemetry();
-                const graphUpdate = audioEngine.getLastGraphUpdateStats();
+                const scheduler = engineAdapter.getSchedulerTelemetry();
+                const graphUpdate = engineAdapter.getLastGraphUpdateStats();
                 const failMessage = error instanceof Error
                     ? error.message
                     : 'Fallo desconocido en benchmark de performance.';
+                const route = resolveCaseRoute(caseConfig);
+                const routeImplementationStatus = engineAdapter.getBackendImplementationStatus(route);
 
                 const result: AudioPerformanceBenchmarkCaseResult = {
                     caseConfig,
+                    route,
+                    routeImplementationStatus,
                     status: 'fail',
                     metrics: {
                         diagnostics,
@@ -849,9 +1019,10 @@ export const runAudioPerformanceBenchmark = async (
         }
     } finally {
         try {
-            audioEngine.stop(true);
-            audioEngine.setSchedulerMode(initialSchedulerMode);
-            await audioEngine.restartEngine(initialSettings);
+            engineAdapter.stop(true);
+            engineAdapter.setBackendRoute(initialRoute);
+            engineAdapter.setSchedulerMode(initialSchedulerMode);
+            await engineAdapter.restartEngine(initialSettings);
         } catch (error) {
             restoreFailed = true;
             restoreError = error instanceof Error
@@ -865,6 +1036,8 @@ export const runAudioPerformanceBenchmark = async (
     const warnedCases = results.filter((result) => result.status === 'warn').length;
     const failedCases = results.filter((result) => result.status === 'fail').length;
     const comparisons = buildABComparisons(results);
+    const routeEvaluations = buildRouteEvaluations(results);
+    const recommendedRoute = chooseRecommendedRoute(routeEvaluations);
 
     return {
         startedAt,
@@ -878,6 +1051,10 @@ export const runAudioPerformanceBenchmark = async (
         restoreFailed,
         restoreError,
         comparisons,
+        routeEvaluations,
+        recommendedRoute,
         results
     };
 };
+
+
