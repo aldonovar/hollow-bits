@@ -52,5 +52,5 @@
 ## Comandos clave
 - `npm run test:session-hardening`
 - `npm run test:unit`
+- `npm run launch:report:baseline`
 - `npm run launch:gate -- --report benchmarks/session-launch/latest-report.json --out benchmarks/session-launch/latest-gate.json`
-

@@ -33,3 +33,7 @@ dist_electron/
 *.dmg
 *.zip
 *.msi
+
+# Benchmark artifacts (generated locally / CI uploads)
+benchmarks/**/latest-report.json
+benchmarks/**/latest-gate.json
