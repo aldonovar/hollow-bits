@@ -649,24 +649,29 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
 
     return (
         <div ref={scrollContainerRef} className="flex-1 bg-[#111218] overflow-x-auto overflow-y-hidden relative p-4">
-            {showOverloadBanner && (
-                <div className="absolute top-2 right-3 z-30 px-2.5 py-1 rounded-sm border border-daw-ruby/45 bg-[#1a1115]/88 text-[9px] uppercase tracking-wider font-bold text-daw-ruby flex items-center gap-2">
-                    <span>Audio Priority</span>
-                    <span className={overloadDecision.mode === 'critical' ? 'text-red-300' : 'text-amber-300'}>{overloadDecision.mode.toUpperCase()}</span>
-                    <span className="text-gray-400">{sessionTracks.length}T x {SCENES}S</span>
+            <div className="mb-2 min-h-[24px] flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                    {launchTelemetrySummary.sampleCount > 0 && (
+                        <div className="px-2.5 py-1 rounded-sm border border-white/15 bg-[#101420]/88 text-[9px] uppercase tracking-wider font-bold text-gray-200 flex items-center gap-2">
+                            <span>Launch Gate</span>
+                            <span className={launchTelemetrySummary.gatePass ? 'text-emerald-300' : 'text-red-300'}>
+                                {launchTelemetrySummary.gatePass ? 'PASS' : 'FAIL'}
+                            </span>
+                            <span className="text-gray-400">p95 {launchTelemetrySummary.p95LaunchErrorMs.toFixed(2)}ms</span>
+                            <span className="text-gray-500">n={launchTelemetrySummary.sampleCount}</span>
+                        </div>
+                    )}
                 </div>
-            )}
-
-            {launchTelemetrySummary.sampleCount > 0 && (
-                <div className="absolute top-2 left-3 z-30 px-2.5 py-1 rounded-sm border border-white/15 bg-[#101420]/88 text-[9px] uppercase tracking-wider font-bold text-gray-200 flex items-center gap-2">
-                    <span>Launch Gate</span>
-                    <span className={launchTelemetrySummary.gatePass ? 'text-emerald-300' : 'text-red-300'}>
-                        {launchTelemetrySummary.gatePass ? 'PASS' : 'FAIL'}
-                    </span>
-                    <span className="text-gray-400">p95 {launchTelemetrySummary.p95LaunchErrorMs.toFixed(2)}ms</span>
-                    <span className="text-gray-500">n={launchTelemetrySummary.sampleCount}</span>
+                <div className="flex items-center gap-2 ml-auto">
+                    {showOverloadBanner && (
+                        <div className="px-2.5 py-1 rounded-sm border border-daw-ruby/45 bg-[#1a1115]/88 text-[9px] uppercase tracking-wider font-bold text-daw-ruby flex items-center gap-2">
+                            <span>Audio Priority</span>
+                            <span className={overloadDecision.mode === 'critical' ? 'text-red-300' : 'text-amber-300'}>{overloadDecision.mode.toUpperCase()}</span>
+                            <span className="text-gray-400">{sessionTracks.length}T x {SCENES}S</span>
+                        </div>
+                    )}
                 </div>
-            )}
+            </div>
 
             <div className="flex gap-2 min-h-full">
                 <div className="w-[76px] shrink-0 flex flex-col gap-2 sticky left-0 z-20">
