@@ -2,11 +2,10 @@
 import { Track, TrackType, Device } from './types';
 
 // --- TRACK COLOR SYSTEM (RUBY -> LILAC, SOFT GRADIENT) ---
-const TRACK_RUBY_HUE = 348;
-const TRACK_LILAC_HUE = 274;
+const TRACK_RUBY_HUE = 352;
+const TRACK_LILAC_HUE = 272;
 const TRACK_HUE_MIN = 268;
-const TRACK_HUE_MAX = 352;
-const TRACK_HUE_STAGGER_STEPS = [0, 8, -6, 12, -10, 5, -4, 14];
+const TRACK_HUE_MAX = 354;
 
 const clamp = (value: number, min: number, max: number): number => {
   return Math.min(max, Math.max(min, value));
@@ -72,19 +71,18 @@ export const getTrackColorByPosition = (index: number, total: number, offset = 0
   const t = getGradientT(index, Math.max(1, total));
   const eased = easeInOutSine(t);
 
-  // Adjacent tracks intentionally alternate tonal contrast while staying in ruby-lilac.
-  const patternIndex = Math.abs(index + offset) % TRACK_HUE_STAGGER_STEPS.length;
-  const baseHue = TRACK_RUBY_HUE + ((TRACK_LILAC_HUE - TRACK_RUBY_HUE) * eased);
-  const hueShift = TRACK_HUE_STAGGER_STEPS[patternIndex] + (((offset % 5) - 2) * 0.9);
-  const hue = clamp(baseHue + hueShift, TRACK_HUE_MIN, TRACK_HUE_MAX);
+  // Ordered progressive gradient (no jumps) in the ruby-lilac corridor.
+  const baseHue = TRACK_RUBY_HUE + ((TRACK_LILAC_HUE - TRACK_RUBY_HUE) * t);
+  const offsetHue = offset === 0 ? 0 : (((offset % 7) - 3) * 0.35);
+  const hue = clamp(baseHue + offsetHue, TRACK_HUE_MIN, TRACK_HUE_MAX);
 
-  const saturationBase = 86 - (14 * eased);
-  const saturationSwing = ((index + offset) % 3 === 0) ? 4.5 : (((index + offset) % 3 === 1) ? -3.5 : 1.5);
-  const saturation = clamp(saturationBase + saturationSwing, 62, 92);
+  const saturationBase = 88 - (16 * eased);
+  const saturationOffset = offset === 0 ? 0 : (((offset % 5) - 2) * 0.4);
+  const saturation = clamp(saturationBase + saturationOffset, 64, 92);
 
-  const lightnessBase = 45 + (16 * eased);
-  const lightnessSwing = ((index + offset) % 2 === 0) ? -4.5 : 4.5;
-  const lightness = clamp(lightnessBase + lightnessSwing, 36, 72);
+  const lightnessBase = 43 + (17 * eased);
+  const lightnessOffset = offset === 0 ? 0 : (((offset % 3) - 1) * 0.6);
+  const lightness = clamp(lightnessBase + lightnessOffset, 36, 72);
 
   return hslToHex(hue, saturation, lightness);
 };

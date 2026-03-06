@@ -76,9 +76,21 @@ describe('track color palette', () => {
         const averageDistance = distances.reduce((sum, value) => sum + value, 0) / distances.length;
         const minDistance = Math.min(...distances);
 
-        expect(uniqueCount).toBeGreaterThanOrEqual(44);
-        expect(averageDistance).toBeGreaterThan(14);
-        expect(minDistance).toBeGreaterThan(5);
+        expect(uniqueCount).toBeGreaterThanOrEqual(46);
+        expect(averageDistance).toBeGreaterThan(5.5);
+        expect(minDistance).toBeGreaterThan(1.5);
+    });
+
+    it('keeps ordered progressive hue flow from ruby to lilac without jumps', () => {
+        const total = 48;
+        const hues = Array.from({ length: total }, (_, index) => {
+            const color = getTrackColorByPosition(index, total);
+            return rgbToHue(hexToRgb(color));
+        });
+
+        for (let index = 1; index < hues.length; index += 1) {
+            // +1.2 deg tolerance for RGB/HEX quantization noise.
+            expect(hues[index]).toBeLessThanOrEqual(hues[index - 1] + 1.2);
+        }
     });
 });
-
