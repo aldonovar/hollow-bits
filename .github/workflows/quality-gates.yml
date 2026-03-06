@@ -40,6 +40,10 @@ jobs:
         if: ${{ hashFiles('benchmarks/audio-performance/latest-report.json') != '' }}
         run: npm run perf:gate -- --report benchmarks/audio-performance/latest-report.json --out benchmarks/audio-performance/latest-gate.json
 
+      - name: Session launch gate (report-driven)
+        if: ${{ hashFiles('benchmarks/session-launch/latest-report.json') != '' }}
+        run: npm run launch:gate -- --report benchmarks/session-launch/latest-report.json --out benchmarks/session-launch/latest-gate.json
+
       - name: Upload performance gate artifacts
         if: ${{ always() && hashFiles('benchmarks/audio-performance/latest-report.json') != '' }}
         uses: actions/upload-artifact@v4
@@ -48,3 +52,12 @@ jobs:
           path: |
             benchmarks/audio-performance/latest-report.json
             benchmarks/audio-performance/latest-gate.json
+
+      - name: Upload session launch gate artifacts
+        if: ${{ always() && hashFiles('benchmarks/session-launch/latest-report.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-launch-gate
+          path: |
+            benchmarks/session-launch/latest-report.json
+            benchmarks/session-launch/latest-gate.json

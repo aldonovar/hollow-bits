@@ -5,6 +5,7 @@ import {
     EngineRecordingResult,
     EngineSchedulerMode,
     GraphUpdateStats,
+    SessionLaunchTelemetryEvent,
     SchedulerTelemetrySnapshot
 } from './audioEngine';
 
@@ -64,7 +65,7 @@ export interface EngineAdapter {
 
     getSessionLaunchTime: (quantizeBars?: number) => number;
     getContext: () => AudioContext;
-    launchClip: (track: Track, clip: Clip, launchTime?: number) => void;
+    launchClip: (track: Track, clip: Clip, launchTime?: number) => SessionLaunchTelemetryEvent | null;
     stopTrackClips: (trackId: string, stopAt?: number) => void;
 
     startRecording: (trackId: string, deviceId?: string) => Promise<void>;
@@ -230,7 +231,7 @@ export const engineAdapter: EngineAdapter = {
     },
 
     launchClip(track, clip, launchTime) {
-        audioEngine.launchClip(track, clip, launchTime);
+        return audioEngine.launchClip(track, clip, launchTime);
     },
 
     stopTrackClips(trackId, stopAt) {
@@ -271,6 +272,7 @@ export type {
     EngineRecordingResult,
     EngineSchedulerMode,
     GraphUpdateStats,
+    SessionLaunchTelemetryEvent,
     SchedulerTelemetrySnapshot
 };
 export type { EngineBackendRoute } from '../types';

@@ -43,12 +43,43 @@ export interface SessionTrackWindow {
     totalWidthPx: number;
 }
 
+export interface SessionLaunchTelemetrySample {
+    trackId: string;
+    clipId: string;
+    sceneIndex?: number | null;
+    requestedLaunchTimeSec: number;
+    effectiveLaunchTimeSec: number;
+    launchErrorMs: number;
+    quantized: boolean;
+    wasLate: boolean;
+    capturedAtMs: number;
+}
+
+export interface SessionLaunchTelemetrySummary {
+    sampleCount: number;
+    lateSampleCount: number;
+    avgLaunchErrorMs: number;
+    p95LaunchErrorMs: number;
+    p99LaunchErrorMs: number;
+    maxLaunchErrorMs: number;
+    gateTargetMs: number;
+    gatePass: boolean;
+}
+
 const clamp = (value: number, min: number, max: number): number => {
     return Math.max(min, Math.min(max, value));
 };
 
 const safeNumber = (value: number | undefined | null, fallback = 0): number => {
     return Number.isFinite(value) ? Number(value) : fallback;
+};
+
+const percentile = (values: number[], ratio: number): number => {
+    if (values.length === 0) return 0;
+    const clampedRatio = clamp(ratio, 0, 1);
+    const sorted = [...values].sort((left, right) => left - right);
+    const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * clampedRatio)));
+    return sorted[index];
 };
 
 const computeTrackAreaWidth = (trackCount: number, trackColumnWidthPx: number, trackGapPx: number): number => {
@@ -196,3 +227,39 @@ export const computeLaunchTimingErrorMs = (
     return Math.abs(actual - requested) * 1000;
 };
 
+export const summarizeSessionLaunchTelemetry = (
+    samples: SessionLaunchTelemetrySample[],
+    gateTargetMs = 2
+): SessionLaunchTelemetrySummary => {
+    if (samples.length === 0) {
+        return {
+            sampleCount: 0,
+            lateSampleCount: 0,
+            avgLaunchErrorMs: 0,
+            p95LaunchErrorMs: 0,
+            p99LaunchErrorMs: 0,
+            maxLaunchErrorMs: 0,
+            gateTargetMs: Math.max(0, safeNumber(gateTargetMs, 2)),
+            gatePass: true
+        };
+    }
+
+    const errors = samples.map((sample) => Math.max(0, safeNumber(sample.launchErrorMs, 0)));
+    const errorTotal = errors.reduce((acc, value) => acc + value, 0);
+    const maxLaunchErrorMs = errors.reduce((max, value) => Math.max(max, value), 0);
+    const p95LaunchErrorMs = percentile(errors, 0.95);
+    const p99LaunchErrorMs = percentile(errors, 0.99);
+    const lateSampleCount = samples.filter((sample) => sample.wasLate).length;
+    const gateLimit = Math.max(0, safeNumber(gateTargetMs, 2));
+
+    return {
+        sampleCount: samples.length,
+        lateSampleCount,
+        avgLaunchErrorMs: errorTotal / samples.length,
+        p95LaunchErrorMs,
+        p99LaunchErrorMs,
+        maxLaunchErrorMs,
+        gateTargetMs: gateLimit,
+        gatePass: p95LaunchErrorMs <= gateLimit
+    };
+};

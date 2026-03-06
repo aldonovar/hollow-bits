@@ -147,6 +147,18 @@ export interface EngineRecordingResult {
     estimatedLatencyMs: number;
 }
 
+export interface SessionLaunchTelemetryEvent {
+    trackId: string;
+    clipId: string;
+    requestedLaunchTimeSec: number;
+    effectiveLaunchTimeSec: number;
+    launchErrorMs: number;
+    queuedAheadMs: number;
+    quantized: boolean;
+    wasLate: boolean;
+    capturedAtMs: number;
+}
+
 export type EngineSchedulerMode = 'interval' | 'worklet-clock';
 
 export interface SchedulerTelemetrySnapshot {
@@ -3659,14 +3671,27 @@ class AudioEngine {
     }
 
     // --- SESSION VIEW ---
-    launchClip(track: Track, clip: Clip, launchTime?: number) {
-        if (!clip.buffer) return;
+    launchClip(track: Track, clip: Clip, launchTime?: number): SessionLaunchTelemetryEvent | null {
+        if (!clip.buffer) return null;
 
         const ctx = this.getContext();
         const clipGain = ctx.createGain();
         clipGain.gain.value = this.getClipGain(clip);
         const sessionKey = `session_${track.id}_${clip.id}`;
-        const startAt = Math.max(ctx.currentTime, launchTime ?? ctx.currentTime);
+        const requestedLaunchTimeSec = typeof launchTime === 'number' ? launchTime : ctx.currentTime;
+        const startAt = Math.max(ctx.currentTime, requestedLaunchTimeSec);
+        const launchErrorMs = Math.abs(startAt - requestedLaunchTimeSec) * 1000;
+        const launchTelemetry: SessionLaunchTelemetryEvent = {
+            trackId: track.id,
+            clipId: clip.id,
+            requestedLaunchTimeSec,
+            effectiveLaunchTimeSec: startAt,
+            launchErrorMs,
+            queuedAheadMs: Math.max(0, (requestedLaunchTimeSec - ctx.currentTime) * 1000),
+            quantized: typeof launchTime === 'number',
+            wasLate: startAt > requestedLaunchTimeSec + 0.0005,
+            capturedAtMs: Date.now()
+        };
 
         this.stopTrackClips(track.id, startAt); // Exclusive playback per track
 
@@ -3709,7 +3734,7 @@ class AudioEngine {
                     // already disconnected
                 }
             }
-            return;
+            return launchTelemetry;
         }
 
         const source = ctx.createBufferSource();
@@ -3734,6 +3759,8 @@ class AudioEngine {
             clipGain.disconnect();
             this.activeSources.delete(sessionKey);
         };
+
+        return launchTelemetry;
     }
 
     stopTrackClips(trackId: string, stopAt?: number) {

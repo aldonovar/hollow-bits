@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
     assessSessionOverload,
     buildSessionTrackWindow,
-    computeLaunchTimingErrorMs
+    computeLaunchTimingErrorMs,
+    summarizeSessionLaunchTelemetry
 } from '../../services/sessionPerformanceService';
 
 describe('sessionPerformanceService.buildSessionTrackWindow', () => {
@@ -102,3 +103,61 @@ describe('sessionPerformanceService.computeLaunchTimingErrorMs', () => {
     });
 });
 
+describe('sessionPerformanceService.summarizeSessionLaunchTelemetry', () => {
+    it('passes launch gate when p95 stays under 2ms', () => {
+        const summary = summarizeSessionLaunchTelemetry([
+            {
+                trackId: 't1',
+                clipId: 'c1',
+                requestedLaunchTimeSec: 10,
+                effectiveLaunchTimeSec: 10.0004,
+                launchErrorMs: 0.4,
+                quantized: true,
+                wasLate: false,
+                capturedAtMs: 1
+            },
+            {
+                trackId: 't1',
+                clipId: 'c2',
+                requestedLaunchTimeSec: 12,
+                effectiveLaunchTimeSec: 12.0012,
+                launchErrorMs: 1.2,
+                quantized: true,
+                wasLate: true,
+                capturedAtMs: 2
+            }
+        ], 2);
+
+        expect(summary.sampleCount).toBe(2);
+        expect(summary.gatePass).toBe(true);
+        expect(summary.p95LaunchErrorMs).toBeLessThanOrEqual(2);
+    });
+
+    it('fails launch gate when p95 exceeds target', () => {
+        const summary = summarizeSessionLaunchTelemetry([
+            {
+                trackId: 't1',
+                clipId: 'c1',
+                requestedLaunchTimeSec: 8,
+                effectiveLaunchTimeSec: 8.0008,
+                launchErrorMs: 0.8,
+                quantized: true,
+                wasLate: false,
+                capturedAtMs: 1
+            },
+            {
+                trackId: 't2',
+                clipId: 'c2',
+                requestedLaunchTimeSec: 8,
+                effectiveLaunchTimeSec: 8.0042,
+                launchErrorMs: 4.2,
+                quantized: true,
+                wasLate: true,
+                capturedAtMs: 2
+            }
+        ], 2);
+
+        expect(summary.gatePass).toBe(false);
+        expect(summary.p95LaunchErrorMs).toBeGreaterThan(2);
+    });
+});
