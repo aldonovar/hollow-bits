@@ -24,12 +24,30 @@ interface CreateTrackOptions {
     soloSafe?: boolean;
     automationMode?: Track['automationMode'];
     automationLanes?: Track['automationLanes'];
+    recordingTakes?: Track['recordingTakes'];
+    takeLanes?: Track['takeLanes'];
+    activeCompLaneId?: Track['activeCompLaneId'];
+    punchRange?: Track['punchRange'];
     micSettings?: Track['micSettings'];
 }
 
 const cloneTracksCollection = <T>(source: T[] | undefined): T[] => {
     if (!source) return [];
     return [...source];
+};
+
+const cloneRecordingTakes = (source: Track['recordingTakes'] | undefined): NonNullable<Track['recordingTakes']> => {
+    if (!source) return [];
+    return source.map((take) => ({ ...take }));
+};
+
+const cloneTakeLanes = (source: Track['takeLanes'] | undefined): NonNullable<Track['takeLanes']> => {
+    if (!source) return [];
+    return source.map((lane) => ({
+        ...lane,
+        takeIds: [...lane.takeIds],
+        compSegments: lane.compSegments ? lane.compSegments.map((segment) => ({ ...segment })) : undefined
+    }));
 };
 
 const resolveDefaultAudioListening = (): { monitor: Track['monitor']; monitoringEnabled: boolean } => {
@@ -81,6 +99,10 @@ export const createTrack = (options: CreateTrackOptions): Track => {
         soloSafe: options.soloSafe ?? false,
         automationMode: options.automationMode ?? 'read',
         automationLanes: options.automationLanes ? [...options.automationLanes] : undefined,
+        recordingTakes: cloneRecordingTakes(options.recordingTakes),
+        takeLanes: cloneTakeLanes(options.takeLanes),
+        activeCompLaneId: options.activeCompLaneId,
+        punchRange: options.punchRange ? { ...options.punchRange } : undefined,
         micSettings: options.micSettings
             ? { ...options.micSettings }
             : {
@@ -100,6 +122,18 @@ export const withTrackRuntimeDefaults = (track: Track): Track => {
         sendModes: track.sendModes || {},
         soloSafe: track.soloSafe ?? false,
         automationMode: track.automationMode ?? 'read',
+        recordingTakes: cloneRecordingTakes(track.recordingTakes),
+        takeLanes: cloneTakeLanes(track.takeLanes),
+        activeCompLaneId: track.activeCompLaneId,
+        punchRange: track.punchRange
+            ? { ...track.punchRange }
+            : {
+                enabled: false,
+                inBar: 1,
+                outBar: 2,
+                preRollBars: 1,
+                countInBars: 0
+            },
         micSettings: track.micSettings
             ? { ...track.micSettings }
             : {

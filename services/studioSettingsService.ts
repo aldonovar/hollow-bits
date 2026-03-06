@@ -115,6 +115,16 @@ const sanitizeBenchmarkHistory = (history: unknown): AudioPerformanceBenchmarkHi
                 entry.gateStatus === 'fail' || entry.gateStatus === 'warn'
                     ? entry.gateStatus
                     : 'pass';
+            const recommendedRoute: EngineBackendRoute =
+                entry.recommendedRoute === 'worker-dsp'
+                    || entry.recommendedRoute === 'native-sidecar'
+                    || entry.recommendedRoute === 'webaudio'
+                    ? entry.recommendedRoute
+                    : 'webaudio';
+            const recommendedRouteImplementationStatus: AudioPerformanceBenchmarkHistoryRecord['recommendedRouteImplementationStatus'] =
+                entry.recommendedRouteImplementationStatus === 'native'
+                    ? 'native'
+                    : 'simulated';
 
             return {
                 id: entry.id || `benchmark-${index}`,
@@ -130,14 +140,8 @@ const sanitizeBenchmarkHistory = (history: unknown): AudioPerformanceBenchmarkHi
                 maxWorkletP99TickDriftMs: Number.isFinite(entry.maxWorkletP99TickDriftMs) ? Number(entry.maxWorkletP99TickDriftMs) : 0,
                 maxWorkletP95LagMs: Number.isFinite(entry.maxWorkletP95LagMs) ? Number(entry.maxWorkletP95LagMs) : 0,
                 maxWorkletP99LoopMs: Number.isFinite(entry.maxWorkletP99LoopMs) ? Number(entry.maxWorkletP99LoopMs) : 0,
-                recommendedRoute:
-                    entry.recommendedRoute === 'worker-dsp' || entry.recommendedRoute === 'native-sidecar'
-                        ? entry.recommendedRoute
-                        : 'webaudio',
-                recommendedRouteImplementationStatus:
-                    entry.recommendedRouteImplementationStatus === 'native'
-                        ? 'native'
-                        : 'simulated'
+                recommendedRoute,
+                recommendedRouteImplementationStatus
             };
         })
         .sort((a, b) => b.createdAt - a.createdAt);

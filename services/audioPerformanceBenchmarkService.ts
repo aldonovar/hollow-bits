@@ -70,8 +70,8 @@ export interface AudioPerformanceBenchmarkAssessment {
 
 export interface AudioPerformanceBenchmarkCaseResult {
     caseConfig: AudioPerformanceBenchmarkCaseConfig;
-    route: EngineBackendRoute;
-    routeImplementationStatus: EngineRouteImplementationStatus;
+    route?: EngineBackendRoute;
+    routeImplementationStatus?: EngineRouteImplementationStatus;
     status: AudioPerformanceBenchmarkStatus;
     metrics: AudioPerformanceBenchmarkCaseMetrics;
     issues: string[];
@@ -100,8 +100,8 @@ export interface AudioPerformanceBenchmarkReport {
     restoreFailed: boolean;
     restoreError: string | null;
     comparisons: AudioPerformanceBenchmarkABComparison[];
-    routeEvaluations: Block1RouteEvaluation[];
-    recommendedRoute: EngineBackendRoute;
+    routeEvaluations?: Block1RouteEvaluation[];
+    recommendedRoute?: EngineBackendRoute;
     results: AudioPerformanceBenchmarkCaseResult[];
 }
 
@@ -452,24 +452,25 @@ const deriveScenarioKey = (caseConfig: AudioPerformanceBenchmarkCaseConfig): str
     const route = resolveCaseRoute(caseConfig);
     const intervalPrefix = `${route}-interval-`;
     const workletPrefix = `${route}-worklet-clock-`;
+    const withRoutePrefix = (value: string): string => route === 'webaudio' ? value : `${route}:${value}`;
 
     if (caseConfig.id.startsWith(intervalPrefix)) {
-        return `${route}:${caseConfig.id.replace(intervalPrefix, '')}`;
+        return withRoutePrefix(caseConfig.id.replace(intervalPrefix, ''));
     }
 
     if (caseConfig.id.startsWith(workletPrefix)) {
-        return `${route}:${caseConfig.id.replace(workletPrefix, '')}`;
+        return withRoutePrefix(caseConfig.id.replace(workletPrefix, ''));
     }
 
     if (caseConfig.id.startsWith('interval-')) {
-        return `${route}:${caseConfig.id.replace('interval-', '')}`;
+        return withRoutePrefix(caseConfig.id.replace('interval-', ''));
     }
 
     if (caseConfig.id.startsWith('worklet-')) {
-        return `${route}:${caseConfig.id.replace('worklet-', '')}`;
+        return withRoutePrefix(caseConfig.id.replace('worklet-', ''));
     }
 
-    return `${route}:${caseConfig.id}`;
+    return withRoutePrefix(caseConfig.id);
 };
 
 const getStatusWeight = (status: AudioPerformanceBenchmarkStatus): number => {
@@ -603,7 +604,7 @@ const buildRouteEvaluations = (results: AudioPerformanceBenchmarkCaseResult[]): 
     const perRoute = new Map<EngineBackendRoute, AudioPerformanceBenchmarkCaseResult[]>();
 
     results.forEach((result) => {
-        const route = result.route;
+        const route = result.route || resolveCaseRoute(result.caseConfig);
         const current = perRoute.get(route) || [];
         current.push(result);
         perRoute.set(route, current);
@@ -814,8 +815,8 @@ export const createAudioPerformanceBenchmarkHistoryEntry = (
         maxWorkletP99TickDriftMs: gate.summary.maxWorkletP99TickDriftMs,
         maxWorkletP95LagMs: gate.summary.maxWorkletP95LagMs,
         maxWorkletP99LoopMs: gate.summary.maxWorkletP99LoopMs,
-        recommendedRoute: report.recommendedRoute,
-        recommendedRouteImplementationStatus: engineAdapter.getBackendImplementationStatus(report.recommendedRoute)
+        recommendedRoute: report.recommendedRoute || 'webaudio',
+        recommendedRouteImplementationStatus: engineAdapter.getBackendImplementationStatus(report.recommendedRoute || 'webaudio')
     };
 };
 

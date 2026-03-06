@@ -463,7 +463,7 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                 setStatusMessage(`Benchmark completado con warnings de gate: ${gate.warnings[0] || 'revision recomendada'} (${elapsedSeconds}s).`);
             } else {
                 setStatusTone('ok');
-                setStatusMessage(`Benchmark extremo completado en PASS: ${report.passedCases}/${report.totalCases} casos (${elapsedSeconds}s). Ruta recomendada: ${report.recommendedRoute}.`);
+                setStatusMessage(`Benchmark extremo completado en PASS: ${report.passedCases}/${report.totalCases} casos (${elapsedSeconds}s). Ruta recomendada: ${report.recommendedRoute || 'webaudio'}.`);
             }
         } catch (error) {
             if (error instanceof Error && error.name === 'AbortError') {
@@ -843,9 +843,9 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                     <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                                         <div>
                                             <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-gray-500">
-                                                <Cpu size={12} /> Benchmark extremo A/B scheduler
+                                                <Cpu size={12} /> Benchmark extremo Bloque 1 (rutas + scheduler)
                                             </div>
-                                            <p className="text-xs text-gray-300 mt-1">Compara scheduler interval vs worklet-clock en escenarios medium/high/extreme y reporta jitter p95/p99, event-loop lag y writes de grafo.</p>
+                                            <p className="text-xs text-gray-300 mt-1">Ejecuta matriz comparativa en rutas WebAudio, Worker DSP y Native Sidecar; incluye A/B interval vs worklet-clock, jitter, lag, CPU y decision tecnica.</p>
                                         </div>
                                         <div className="flex items-center gap-2">
                                             {isRunningPerformanceBenchmark && (
@@ -951,6 +951,22 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                                         </div>
                                                     )}
 
+                                                    {(benchmarkReport.routeEvaluations || []).length > 0 && (
+                                                        <div className="rounded-sm border border-white/10 bg-black/25 p-2 space-y-1">
+                                                            <div className="text-[9px] uppercase tracking-wider text-gray-400">
+                                                                Route Decision Matrix · recomendado <span className="text-daw-cyan font-mono">{benchmarkReport.recommendedRoute || 'webaudio'}</span>
+                                                            </div>
+                                                            {(benchmarkReport.routeEvaluations || []).map((entry) => (
+                                                                <div key={entry.route} className="text-[9px] text-gray-200 flex items-center justify-between gap-2">
+                                                                    <span className="font-mono uppercase">{entry.route}</span>
+                                                                    <span>
+                                                                        {entry.implementationStatus} · CPU +{(entry.cpuAudioP95ImprovementRatio * 100).toFixed(1)}% · dropouts -{(entry.dropoutReductionRatio * 100).toFixed(1)}% · drift p99 {entry.driftP99Ms.toFixed(1)}ms
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+
                                                     {benchmarkReport.comparisons.length > 0 && (
                                                         <div className="rounded-sm border border-white/10 bg-black/25 p-2 space-y-1">
                                                             <div className="text-[9px] uppercase tracking-wider text-gray-400">A/B Interval vs Worklet</div>
@@ -1002,6 +1018,7 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                                             <div key={entry.id} className="text-[9px] text-gray-200 flex items-center justify-between gap-2 border border-white/10 rounded-sm px-2 py-1 bg-black/20">
                                                                 <span className="font-mono">{new Date(entry.createdAt).toLocaleString()}</span>
                                                                 <span className="uppercase">{entry.gateStatus}</span>
+                                                                <span>route {entry.recommendedRoute || 'webaudio'}</span>
                                                                 <span>win {(entry.workletWinRate * 100).toFixed(0)}%</span>
                                                                 <span>d95 {entry.maxWorkletP95TickDriftMs.toFixed(1)}ms</span>
                                                             </div>
@@ -1091,6 +1108,34 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                     </div>
                                 </div>
 
+                                <div className="rounded-sm border border-white/10 bg-[#131620] p-4 space-y-3">
+                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                        <div>
+                                            <div className="text-[10px] uppercase tracking-wider text-gray-500">Engine Backend Route (Bloque 1)</div>
+                                            <p className="text-xs text-gray-300 mt-1">Permite comparar WebAudio vs Worker DSP vs Native Sidecar sin romper la UI actual.</p>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <select
+                                                value={backendRouteDraft}
+                                                onChange={(event) => setBackendRouteDraft(event.target.value as EngineBackendRoute)}
+                                                className="h-9 rounded-sm border border-white/10 bg-[#12141b] px-3 text-xs text-gray-200 outline-none focus:border-daw-violet/60"
+                                            >
+                                                {backendRouteOptions.map((route) => (
+                                                    <option key={route.route} value={route.route}>
+                                                        {route.label} · {route.status}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <button
+                                                onClick={applyBackendRoute}
+                                                className="h-9 px-3 rounded-sm border border-daw-violet/45 bg-daw-violet/10 text-[10px] font-bold uppercase tracking-wider text-daw-violet hover:text-white"
+                                            >
+                                                Aplicar Route
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
                                     <MetricCard label="Engine Rate" value={`${Math.round(engineStats.sampleRate)} Hz`} icon={AudioLines} />
                                     <MetricCard label="Current Latency" value={formatLatencyMs(engineStats.latency)} icon={Clock3} />
@@ -1118,6 +1163,13 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                     <MetricCard label="Queue Entries" value={`${Math.round(engineStats.schedulerQueueEntries || 0)}`} icon={Gauge} />
                                     <MetricCard label="Queue Active" value={`${Math.round(engineStats.schedulerQueueActive || 0)}`} icon={Cpu} />
                                     <MetricCard label="Queue Cand P95" value={`${(engineStats.schedulerQueueP95Candidates || 0).toFixed(1)}`} icon={Activity} />
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                    <MetricCard label="CPU Load P95" value={`${(engineStats.schedulerCpuLoadP95Percent || 0).toFixed(1)} %`} icon={Cpu} />
+                                    <MetricCard label="Overrun Ratio" value={`${((engineStats.schedulerOverrunRatio || 0) * 100).toFixed(1)} %`} icon={Gauge} />
+                                    <MetricCard label="Underruns" value={`${Math.round(engineStats.schedulerUnderrunCount || 0)}`} icon={AlertCircle} />
+                                    <MetricCard label="Dropouts" value={`${Math.round(engineStats.schedulerDropoutCount || 0)}`} icon={AlertCircle} />
                                 </div>
 
                                 {engineStats.sampleRateMismatch && (

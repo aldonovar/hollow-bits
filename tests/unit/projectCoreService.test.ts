@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createTrack } from '../../services/projectCoreService';
+import { createTrack, withTrackRuntimeDefaults } from '../../services/projectCoreService';
 import { TrackType } from '../../types';
 
 const STUDIO_SETTINGS_STORAGE_KEY = 'hollowbits.studio-settings.v1';
@@ -88,5 +88,25 @@ describe('projectCoreService.createTrack', () => {
 
         expect(track.monitor).toBe('auto');
         expect(track.micSettings?.monitoringEnabled).toBe(false);
+    });
+
+    it('applies runtime defaults for recording takes, lanes and punch range', () => {
+        seedDefaultListenMode('manual');
+
+        const track = withTrackRuntimeDefaults(createTrack({
+            id: 'audio-runtime-defaults',
+            name: 'Audio Runtime Defaults',
+            type: TrackType.AUDIO
+        }));
+
+        expect(track.recordingTakes).toEqual([]);
+        expect(track.takeLanes).toEqual([]);
+        expect(track.punchRange).toEqual({
+            enabled: false,
+            inBar: 1,
+            outBar: 2,
+            preRollBars: 1,
+            countInBars: 0
+        });
     });
 });

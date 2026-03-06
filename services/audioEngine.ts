@@ -22,6 +22,8 @@ interface RecordingSession {
     mediaRecorder: MediaRecorder;
     recordedChunks: Blob[];
     stream: MediaStream;
+    startedAtContextTime: number;
+    estimatedLatencyMs: number;
 }
 
 interface MonitoringSession {
@@ -135,6 +137,14 @@ export interface EngineDiagnostics {
     schedulerQueueEntries?: number;
     schedulerQueueActive?: number;
     schedulerQueueP95Candidates?: number;
+}
+
+export interface EngineRecordingResult {
+    blob: Blob;
+    buffer: AudioBuffer;
+    startedAtContextTime: number;
+    stoppedAtContextTime: number;
+    estimatedLatencyMs: number;
 }
 
 export type EngineSchedulerMode = 'interval' | 'worklet-clock';
@@ -321,6 +331,15 @@ class AudioEngine {
 
     private finiteOr(value: number, fallback: number): number {
         return Number.isFinite(value) ? value : fallback;
+    }
+
+    private getEstimatedRecordingLatencyMs(): number {
+        if (!this.ctx) return 0;
+
+        const contextWithOutputLatency = this.ctx as AudioContext & { outputLatency?: number };
+        const baseLatency = Math.max(0, this.ctx.baseLatency || 0);
+        const outputLatency = Math.max(0, contextWithOutputLatency.outputLatency || 0);
+        return (baseLatency + outputLatency) * 1000;
     }
 
     private shouldUpdateNumber(prev: number | undefined, next: number, epsilon: number = 0.0005): boolean {
@@ -3512,16 +3531,20 @@ class AudioEngine {
             this.recordingSessions.set(trackId, {
                 mediaRecorder,
                 recordedChunks,
-                stream
+                stream,
+                startedAtContextTime: this.ctx.currentTime,
+                estimatedLatencyMs: this.getEstimatedRecordingLatencyMs()
             });
         } catch (e) {
             console.error("Mic access failed", e);
         }
     }
 
-    async stopRecording(trackId: string): Promise<{ blob: Blob, buffer: AudioBuffer } | null> {
+    async stopRecording(trackId: string): Promise<EngineRecordingResult | null> {
         const session = this.recordingSessions.get(trackId);
         if (!session) return null;
+
+        const stoppedAtContextTime = this.ctx?.currentTime || session.startedAtContextTime;
 
         return new Promise((resolve) => {
             const cleanup = () => {
@@ -3536,7 +3559,13 @@ class AudioEngine {
                     const blob = new Blob(session.recordedChunks, { type: 'audio/webm' });
                     const arrayBuffer = await blob.arrayBuffer();
                     const buffer = await this.decodeAudioData(arrayBuffer);
-                    resolve({ blob, buffer });
+                    resolve({
+                        blob,
+                        buffer,
+                        startedAtContextTime: session.startedAtContextTime,
+                        stoppedAtContextTime,
+                        estimatedLatencyMs: session.estimatedLatencyMs
+                    });
                 } catch (error) {
                     console.error('Failed to finalize recording', error);
                     resolve(null);

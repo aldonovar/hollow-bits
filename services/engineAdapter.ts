@@ -2,6 +2,7 @@
 import {
     audioEngine,
     EngineDiagnostics,
+    EngineRecordingResult,
     EngineSchedulerMode,
     GraphUpdateStats,
     SchedulerTelemetrySnapshot
@@ -67,7 +68,8 @@ export interface EngineAdapter {
     stopTrackClips: (trackId: string, stopAt?: number) => void;
 
     startRecording: (trackId: string, deviceId?: string) => Promise<void>;
-    stopRecording: (trackId: string) => Promise<{ blob: Blob; buffer: AudioBuffer } | null>;
+    stopRecording: (trackId: string) => Promise<EngineRecordingResult | null>;
+    finalizeRecording: (trackId: string) => Promise<EngineRecordingResult | null>;
     getActiveRecordingTrackIds: () => string[];
 
     decodeAudioData: (arrayBuffer: ArrayBuffer) => Promise<AudioBuffer>;
@@ -243,6 +245,10 @@ export const engineAdapter: EngineAdapter = {
         return audioEngine.stopRecording(trackId);
     },
 
+    finalizeRecording(trackId) {
+        return audioEngine.stopRecording(trackId);
+    },
+
     getActiveRecordingTrackIds() {
         return audioEngine.getActiveRecordingTrackIds();
     },
@@ -262,6 +268,7 @@ export const engineAdapter: EngineAdapter = {
 
 export type {
     EngineDiagnostics,
+    EngineRecordingResult,
     EngineSchedulerMode,
     GraphUpdateStats,
     SchedulerTelemetrySnapshot

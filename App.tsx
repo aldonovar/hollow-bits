@@ -56,6 +56,10 @@ import {
     positionToBarTime,
     shouldRestartAtSongBoundary
 } from './services/transportStateService';
+import {
+    buildRecordingTakeCommit,
+    commitRecordingTakeBatch
+} from './services/recordingTakeService';
 import { useUndoRedo } from './hooks/useUndoRedo';
 import {
     FolderInput, Settings, Cpu, LayoutGrid, Search, Users, Layers, Sliders, Sparkles, AlertTriangle, Undo2, Redo2, PlayCircle, Folder, HardDrive, Save, Trash2, Piano
@@ -152,6 +156,11 @@ interface MixSnapshot {
     capturedAt: number;
     masterVolumeDb: number;
     tracks: Record<string, TrackMixSnapshot>;
+}
+
+interface RecordingSessionMeta {
+    recordingStartBar: number;
+    latencyCompensationBars: number;
 }
 
 type ToolPanel = 'browser' | 'ai' | 'scanner' | null;
@@ -319,7 +328,8 @@ const App: React.FC = () => {
     const fileInputRef = useRef<HTMLInputElement>(null);
     // Project Input Ref removed
     const timelineContainerRef = useRef<HTMLDivElement>(null);
-    const recordingStartBarRef = useRef(1);
+    const recordingSessionMetaRef = useRef<Map<string, RecordingSessionMeta>>(new Map());
+    const finalizeRecordingsPromiseRef = useRef<Promise<void> | null>(null);
     const loopOnceRemainingRef = useRef(0);
     const automationTouchUntilRef = useRef<Map<string, number>>(new Map());
     const automationLatchActiveRef = useRef<Set<string>>(new Set());
@@ -336,6 +346,9 @@ const App: React.FC = () => {
     const latestTracksRef = useRef<Track[]>(tracks);
     const trackSyncQueuedRef = useRef(false);
     const trackSyncFrameRef = useRef<number | null>(null);
+    const boundaryTransitionInFlightRef = useRef(false);
+    const finalizeActiveRecordingsRef = useRef<(() => Promise<void>) | null>(null);
+    const hasActiveRecordingSessionsRef = useRef<(() => boolean) | null>(null);
 
     // Audio Lock Ref (Prevents double-fire on rapid clicks)
     const isPlayingRef = useRef(false);
@@ -717,18 +730,20 @@ const App: React.FC = () => {
 
                 if (currentProjectTime >= endSeconds && endSeconds > 0) {
                     const loopAction = getLoopEndAction(transport.loopMode, loopOnceRemainingRef.current);
+                    const applyBoundaryAction = (): boolean => {
+                        if (loopAction.action === 'restart') {
+                            loopOnceRemainingRef.current = loopAction.nextOnceRemaining;
+                            engineAdapter.seek(0, tracks, transport.bpm);
+                            setTransport((prev: TransportState) => ({
+                                ...prev,
+                                currentBar: 1,
+                                currentBeat: 1,
+                                currentSixteenth: 1,
+                                ...(loopAction.nextLoopMode ? { loopMode: loopAction.nextLoopMode } : {})
+                            }));
+                            return false;
+                        }
 
-                    if (loopAction.action === 'restart') {
-                        loopOnceRemainingRef.current = loopAction.nextOnceRemaining;
-                        engineAdapter.seek(0, tracks, transport.bpm);
-                        setTransport((prev: TransportState) => ({
-                            ...prev,
-                            currentBar: 1,
-                            currentBeat: 1,
-                            currentSixteenth: 1,
-                            ...(loopAction.nextLoopMode ? { loopMode: loopAction.nextLoopMode } : {})
-                        }));
-                    } else {
                         loopOnceRemainingRef.current = loopAction.nextOnceRemaining;
                         engineAdapter.stop(true);
                         isPlayingRef.current = false;
@@ -742,6 +757,37 @@ const App: React.FC = () => {
                             currentSixteenth: 1,
                             ...(loopAction.nextLoopMode ? { loopMode: loopAction.nextLoopMode } : {})
                         }));
+                        return true;
+                    };
+
+                    if (boundaryTransitionInFlightRef.current) {
+                        animationFrame = requestAnimationFrame(checkLoopAndEnd);
+                        return;
+                    }
+
+                    const requiresFinalize = hasActiveRecordingSessionsRef.current?.() || false;
+                    if (requiresFinalize) {
+                        boundaryTransitionInFlightRef.current = true;
+                        void (async () => {
+                            try {
+                                const finalizeFn = finalizeActiveRecordingsRef.current;
+                                if (finalizeFn) {
+                                    await finalizeFn();
+                                }
+
+                                const shouldStop = applyBoundaryAction();
+                                if (!shouldStop) {
+                                    animationFrame = requestAnimationFrame(checkLoopAndEnd);
+                                }
+                            } finally {
+                                boundaryTransitionInFlightRef.current = false;
+                            }
+                        })();
+                        return;
+                    }
+
+                    const shouldStop = applyBoundaryAction();
+                    if (shouldStop) {
                         return;
                     }
                 }
@@ -754,6 +800,12 @@ const App: React.FC = () => {
         }
         return () => cancelAnimationFrame(animationFrame);
     }, [transport.isPlaying, transport.bpm, transport.loopMode, tracks, getProjectEndBar]);
+
+    useEffect(() => {
+        if (!transport.isPlaying) {
+            boundaryTransitionInFlightRef.current = false;
+        }
+    }, [transport.isPlaying]);
 
     useEffect(() => {
         engineAdapter.setMasterPitch(transport.masterTranspose);
@@ -840,65 +892,101 @@ const App: React.FC = () => {
         await playFromTransportCursor(commandToken);
     }, [beginTransportCommand, playFromTransportCursor]);
 
+    const hasActiveRecordingSessions = useCallback((): boolean => {
+        return transport.isRecording || engineAdapter.getActiveRecordingTrackIds().length > 0;
+    }, [transport.isRecording]);
+
     const finalizeActiveRecordings = useCallback(async () => {
-        const activeRecordingTrackIds = new Set(engineAdapter.getActiveRecordingTrackIds());
-        if (activeRecordingTrackIds.size === 0) {
-            setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
+        if (finalizeRecordingsPromiseRef.current) {
+            await finalizeRecordingsPromiseRef.current;
             return;
         }
 
-        const recordedClipEntries: Array<{ trackId: string; clip: Clip }> = [];
+        const finalizeTask = (async () => {
+            const activeRecordingTrackIds = engineAdapter.getActiveRecordingTrackIds();
+            if (activeRecordingTrackIds.length === 0) {
+                recordingSessionMetaRef.current.clear();
+                setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
+                return;
+            }
 
-        for (const track of tracks) {
-            if (!activeRecordingTrackIds.has(track.id)) continue;
+            const trackById = new Map(latestTracksRef.current.map((track) => [track.id, track]));
+            const recordingCommits: ReturnType<typeof buildRecordingTakeCommit>[] = [];
+            const finalizeErrors: string[] = [];
+            const secondsPerBar = getSecondsPerBar(transport.bpm);
 
-            const result = await engineAdapter.stopRecording(track.id);
-            if (!result) continue;
+            for (const trackId of activeRecordingTrackIds) {
+                const track = trackById.get(trackId);
+                const sessionMeta = recordingSessionMetaRef.current.get(trackId);
+                const result = await engineAdapter.finalizeRecording(trackId);
+                recordingSessionMetaRef.current.delete(trackId);
 
-            const hash = await assetDb.saveFile(result.blob);
-            recordedClipEntries.push({
-                trackId: track.id,
-                clip: {
-                    id: `rec-${Date.now()}-${track.id}`,
-                    name: `Audio REC ${new Date().toLocaleTimeString()}`,
-                    color: track.color,
-                    start: recordingStartBarRef.current,
-                    length: result.buffer.duration / getSecondsPerBar(transport.bpm),
-                    buffer: result.buffer,
-                    sourceId: hash,
-                    notes: [],
-                    originalBpm: transport.bpm,
-                    offset: 0,
-                    fadeIn: 0,
-                    fadeOut: 0,
-                    gain: 1,
-                    playbackRate: 1
+                if (!result) {
+                    finalizeErrors.push(`No se obtuvo audio final para track ${trackId}.`);
+                    continue;
                 }
-            });
+
+                if (!track) {
+                    finalizeErrors.push(`La pista ${trackId} ya no existe; se descarta la toma finalizada.`);
+                    continue;
+                }
+
+                try {
+                    const hash = await assetDb.saveFile(result.blob);
+                    const fallbackStartBar = Math.max(1, 1 + (result.startedAtContextTime / secondsPerBar));
+                    const fallbackCompensationBars = Math.max(0, (result.estimatedLatencyMs / 1000) / secondsPerBar);
+
+                    recordingCommits.push(buildRecordingTakeCommit({
+                        track,
+                        sourceId: hash,
+                        buffer: result.buffer,
+                        bpm: transport.bpm,
+                        recordingStartBar: sessionMeta?.recordingStartBar ?? fallbackStartBar,
+                        latencyCompensationBars: sessionMeta?.latencyCompensationBars ?? fallbackCompensationBars,
+                        recordedAt: Date.now(),
+                        idFactory: buildRuntimeId
+                    }));
+                } catch (error) {
+                    console.error(`No se pudo persistir la toma grabada en ${track.name}.`, error);
+                    finalizeErrors.push(`Fallo al persistir toma en ${track.name}.`);
+                }
+            }
+
+            if (recordingCommits.length > 0) {
+                applyTrackMutation((prevTracks) => commitRecordingTakeBatch(prevTracks, recordingCommits), { recolor: false });
+            }
+
+            if (finalizeErrors.length > 0) {
+                console.warn('[Recording] Finalize completed with issues:', finalizeErrors);
+            }
+
+            setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
+        })();
+
+        finalizeRecordingsPromiseRef.current = finalizeTask;
+        try {
+            await finalizeTask;
+        } finally {
+            if (finalizeRecordingsPromiseRef.current === finalizeTask) {
+                finalizeRecordingsPromiseRef.current = null;
+            }
         }
+    }, [applyTrackMutation, transport.bpm]);
 
-        if (recordedClipEntries.length > 0) {
-            applyTrackMutation((prevTracks) => prevTracks.map(track => {
-                const clipsToAdd = recordedClipEntries
-                    .filter(entry => entry.trackId === track.id)
-                    .map(entry => entry.clip);
+    useEffect(() => {
+        finalizeActiveRecordingsRef.current = finalizeActiveRecordings;
+    }, [finalizeActiveRecordings]);
 
-                return clipsToAdd.length > 0
-                    ? { ...track, clips: [...track.clips, ...clipsToAdd] }
-                    : track;
-            }), { recolor: false });
-        }
-
-        setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
-    }, [applyTrackMutation, tracks, transport.bpm]);
+    useEffect(() => {
+        hasActiveRecordingSessionsRef.current = hasActiveRecordingSessions;
+    }, [hasActiveRecordingSessions]);
 
     const handlePause = useCallback(async () => {
         const commandToken = beginTransportCommand();
         const isTransportRunning = isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying;
 
         if (isTransportRunning) {
-            const hasActiveRecordings = transport.isRecording || engineAdapter.getActiveRecordingTrackIds().length > 0;
-            if (hasActiveRecordings) {
+            if (hasActiveRecordingSessions()) {
                 await finalizeActiveRecordings();
             }
 
@@ -944,12 +1032,12 @@ const App: React.FC = () => {
             currentBeat: fallbackPausePosition.currentBeat,
             currentSixteenth: fallbackPausePosition.currentSixteenth
         }));
-    }, [beginTransportCommand, transport.isPlaying, transport.isRecording, transport.bpm, finalizeActiveRecordings, isTransportCommandCurrent, playFromTransportCursor]);
+    }, [beginTransportCommand, transport.isPlaying, transport.bpm, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent, playFromTransportCursor]);
 
     const handleStop = useCallback(async () => {
         const commandToken = beginTransportCommand();
 
-        if (transport.isRecording) {
+        if (hasActiveRecordingSessions()) {
             await finalizeActiveRecordings();
         }
 
@@ -969,12 +1057,12 @@ const App: React.FC = () => {
         }));
         isPlayingRef.current = false;
         pauseResumeArmedRef.current = false;
-    }, [beginTransportCommand, transport.loopMode, transport.isRecording, finalizeActiveRecordings, isTransportCommandCurrent]);
+    }, [beginTransportCommand, transport.loopMode, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent]);
 
     const handleSkipStart = useCallback(async () => {
         const commandToken = beginTransportCommand();
 
-        if (transport.isRecording) {
+        if (hasActiveRecordingSessions()) {
             await finalizeActiveRecordings();
         }
 
@@ -993,13 +1081,13 @@ const App: React.FC = () => {
             currentBeat: 1,
             currentSixteenth: 1
         }));
-    }, [beginTransportCommand, transport.bpm, transport.loopMode, transport.isRecording, finalizeActiveRecordings, isTransportCommandCurrent]);
+    }, [beginTransportCommand, transport.bpm, transport.loopMode, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent]);
 
     const handleSkipEnd = useCallback(async () => {
         const commandToken = beginTransportCommand();
         const endBar = getProjectEndBar();
 
-        if (transport.isRecording) {
+        if (hasActiveRecordingSessions()) {
             await finalizeActiveRecordings();
         }
 
@@ -1034,13 +1122,13 @@ const App: React.FC = () => {
             currentBeat: targetPosition.currentBeat,
             currentSixteenth: targetPosition.currentSixteenth
         }));
-    }, [beginTransportCommand, transport.bpm, getProjectEndBar, transport.loopMode, transport.isPlaying, transport.isRecording, finalizeActiveRecordings, isTransportCommandCurrent]);
+    }, [beginTransportCommand, transport.bpm, getProjectEndBar, transport.loopMode, transport.isPlaying, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent]);
 
     const handleSeekToBar = useCallback(async (bar: number) => {
         const commandToken = beginTransportCommand();
         const safeBar = Math.max(1, Number.isFinite(bar) ? bar : 1);
 
-        if (transport.isRecording) {
+        if (hasActiveRecordingSessions()) {
             await finalizeActiveRecordings();
         }
 
@@ -1064,7 +1152,7 @@ const App: React.FC = () => {
             currentBeat: position.currentBeat,
             currentSixteenth: position.currentSixteenth
         }));
-    }, [beginTransportCommand, finalizeActiveRecordings, transport.bpm, transport.isRecording, transport.loopMode, isTransportCommandCurrent]);
+    }, [beginTransportCommand, finalizeActiveRecordings, hasActiveRecordingSessions, transport.bpm, transport.loopMode, isTransportCommandCurrent]);
 
     const handleLoopToggle = useCallback(() => {
         setTransport((prev: TransportState) => {
@@ -1926,7 +2014,7 @@ const App: React.FC = () => {
     const handleRecordToggle = useCallback(async () => {
         const commandToken = beginTransportCommand();
 
-        if (transport.isRecording) {
+        if (hasActiveRecordingSessions()) {
             await finalizeActiveRecordings();
             return;
         }
@@ -1959,7 +2047,10 @@ const App: React.FC = () => {
         }
 
         const recordingStartSeconds = Math.max(0, engineAdapter.getCurrentTime());
-        recordingStartBarRef.current = Math.max(1, 1 + (recordingStartSeconds / getSecondsPerBar(transport.bpm)));
+        const secondsPerBar = getSecondsPerBar(transport.bpm);
+        const recordingStartBar = Math.max(1, 1 + (recordingStartSeconds / secondsPerBar));
+        const diagnostics = engineAdapter.getDiagnostics();
+        const estimatedLatencyCompensationBars = Math.max(0, (diagnostics.latency || 0) / secondsPerBar);
 
         if (!(isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying)) {
             const startedPlayback = await playFromTransportCursor(commandToken);
@@ -1970,10 +2061,30 @@ const App: React.FC = () => {
 
         pauseResumeArmedRef.current = false;
         setTransport((prev: TransportState) => ({ ...prev, isPlaying: true, isRecording: true }));
+        await Promise.all(armedTracks.map(async (track) => {
+            try {
+                await engineAdapter.startRecording(track.id, track.inputDeviceId);
+                recordingSessionMetaRef.current.set(track.id, {
+                    recordingStartBar,
+                    latencyCompensationBars: estimatedLatencyCompensationBars
+                });
+            } catch (error) {
+                console.error(`No se pudo iniciar grabacion para ${track.name}.`, error);
+                recordingSessionMetaRef.current.delete(track.id);
+            }
+        }));
+
+        const activeRecordingTrackIds = new Set(engineAdapter.getActiveRecordingTrackIds());
         armedTracks.forEach((track) => {
-            void engineAdapter.startRecording(track.id, track.inputDeviceId);
+            if (!activeRecordingTrackIds.has(track.id)) {
+                recordingSessionMetaRef.current.delete(track.id);
+            }
         });
-    }, [beginTransportCommand, transport.isRecording, transport.isPlaying, tracks, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm]);
+
+        if (activeRecordingTrackIds.size === 0) {
+            setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
+        }
+    }, [beginTransportCommand, transport.isPlaying, tracks, hasActiveRecordingSessions, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm]);
 
     const buildPersistedTracks = useCallback((sourceTracks: Track[]): Track[] => {
         return sourceTracks.map((track) => ({
@@ -1984,7 +2095,14 @@ const App: React.FC = () => {
                 clip: slot.clip ? toPersistentClip(slot.clip) : null,
                 isPlaying: false,
                 isQueued: false
-            }))
+            })),
+            recordingTakes: (track.recordingTakes || []).map((take) => ({ ...take })),
+            takeLanes: (track.takeLanes || []).map((lane) => ({
+                ...lane,
+                takeIds: [...lane.takeIds],
+                compSegments: lane.compSegments ? lane.compSegments.map((segment) => ({ ...segment })) : undefined
+            })),
+            punchRange: track.punchRange ? { ...track.punchRange } : undefined
         }));
     }, []);
 
