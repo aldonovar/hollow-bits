@@ -165,6 +165,7 @@ export interface Track {
 }
 
 export type MicInputProfile = 'studio-voice' | 'podcast' | 'raw';
+export type MicInputChannelMode = 'mono' | 'stereo' | 'left' | 'right';
 
 export interface MicSettings {
   profile: MicInputProfile;
@@ -172,6 +173,8 @@ export interface MicSettings {
   monitoringEnabled: boolean;
   monitoringReverb: boolean;
   monitoringEcho: boolean;
+  monitorInputMode?: MicInputChannelMode;
+  monitorLatencyCompensationMs?: number;
 }
 
 export type LoopMode = 'off' | 'once' | 'infinite';
@@ -229,6 +232,22 @@ export interface Block1RouteEvaluation {
   monitorLatencyP95Ms: number;
   passesGate: boolean;
   notes: string[];
+}
+
+export type StudioPerformanceProfile = 'studio' | 'stage-safe';
+
+export interface SessionHealthSnapshot {
+  capturedAt: number;
+  profile: StudioPerformanceProfile;
+  hasRealtimeAudio: boolean;
+  cpuAudioP95Percent: number;
+  dropoutsDelta: number;
+  underrunsDelta: number;
+  launchErrorP95Ms: number;
+  uiFpsP95: number;
+  uiFrameDropRatio: number;
+  transportDriftP99Ms: number;
+  monitorLatencyP95Ms: number;
 }
 
 // LIGHTWEIGHT PROJECT MANIFEST

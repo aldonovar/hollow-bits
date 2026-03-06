@@ -11,11 +11,13 @@ interface EditorMutationOptions {
     reason?: string;
 }
 
+export type EditorTransportView = Pick<TransportState, 'snapToGrid' | 'gridSize' | 'scaleRoot' | 'scaleType'>;
+
 interface EditorProps {
     track: Track | null;
     selectedClipId?: string | null;
     onClipUpdate?: (trackId: string, clipId: string, updates: Partial<Clip>, options?: EditorMutationOptions) => void;
-    transport?: TransportState;
+    transport?: EditorTransportView;
 }
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -810,4 +812,4 @@ const Editor: React.FC<EditorProps> = ({ track, selectedClipId = null, onClipUpd
     );
 };
 
-export default Editor;
+export default React.memo(Editor);

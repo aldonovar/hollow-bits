@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useCallback } from 'react';
 
 interface AsciiPerformerDockProps {
     isPlaying: boolean;
+    suspendAnimation?: boolean;
 }
 
 interface StageParticle {
@@ -296,7 +297,7 @@ const drawPatch = (
     targetCtx.restore();
 };
 
-const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) => {
+const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying, suspendAnimation = false }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const contextRef = useRef<CanvasRenderingContext2D | null>(null);
     const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -315,10 +316,15 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
     const sceneClockMsRef = useRef(0);
     const loadedRef = useRef(false);
     const isPlayingRef = useRef(isPlaying);
+    const suspendAnimationRef = useRef(suspendAnimation);
 
     useEffect(() => {
         isPlayingRef.current = isPlaying;
     }, [isPlaying]);
+
+    useEffect(() => {
+        suspendAnimationRef.current = suspendAnimation;
+    }, [suspendAnimation]);
 
     const updateBlinkState = useCallback((timeMs: number) => {
         const blink = blinkStateRef.current;
@@ -487,9 +493,51 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
         }
     }, []);
 
+    const renderStaticFrame = useCallback(() => {
+        const canvas = canvasRef.current;
+        const sourceCanvas = sourceCanvasRef.current;
+        if (!canvas || !sourceCanvas || !loadedRef.current) {
+            return;
+        }
+
+        const ctx = contextRef.current || canvas.getContext('2d');
+        if (!ctx) {
+            return;
+        }
+        contextRef.current = ctx;
+
+        const width = canvas.width;
+        const height = canvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+        const ambient = ctx.createRadialGradient(
+            width * 0.52,
+            height * 0.22,
+            width * 0.04,
+            width * 0.52,
+            height * 0.22,
+            width * 0.8
+        );
+        ambient.addColorStop(0, 'rgba(132, 52, 186, 0.24)');
+        ambient.addColorStop(0.58, 'rgba(28, 14, 56, 0.2)');
+        ambient.addColorStop(1, 'rgba(8, 6, 16, 0.48)');
+        ctx.fillStyle = ambient;
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.imageSmoothingEnabled = false;
+        ctx.globalAlpha = 1;
+        ctx.drawImage(sourceCanvas, 0, 0, width, height);
+    }, []);
+
     const draw = useCallback((timestamp: number) => {
         if (!loadedRef.current) {
             animFrameRef.current = requestAnimationFrame(draw);
+            return;
+        }
+
+        if (suspendAnimationRef.current) {
+            renderStaticFrame();
+            animFrameRef.current = 0;
             return;
         }
 
@@ -504,7 +552,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
         renderScene();
 
         animFrameRef.current = requestAnimationFrame(draw);
-    }, [renderScene, updateBlinkState]);
+    }, [renderScene, renderStaticFrame, updateBlinkState]);
 
     useEffect(() => {
         let cancelled = false;
@@ -547,6 +595,12 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
             lastTimestampRef.current = null;
             loadedRef.current = true;
 
+            if (suspendAnimationRef.current) {
+                renderStaticFrame();
+                animFrameRef.current = 0;
+                return;
+            }
+
             if (!animFrameRef.current) {
                 animFrameRef.current = requestAnimationFrame(draw);
             }
@@ -572,11 +626,29 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying }) =>
             sceneClockMsRef.current = 0;
             lastTimestampRef.current = null;
         };
-    }, [draw]);
+    }, [draw, renderStaticFrame]);
+
+    useEffect(() => {
+        if (!loadedRef.current) return;
+
+        if (suspendAnimation) {
+            if (animFrameRef.current) {
+                cancelAnimationFrame(animFrameRef.current);
+                animFrameRef.current = 0;
+            }
+            renderStaticFrame();
+            return;
+        }
+
+        if (!animFrameRef.current) {
+            lastTimestampRef.current = null;
+            animFrameRef.current = requestAnimationFrame(draw);
+        }
+    }, [draw, renderStaticFrame, suspendAnimation]);
 
     return (
         <aside
-            className={`h-full aspect-square shrink-0 relative overflow-hidden transition-all duration-300 border-2 ${isPlaying ? 'border-purple-500/40 shadow-[0_0_10px_rgba(168,85,247,0.2)]' : 'border-white/20'} ${isPlaying ? 'ascii-dock-playing' : 'ascii-dock-idle'}`}
+            className={`performer-shell h-full aspect-square shrink-0 relative overflow-hidden transition-all duration-300 border-2 ${isPlaying ? 'border-purple-500/40 shadow-[0_0_10px_rgba(168,85,247,0.2)]' : 'border-white/20'} ${isPlaying ? 'ascii-dock-playing' : 'ascii-dock-idle'}`}
         >
             <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_55%_20%,rgba(244,218,255,0.22),transparent_58%)]" />
 

@@ -75,6 +75,23 @@ const resolveDefaultAudioListening = (): { monitor: Track['monitor']; monitoring
     };
 };
 
+const normalizeMicSettings = (
+    micSettings: Track['micSettings'] | undefined,
+    fallbackMonitoringEnabled: boolean
+): NonNullable<Track['micSettings']> => {
+    return {
+        profile: micSettings?.profile || 'studio-voice',
+        inputGain: typeof micSettings?.inputGain === 'number' ? micSettings.inputGain : 1,
+        monitoringEnabled: typeof micSettings?.monitoringEnabled === 'boolean' ? micSettings.monitoringEnabled : fallbackMonitoringEnabled,
+        monitoringReverb: Boolean(micSettings?.monitoringReverb),
+        monitoringEcho: Boolean(micSettings?.monitoringEcho),
+        monitorInputMode: micSettings?.monitorInputMode || 'mono',
+        monitorLatencyCompensationMs: typeof micSettings?.monitorLatencyCompensationMs === 'number'
+            ? micSettings.monitorLatencyCompensationMs
+            : 0
+    };
+};
+
 export const createTrack = (options: CreateTrackOptions): Track => {
     const defaultAudioListening = options.type === TrackType.AUDIO ? resolveDefaultAudioListening() : null;
 
@@ -107,15 +124,7 @@ export const createTrack = (options: CreateTrackOptions): Track => {
         activeTakeId: options.activeTakeId,
         soloTakeId: options.soloTakeId,
         punchRange: options.punchRange ? { ...options.punchRange } : undefined,
-        micSettings: options.micSettings
-            ? { ...options.micSettings }
-            : {
-                profile: 'studio-voice',
-                inputGain: 1,
-                monitoringEnabled: defaultAudioListening?.monitoringEnabled ?? false,
-                monitoringReverb: false,
-                monitoringEcho: false
-            }
+        micSettings: normalizeMicSettings(options.micSettings, defaultAudioListening?.monitoringEnabled ?? false)
     };
 };
 
@@ -140,15 +149,7 @@ export const withTrackRuntimeDefaults = (track: Track): Track => {
                 preRollBars: 1,
                 countInBars: 0
             },
-        micSettings: track.micSettings
-            ? { ...track.micSettings }
-            : {
-                profile: 'studio-voice',
-                inputGain: 1,
-                monitoringEnabled: false,
-                monitoringReverb: false,
-                monitoringEcho: false
-            }
+        micSettings: normalizeMicSettings(track.micSettings, false)
     };
 };
 

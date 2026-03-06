@@ -237,7 +237,7 @@ const Knob: React.FC<KnobProps> = ({
       </div>
 
       {label && showLabel && (
-        <div className={`text-[9px] font-bold font-sans uppercase tracking-wider transition-colors ${isDragging ? 'text-white' : 'text-gray-500'}`}>
+        <div className={`text-[10px] leading-none font-bold font-sans uppercase tracking-wider transition-colors ${isDragging ? 'text-white' : 'text-gray-500'}`}>
           {label}
         </div>
       )}

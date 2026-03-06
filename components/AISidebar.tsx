@@ -207,4 +207,4 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
     );
 };
 
-export default AISidebar;
+export default React.memo(AISidebar);

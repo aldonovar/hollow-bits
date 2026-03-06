@@ -31,12 +31,18 @@
   - `createSceneRecordingEvent(...)`
   - `appendSceneRecordingEvent(...)`
   - `buildSceneReplayPlan(...)`
+  - `summarizeSceneRecordingEvents(...)`
 - `components/SessionView.tsx`
   - controles:
     - `REC` (toggle)
     - `REPLAY`
     - `CLR SCN`
+    - `UNDO SCN`
   - replay cuantizado usando el mismo pipeline de scene launch batch.
+  - persistencia local y rehidratacion automatica de:
+    - scene recording (`hollowbits.session.scene-recording.v1`)
+    - launch telemetry (`hollowbits.session-launch.telemetry.v1`)
+  - resumen operativo runtime (eventos, escenas unicas, tracks unicos, duracion capturada).
 
 ### 4) CI gate report-driven
 - `scripts/session-launch-gate.mjs`
@@ -48,6 +54,9 @@
 ## QA agregado
 - `tests/unit/sessionPerformanceService.test.ts` (incluye casos de gate PASS/FAIL).
 - `tests/unit/sessionSceneRecordingService.test.ts`.
+  - incluye:
+    - deduplicacion de eventos repetidos en misma ventana cuantizada.
+    - validacion de resumen de cobertura/duracion de scene recording.
 
 ## Comandos clave
 - `npm run test:session-hardening`

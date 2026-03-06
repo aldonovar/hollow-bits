@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Layers3, Plus, RotateCcw, X } from 'lucide-react';
-import { Track, TrackType } from '../types';
+import { MicInputChannelMode, Track, TrackType } from '../types';
 import Knob from './Knob';
 import { audioEngine } from '../services/audioEngine';
 
@@ -32,6 +32,7 @@ const METER_MAX_DB = 6;
 const METER_UPDATE_EPSILON_DB = 0.2;
 
 const monitorModes: Track['monitor'][] = ['in', 'auto', 'off'];
+const monitorInputModes: MicInputChannelMode[] = ['mono', 'stereo', 'left', 'right'];
 
 
 const ensureMicSettings = (track: Track): NonNullable<Track['micSettings']> => ({
@@ -39,7 +40,9 @@ const ensureMicSettings = (track: Track): NonNullable<Track['micSettings']> => (
   inputGain: track.micSettings?.inputGain ?? 1,
   monitoringEnabled: track.micSettings?.monitoringEnabled ?? false,
   monitoringReverb: track.micSettings?.monitoringReverb ?? false,
-  monitoringEcho: track.micSettings?.monitoringEcho ?? false
+  monitoringEcho: track.micSettings?.monitoringEcho ?? false,
+  monitorInputMode: track.micSettings?.monitorInputMode || 'mono',
+  monitorLatencyCompensationMs: track.micSettings?.monitorLatencyCompensationMs ?? 0
 });
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -485,6 +488,7 @@ const Mixer: React.FC<MixerProps> = ({
           const isCuePfl = cueState?.trackId === track.id && cueState.mode === 'pfl';
           const isCueAfl = cueState?.trackId === track.id && cueState.mode === 'afl';
           const isFocused = focusedTrackId === track.id;
+          const micSettings = ensureMicSettings(track);
 
           return (
             <div
@@ -701,42 +705,42 @@ const Mixer: React.FC<MixerProps> = ({
                     <button
                       onClick={() => onUpdate(track.id, {
                         micSettings: {
-                          ...ensureMicSettings(track),
+                          ...micSettings,
                           profile: 'studio-voice',
                           inputGain: 1,
                           monitoringReverb: false,
                           monitoringEcho: false
                         }
                       })}
-                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${(track.micSettings?.profile || 'studio-voice') === 'studio-voice' ? 'bg-fuchsia-400/35 text-white' : 'bg-[#1d2639] text-gray-400'}`}
+                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${micSettings.profile === 'studio-voice' ? 'bg-fuchsia-400/35 text-white' : 'bg-[#1d2639] text-gray-400'}`}
                     >
                       Voice
                     </button>
                     <button
                       onClick={() => onUpdate(track.id, {
                         micSettings: {
-                          ...ensureMicSettings(track),
+                          ...micSettings,
                           profile: 'podcast',
                           inputGain: 1,
                           monitoringReverb: false,
                           monitoringEcho: false
                         }
                       })}
-                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${(track.micSettings?.profile || 'studio-voice') === 'podcast' ? 'bg-fuchsia-400/35 text-white' : 'bg-[#1d2639] text-gray-400'}`}
+                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${micSettings.profile === 'podcast' ? 'bg-fuchsia-400/35 text-white' : 'bg-[#1d2639] text-gray-400'}`}
                     >
                       Podcast
                     </button>
                     <button
                       onClick={() => onUpdate(track.id, {
                         micSettings: {
-                          ...ensureMicSettings(track),
+                          ...micSettings,
                           profile: 'raw',
                           inputGain: 1,
                           monitoringReverb: false,
                           monitoringEcho: false
                         }
                       })}
-                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${(track.micSettings?.profile || 'studio-voice') === 'raw' ? 'bg-fuchsia-400/35 text-white' : 'bg-[#1d2639] text-gray-400'}`}
+                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${micSettings.profile === 'raw' ? 'bg-fuchsia-400/35 text-white' : 'bg-[#1d2639] text-gray-400'}`}
                     >
                       Raw
                     </button>
@@ -745,43 +749,60 @@ const Mixer: React.FC<MixerProps> = ({
                     <button
                       onClick={() => onUpdate(track.id, {
                         micSettings: {
-                          ...ensureMicSettings(track),
-                          monitoringEnabled: !(track.micSettings?.monitoringEnabled)
+                          ...micSettings,
+                          monitoringEnabled: !micSettings.monitoringEnabled
                         }
                       })}
-                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${track.micSettings?.monitoringEnabled ? 'bg-emerald-400 text-black' : 'bg-[#1d2639] text-gray-400'}`}
+                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${micSettings.monitoringEnabled ? 'bg-fuchsia-300 text-[#190a1f]' : 'bg-[#1d2639] text-gray-400'}`}
                     >
                       Mon
                     </button>
                     <button
                       onClick={() => onUpdate(track.id, {
                         micSettings: {
-                          ...ensureMicSettings(track),
-                          monitoringReverb: !(track.micSettings?.monitoringReverb)
+                          ...micSettings,
+                          monitoringReverb: !micSettings.monitoringReverb
                         }
                       })}
-                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${track.micSettings?.monitoringReverb ? 'bg-cyan-300 text-black' : 'bg-[#1d2639] text-gray-400'}`}
+                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${micSettings.monitoringReverb ? 'bg-fuchsia-300 text-[#190a1f]' : 'bg-[#1d2639] text-gray-400'}`}
                     >
                       Rev
                     </button>
                     <button
                       onClick={() => onUpdate(track.id, {
                         micSettings: {
-                          ...ensureMicSettings(track),
-                          monitoringEcho: !(track.micSettings?.monitoringEcho)
+                          ...micSettings,
+                          monitoringEcho: !micSettings.monitoringEcho
                         }
                       })}
-                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${track.micSettings?.monitoringEcho ? 'bg-cyan-300 text-black' : 'bg-[#1d2639] text-gray-400'}`}
+                      className={`h-5 text-[7px] font-bold uppercase rounded-sm ${micSettings.monitoringEcho ? 'bg-fuchsia-300 text-[#190a1f]' : 'bg-[#1d2639] text-gray-400'}`}
                     >
                       Echo
                     </button>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {monitorInputModes.map((inputMode) => (
+                      <button
+                        key={inputMode}
+                        onClick={() => onUpdate(track.id, {
+                          micSettings: {
+                            ...micSettings,
+                            monitorInputMode: inputMode
+                          }
+                        })}
+                        className={`h-5 text-[7px] font-bold uppercase rounded-sm ${micSettings.monitorInputMode === inputMode ? 'bg-rose-300 text-[#190b12]' : 'bg-[#1d2639] text-gray-400'}`}
+                        title={`Input mode: ${inputMode}`}
+                      >
+                        {inputMode === 'stereo' ? 'ST' : inputMode === 'mono' ? 'M' : inputMode === 'left' ? 'L' : 'R'}
+                      </button>
+                    ))}
                   </div>
                   <div className="grid grid-cols-[32px_1fr_32px] gap-1 items-center">
                     <button
                       onClick={() => onUpdate(track.id, {
                         micSettings: {
-                          ...ensureMicSettings(track),
-                          inputGain: Math.max(0, Number((ensureMicSettings(track).inputGain - 0.05).toFixed(2)))
+                          ...micSettings,
+                          inputGain: Math.max(0, Number((micSettings.inputGain - 0.05).toFixed(2)))
                         }
                       })}
                       className="h-5 text-[8px] font-bold rounded-sm bg-[#1d2639] text-gray-300 hover:text-white"
@@ -790,17 +811,46 @@ const Mixer: React.FC<MixerProps> = ({
                       -
                     </button>
                     <div className="h-5 rounded-sm bg-[#121a2b] border border-[#24314a] text-[8px] text-gray-200 flex items-center justify-center font-mono">
-                      IN {ensureMicSettings(track).inputGain.toFixed(2)}x
+                      IN {micSettings.inputGain.toFixed(2)}x
                     </div>
                     <button
                       onClick={() => onUpdate(track.id, {
                         micSettings: {
-                          ...ensureMicSettings(track),
-                          inputGain: Math.min(2, Number((ensureMicSettings(track).inputGain + 0.05).toFixed(2)))
+                          ...micSettings,
+                          inputGain: Math.min(2, Number((micSettings.inputGain + 0.05).toFixed(2)))
                         }
                       })}
                       className="h-5 text-[8px] font-bold rounded-sm bg-[#1d2639] text-gray-300 hover:text-white"
                       title="Subir ganancia de entrada"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-[32px_1fr_32px] gap-1 items-center">
+                    <button
+                      onClick={() => onUpdate(track.id, {
+                        micSettings: {
+                          ...micSettings,
+                          monitorLatencyCompensationMs: Number(clamp((micSettings.monitorLatencyCompensationMs || 0) - 0.25, 0, 24).toFixed(2))
+                        }
+                      })}
+                      className="h-5 text-[8px] font-bold rounded-sm bg-[#1d2639] text-gray-300 hover:text-white"
+                      title="Reducir compensacion de monitoreo"
+                    >
+                      -
+                    </button>
+                    <div className="h-5 rounded-sm bg-[#121a2b] border border-[#24314a] text-[8px] text-gray-200 flex items-center justify-center font-mono">
+                      LAT {(micSettings.monitorLatencyCompensationMs || 0).toFixed(2)}ms
+                    </div>
+                    <button
+                      onClick={() => onUpdate(track.id, {
+                        micSettings: {
+                          ...micSettings,
+                          monitorLatencyCompensationMs: Number(clamp((micSettings.monitorLatencyCompensationMs || 0) + 0.25, 0, 24).toFixed(2))
+                        }
+                      })}
+                      className="h-5 text-[8px] font-bold rounded-sm bg-[#1d2639] text-gray-300 hover:text-white"
+                      title="Incrementar compensacion de monitoreo"
                     >
                       +
                     </button>

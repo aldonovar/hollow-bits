@@ -1,5 +1,5 @@
 // path: src/services/audioEngine.ts
-import { AudioSettings, Clip, Device, Track, TrackType } from '../types';
+import { AudioSettings, Clip, Device, MicInputChannelMode, Track, TrackType } from '../types';
 import {
     denormalizeTrackParam,
     getLaneByParam,
@@ -30,8 +30,12 @@ interface MonitoringSession {
     stream: MediaStream;
     source: MediaStreamAudioSourceNode;
     inputSplitter: ChannelSplitterNode;
-    monoSum: GainNode;
+    leftToLeft: GainNode;
+    leftToRight: GainNode;
+    rightToLeft: GainNode;
+    rightToRight: GainNode;
     stereoMerge: ChannelMergerNode;
+    monitorDelay: DelayNode;
     inputGain: GainNode;
     monitorGate: GainNode;
     reverbSend: GainNode;
@@ -140,6 +144,18 @@ export interface EngineDiagnostics {
     schedulerQueueEntries?: number;
     schedulerQueueActive?: number;
     schedulerQueueP95Candidates?: number;
+}
+
+export interface AudioRuntimeCounters {
+    capturedAt: number;
+    cpuAudioP95Percent: number;
+    dropoutCount: number;
+    underrunCount: number;
+    overrunCount: number;
+    overrunRatio: number;
+    transportDriftP99Ms: number;
+    monitorLatencyP95Ms: number;
+    contextState: AudioContextState | 'closed';
 }
 
 export interface EngineRecordingResult {
@@ -940,7 +956,17 @@ class AudioEngine {
             inputGain: this.clamp(this.finiteOr(track.micSettings?.inputGain ?? 1, 1), 0, 2),
             monitoringEnabled: Boolean(track.micSettings?.monitoringEnabled),
             monitoringReverb: Boolean(track.micSettings?.monitoringReverb),
-            monitoringEcho: Boolean(track.micSettings?.monitoringEcho)
+            monitoringEcho: Boolean(track.micSettings?.monitoringEcho),
+            monitorInputMode: track.micSettings?.monitorInputMode === 'left'
+                || track.micSettings?.monitorInputMode === 'right'
+                || track.micSettings?.monitorInputMode === 'stereo'
+                ? track.micSettings.monitorInputMode
+                : 'mono',
+            monitorLatencyCompensationMs: this.clamp(
+                this.finiteOr(track.micSettings?.monitorLatencyCompensationMs ?? 0, 0),
+                0,
+                24
+            )
         };
 
         const safeClips = Array.isArray(track.clips)
@@ -2022,6 +2048,43 @@ class AudioEngine {
 
     // --- TRACK MANAGEMENT ---
 
+    private resolveMonitorInputMode(track: Track): MicInputChannelMode {
+        const mode = track.micSettings?.monitorInputMode;
+        if (mode === 'left' || mode === 'right' || mode === 'stereo') {
+            return mode;
+        }
+        return 'mono';
+    }
+
+    private applyMonitorInputMode(session: MonitoringSession, mode: MicInputChannelMode, atTime: number) {
+        let leftToLeft = 0.5;
+        let leftToRight = 0.5;
+        let rightToLeft = 0.5;
+        let rightToRight = 0.5;
+
+        if (mode === 'stereo') {
+            leftToLeft = 1;
+            leftToRight = 0;
+            rightToLeft = 0;
+            rightToRight = 1;
+        } else if (mode === 'left') {
+            leftToLeft = 1;
+            leftToRight = 1;
+            rightToLeft = 0;
+            rightToRight = 0;
+        } else if (mode === 'right') {
+            leftToLeft = 0;
+            leftToRight = 0;
+            rightToLeft = 1;
+            rightToRight = 1;
+        }
+
+        session.leftToLeft.gain.setTargetAtTime(leftToLeft, atTime, 0.01);
+        session.leftToRight.gain.setTargetAtTime(leftToRight, atTime, 0.01);
+        session.rightToLeft.gain.setTargetAtTime(rightToLeft, atTime, 0.01);
+        session.rightToRight.gain.setTargetAtTime(rightToRight, atTime, 0.01);
+    }
+
     private applyMicMonitoringProfile(track: Track, session: MonitoringSession) {
         const profile = track.micSettings?.profile || 'studio-voice';
         const now = this.ctx!.currentTime;
@@ -2035,7 +2098,15 @@ class AudioEngine {
         const monitoringEnabled = this.isTrackMonitoringActive(track);
         const monitorReverbOn = Boolean(track.micSettings?.monitoringReverb);
         const monitorEchoOn = Boolean(track.micSettings?.monitoringEcho);
+        const monitorInputMode = this.resolveMonitorInputMode(track);
+        const monitorLatencyCompensationSec = this.clamp(
+            this.finiteOr(track.micSettings?.monitorLatencyCompensationMs ?? 0, 0) / 1000,
+            0,
+            0.024
+        );
 
+        this.applyMonitorInputMode(session, monitorInputMode, now);
+        session.monitorDelay.delayTime.setTargetAtTime(monitorLatencyCompensationSec, now, 0.01);
         session.inputGain.gain.setTargetAtTime(profileInputGain * userInputGain, now, 0.015);
         session.monitorGate.gain.setTargetAtTime(monitoringEnabled ? 1 : 0, now, 0.01);
         session.reverbSend.gain.setTargetAtTime(monitoringEnabled && monitorReverbOn ? profileReverb : 0, now, 0.02);
@@ -2070,8 +2141,12 @@ class AudioEngine {
 
             const source = this.ctx.createMediaStreamSource(stream);
             const inputSplitter = this.ctx.createChannelSplitter(2);
-            const monoSum = this.ctx.createGain();
+            const leftToLeft = this.ctx.createGain();
+            const leftToRight = this.ctx.createGain();
+            const rightToLeft = this.ctx.createGain();
+            const rightToRight = this.ctx.createGain();
             const stereoMerge = this.ctx.createChannelMerger(2);
+            const monitorDelay = this.ctx.createDelay(0.05);
             const inputGain = this.ctx.createGain();
             const monitorGate = this.ctx.createGain();
             const reverbSend = this.ctx.createGain();
@@ -2082,14 +2157,19 @@ class AudioEngine {
             const echoFeedback = this.ctx.createGain();
             const echoWet = this.ctx.createGain();
 
-            // Fold to mono and duplicate into L/R so monitoring is always centered (binaural output).
-            monoSum.gain.value = 0.5;
+            // Input mode matrix:
+            // mono: sum L+R to both outputs / stereo: pass-through / left-right: duplicate selected channel to both ears.
             source.connect(inputSplitter);
-            inputSplitter.connect(monoSum, 0, 0);
-            inputSplitter.connect(monoSum, 1, 0);
-            monoSum.connect(stereoMerge, 0, 0);
-            monoSum.connect(stereoMerge, 0, 1);
-            stereoMerge.connect(inputGain);
+            inputSplitter.connect(leftToLeft, 0, 0);
+            inputSplitter.connect(leftToRight, 0, 0);
+            inputSplitter.connect(rightToLeft, 1, 0);
+            inputSplitter.connect(rightToRight, 1, 0);
+            leftToLeft.connect(stereoMerge, 0, 0);
+            leftToRight.connect(stereoMerge, 0, 1);
+            rightToLeft.connect(stereoMerge, 0, 0);
+            rightToRight.connect(stereoMerge, 0, 1);
+            stereoMerge.connect(monitorDelay);
+            monitorDelay.connect(inputGain);
             inputGain.connect(monitorGate);
             monitorGate.connect(this.masterGain);
 
@@ -2107,8 +2187,12 @@ class AudioEngine {
                 stream,
                 source,
                 inputSplitter,
-                monoSum,
+                leftToLeft,
+                leftToRight,
+                rightToLeft,
+                rightToRight,
                 stereoMerge,
+                monitorDelay,
                 inputGain,
                 monitorGate,
                 reverbSend,
@@ -2136,8 +2220,12 @@ class AudioEngine {
         const nodes: AudioNode[] = [
             session.source,
             session.inputSplitter,
-            session.monoSum,
+            session.leftToLeft,
+            session.leftToRight,
+            session.rightToLeft,
+            session.rightToRight,
             session.stereoMerge,
+            session.monitorDelay,
             session.inputGain,
             session.monitorGate,
             session.reverbSend,
@@ -2860,6 +2948,21 @@ class AudioEngine {
         };
     }
 
+    getAudioRuntimeCounters(): AudioRuntimeCounters {
+        const scheduler = this.getSchedulerTelemetry();
+        return {
+            capturedAt: Date.now(),
+            cpuAudioP95Percent: Math.max(0, this.finiteOr(scheduler.p95CpuLoadPercent ?? 0, 0)),
+            dropoutCount: Math.max(0, Math.floor(this.finiteOr(scheduler.dropoutCount ?? 0, 0))),
+            underrunCount: Math.max(0, Math.floor(this.finiteOr(scheduler.underrunCount ?? 0, 0))),
+            overrunCount: Math.max(0, Math.floor(this.finiteOr(scheduler.overrunCount, 0))),
+            overrunRatio: Math.max(0, this.finiteOr(scheduler.overrunRatio ?? 0, 0)),
+            transportDriftP99Ms: Math.max(0, this.finiteOr(scheduler.p99TickDriftMs, 0)),
+            monitorLatencyP95Ms: Math.max(0, (this.ctx?.baseLatency || 0) * 1000),
+            contextState: this.ctx?.state || 'closed'
+        };
+    }
+
     getRuntimeDiagnostics() {
         return {
             contextState: this.ctx?.state || 'closed',
@@ -3574,6 +3677,9 @@ class AudioEngine {
     async stopRecording(trackId: string): Promise<EngineRecordingResult | null> {
         const session = this.recordingSessions.get(trackId);
         if (!session) return null;
+
+        // Stop monitor path immediately to avoid residual loopback while recorder flushes.
+        this.stopMonitoring(trackId);
 
         const stoppedAtContextTime = this.ctx?.currentTime || session.startedAtContextTime;
 

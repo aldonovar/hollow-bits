@@ -1,6 +1,7 @@
-﻿import { AudioSettings, Clip, EngineBackendRoute, Track } from '../types';
+import { AudioSettings, Clip, EngineBackendRoute, SessionHealthSnapshot, Track } from '../types';
 import {
     audioEngine,
+    AudioRuntimeCounters,
     EngineDiagnostics,
     EngineRecordingResult,
     EngineSchedulerMode,
@@ -26,6 +27,8 @@ export interface EngineAdapter {
 
     init: (settings?: AudioSettings) => Promise<void>;
     getDiagnostics: () => EngineDiagnostics;
+    getAudioRuntimeCounters: () => AudioRuntimeCounters;
+    getSessionHealthSnapshot: (overrides?: Partial<SessionHealthSnapshot>) => SessionHealthSnapshot;
     getRuntimeDiagnostics: () => {
         contextState: AudioContextState | 'closed';
         hasMasterGraph: boolean;
@@ -128,6 +131,43 @@ export const engineAdapter: EngineAdapter = {
 
     getDiagnostics() {
         return audioEngine.getDiagnostics();
+    },
+
+    getAudioRuntimeCounters() {
+        return audioEngine.getAudioRuntimeCounters();
+    },
+
+    getSessionHealthSnapshot(overrides) {
+        const counters = audioEngine.getAudioRuntimeCounters();
+        return {
+            capturedAt: Number.isFinite(overrides?.capturedAt) ? Number(overrides?.capturedAt) : counters.capturedAt,
+            profile: overrides?.profile === 'stage-safe' ? 'stage-safe' : 'studio',
+            hasRealtimeAudio: Boolean(overrides?.hasRealtimeAudio),
+            cpuAudioP95Percent: Number.isFinite(overrides?.cpuAudioP95Percent)
+                ? Math.max(0, Number(overrides?.cpuAudioP95Percent))
+                : counters.cpuAudioP95Percent,
+            dropoutsDelta: Number.isFinite(overrides?.dropoutsDelta)
+                ? Math.max(0, Math.floor(Number(overrides?.dropoutsDelta)))
+                : 0,
+            underrunsDelta: Number.isFinite(overrides?.underrunsDelta)
+                ? Math.max(0, Math.floor(Number(overrides?.underrunsDelta)))
+                : 0,
+            launchErrorP95Ms: Number.isFinite(overrides?.launchErrorP95Ms)
+                ? Math.max(0, Number(overrides?.launchErrorP95Ms))
+                : 0,
+            uiFpsP95: Number.isFinite(overrides?.uiFpsP95)
+                ? Math.max(0, Number(overrides?.uiFpsP95))
+                : 60,
+            uiFrameDropRatio: Number.isFinite(overrides?.uiFrameDropRatio)
+                ? Math.max(0, Number(overrides?.uiFrameDropRatio))
+                : 0,
+            transportDriftP99Ms: Number.isFinite(overrides?.transportDriftP99Ms)
+                ? Math.max(0, Number(overrides?.transportDriftP99Ms))
+                : counters.transportDriftP99Ms,
+            monitorLatencyP95Ms: Number.isFinite(overrides?.monitorLatencyP95Ms)
+                ? Math.max(0, Number(overrides?.monitorLatencyP95Ms))
+                : counters.monitorLatencyP95Ms
+        };
     },
 
     getRuntimeDiagnostics() {
@@ -268,6 +308,7 @@ export const engineAdapter: EngineAdapter = {
 };
 
 export type {
+    AudioRuntimeCounters,
     EngineDiagnostics,
     EngineRecordingResult,
     EngineSchedulerMode,
@@ -276,4 +317,6 @@ export type {
     SchedulerTelemetrySnapshot
 };
 export type { EngineBackendRoute } from '../types';
+
+
 

@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
     appendSceneRecordingEvent,
     buildSceneReplayPlan,
-    createSceneRecordingEvent
+    createSceneRecordingEvent,
+    deserializeSceneRecordingEvents,
+    serializeSceneRecordingEvents,
+    summarizeSceneRecordingEvents
 } from '../../services/sessionSceneRecordingService';
 
 describe('sessionSceneRecordingService', () => {
@@ -37,5 +40,52 @@ describe('sessionSceneRecordingService', () => {
         expect(replay[1].replayLaunchAtSec).toBeCloseTo(104, 6);
         expect(replay[2].replayLaunchAtSec).toBeCloseTo(107, 6);
     });
-});
 
+    it('deduplicates accidental repeated launch events in same quantized instant', () => {
+        const first = createSceneRecordingEvent(4, 64, 1, [
+            { trackId: 't1', clipId: 'c1' },
+            { trackId: 't2', clipId: 'c2' }
+        ]);
+        const repeated = {
+            ...createSceneRecordingEvent(4, 64.03, 1, [
+                { trackId: 't2', clipId: 'c2' },
+                { trackId: 't1', clipId: 'c1' }
+            ]),
+            launchAtSec: 64.03
+        };
+
+        const withFirst = appendSceneRecordingEvent([], first, 16);
+        const withRepeated = appendSceneRecordingEvent(withFirst, repeated, 16);
+        expect(withRepeated).toHaveLength(1);
+    });
+
+    it('summarizes scene recording coverage and duration', () => {
+        const events = [
+            createSceneRecordingEvent(1, 10, 1, [{ trackId: 't1', clipId: 'c1' }]),
+            createSceneRecordingEvent(3, 14, 1, [{ trackId: 't1', clipId: 'c2' }, { trackId: 't2', clipId: 'c3' }]),
+            createSceneRecordingEvent(1, 17, 1, [{ trackId: 't2', clipId: 'c4' }])
+        ];
+
+        const summary = summarizeSceneRecordingEvents(events);
+        expect(summary.eventCount).toBe(3);
+        expect(summary.uniqueSceneCount).toBe(2);
+        expect(summary.uniqueTrackCount).toBe(2);
+        expect(summary.uniqueClipCount).toBe(4);
+        expect(summary.durationSec).toBeCloseTo(7, 6);
+    });
+
+    it('serializes and deserializes recording events with stable ordering', () => {
+        const events = [
+            createSceneRecordingEvent(2, 12, 1, [{ trackId: 't2', clipId: 'c2' }]),
+            createSceneRecordingEvent(1, 10, 1, [{ trackId: 't1', clipId: 'c1' }])
+        ];
+
+        const payload = serializeSceneRecordingEvents(events);
+        const restored = deserializeSceneRecordingEvents(payload);
+
+        expect(payload.version).toBe(1);
+        expect(restored).toHaveLength(2);
+        expect(restored[0].sceneIndex).toBe(1);
+        expect(restored[1].sceneIndex).toBe(2);
+    });
+});

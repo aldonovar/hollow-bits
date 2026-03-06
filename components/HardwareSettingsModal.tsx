@@ -1536,5 +1536,7 @@ const ScanManagerSection: React.FC<ScanManagerSectionProps> = ({
     </div>
 );
 
-export { HardwareSettingsModal };
+const MemoizedHardwareSettingsModal = React.memo(HardwareSettingsModal);
+
+export { MemoizedHardwareSettingsModal as HardwareSettingsModal };
 

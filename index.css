@@ -263,3 +263,37 @@ body {
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
+
+.daw-immersive-shell[data-audio-priority='guarded'] .animate-view-enter {
+  animation-duration: 220ms !important;
+}
+
+.daw-immersive-shell[data-audio-priority='guarded'] .logo-breathing-active,
+.daw-immersive-shell[data-audio-priority='guarded'] .logo-breathing-aura-active {
+  animation-duration: 860ms !important;
+}
+
+.daw-immersive-shell[data-audio-priority='guarded'] .shadow-2xl,
+.daw-immersive-shell[data-audio-priority='guarded'] .shadow-xl {
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32) !important;
+}
+
+.daw-immersive-shell[data-audio-priority='critical'] .animate-view-enter,
+.daw-immersive-shell[data-audio-priority='critical'] .animate-fade-in-up,
+.daw-immersive-shell[data-audio-priority='critical'] .logo-breathing-active,
+.daw-immersive-shell[data-audio-priority='critical'] .logo-breathing-aura-active {
+  animation: none !important;
+}
+
+.daw-immersive-shell[data-audio-priority='critical'] .shadow-2xl,
+.daw-immersive-shell[data-audio-priority='critical'] .shadow-xl,
+.daw-immersive-shell[data-audio-priority='critical'] .drop-shadow-sm {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+.daw-immersive-shell[data-audio-priority='critical'] .performer-stage,
+.daw-immersive-shell[data-audio-priority='critical'] .performer-shell {
+  opacity: 0.94;
+  filter: saturate(0.92);
+}

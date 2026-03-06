@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clock3, Play, Square } from 'lucide-react';
-import { Clip, Track, TrackType } from '../types';
+import { Clip, SessionHealthSnapshot, Track, TrackType } from '../types';
 import { engineAdapter } from '../services/engineAdapter';
 import type { EngineDiagnostics } from '../services/engineAdapter';
 import type { SessionLaunchTelemetryEvent } from '../services/engineAdapter';
@@ -9,6 +9,7 @@ import {
     assessSessionOverload,
     buildSessionLaunchReport,
     buildSessionTrackWindow,
+    reduceSessionHealth,
     summarizeSessionLaunchTelemetry,
     type SessionLaunchReport,
     type SessionLaunchTelemetrySample
@@ -17,6 +18,9 @@ import {
     appendSceneRecordingEvent,
     buildSceneReplayPlan,
     createSceneRecordingEvent,
+    deserializeSceneRecordingEvents,
+    serializeSceneRecordingEvents,
+    summarizeSceneRecordingEvents,
     type SceneRecordingEvent,
     type SceneTrackClipRef
 } from '../services/sessionSceneRecordingService';
@@ -24,6 +28,7 @@ import {
 interface SessionViewProps {
     tracks: Track[];
     bpm: number;
+    sessionHealthSnapshot?: SessionHealthSnapshot | null;
     engineStats?: Pick<
         EngineDiagnostics,
         'highLoadDetected'
@@ -56,6 +61,8 @@ const SCENE_COLUMN_WIDTH_PX = 76;
 const TRACK_COLUMN_WIDTH_PX = 144;
 const TRACK_COLUMN_GAP_PX = 8;
 const TRACK_WINDOW_OVERSCAN = 3;
+const SESSION_SCENE_RECORDING_STORAGE_KEY = 'hollowbits.session.scene-recording.v1';
+const SESSION_LAUNCH_TELEMETRY_STORAGE_KEY = 'hollowbits.session-launch.telemetry.v1';
 
 const QUANTIZE_OPTIONS = [
     { value: 0.25, label: '1/4 Bar' },
@@ -64,7 +71,47 @@ const QUANTIZE_OPTIONS = [
     { value: 2, label: '2 Bars' }
 ];
 
-const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onExternalDrop, onClipSelect }) => {
+const sanitizeSceneRecordingEvents = (candidate: unknown): SceneRecordingEvent[] => {
+    return deserializeSceneRecordingEvents(candidate);
+};
+
+const sanitizeLaunchTelemetrySamples = (candidate: unknown): SessionLaunchTelemetrySample[] => {
+    if (!Array.isArray(candidate)) return [];
+
+    const mappedSamples: Array<SessionLaunchTelemetrySample | null> = candidate
+        .map((sample) => {
+            if (!sample || typeof sample !== 'object') return null;
+            const value = sample as Partial<SessionLaunchTelemetrySample>;
+            if (typeof value.trackId !== 'string' || typeof value.clipId !== 'string') {
+                return null;
+            }
+
+            return {
+                trackId: value.trackId,
+                clipId: value.clipId,
+                sceneIndex: typeof value.sceneIndex === 'number' ? value.sceneIndex : undefined,
+                requestedLaunchTimeSec: Number.isFinite(value.requestedLaunchTimeSec) ? Number(value.requestedLaunchTimeSec) : 0,
+                effectiveLaunchTimeSec: Number.isFinite(value.effectiveLaunchTimeSec) ? Number(value.effectiveLaunchTimeSec) : 0,
+                launchErrorMs: Number.isFinite(value.launchErrorMs) ? Number(value.launchErrorMs) : 0,
+                quantized: Boolean(value.quantized),
+                wasLate: Boolean(value.wasLate),
+                capturedAtMs: Number.isFinite(value.capturedAtMs) ? Number(value.capturedAtMs) : Date.now()
+            };
+        });
+
+    return mappedSamples
+        .filter((sample): sample is SessionLaunchTelemetrySample => sample !== null)
+        .slice(-1200);
+};
+
+const SessionView: React.FC<SessionViewProps> = ({
+    tracks,
+    bpm,
+    sessionHealthSnapshot,
+    engineStats,
+    onExternalDrop,
+    onClipSelect
+}) => {
     const [trackLaunchState, setTrackLaunchState] = useState<Record<string, TrackLaunchState>>({});
     const [launchQuantizeBars, setLaunchQuantizeBars] = useState<number>(1);
     const [trackViewport, setTrackViewport] = useState({ left: 0, width: 1280 });
@@ -122,6 +169,56 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
         recentUnderrunDelta,
         sessionTracks.length
     ]);
+
+    const hasRealtimeAudioActivity = useMemo(() => {
+        if (engineAdapter.getIsPlaying()) {
+            return true;
+        }
+
+        return sessionTracks.some((track) => {
+            if (track.type !== TrackType.AUDIO) {
+                return false;
+            }
+
+            if (track.monitor === 'in') {
+                return true;
+            }
+
+            if (track.monitor === 'auto' && track.isArmed) {
+                return true;
+            }
+
+            return Boolean(track.micSettings?.monitoringEnabled);
+        });
+    }, [sessionTracks]);
+
+    useEffect(() => {
+        try {
+            const rawSceneRecording = localStorage.getItem(SESSION_SCENE_RECORDING_STORAGE_KEY);
+            if (rawSceneRecording) {
+                const parsed = JSON.parse(rawSceneRecording) as { events?: unknown };
+                const sanitizedEvents = sanitizeSceneRecordingEvents(parsed);
+                if (sanitizedEvents.length > 0) {
+                    setSceneRecordingEvents(sanitizedEvents);
+                }
+            }
+        } catch {
+            // Non-blocking restore path.
+        }
+
+        try {
+            const rawTelemetry = localStorage.getItem(SESSION_LAUNCH_TELEMETRY_STORAGE_KEY);
+            if (rawTelemetry) {
+                const parsed = JSON.parse(rawTelemetry) as { samples?: unknown };
+                const sanitizedSamples = sanitizeLaunchTelemetrySamples(parsed?.samples);
+                if (sanitizedSamples.length > 0) {
+                    setLaunchTelemetrySamples(sanitizedSamples);
+                }
+            }
+        } catch {
+            // Non-blocking restore path.
+        }
+    }, []);
 
     useEffect(() => {
         return () => {
@@ -250,7 +347,7 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
         if (launchTelemetrySummary.sampleCount === 0) return;
 
         try {
-            localStorage.setItem('hollowbits.session-launch.telemetry.v1', JSON.stringify({
+            localStorage.setItem(SESSION_LAUNCH_TELEMETRY_STORAGE_KEY, JSON.stringify({
                 capturedAt: Date.now(),
                 summary: launchTelemetrySummary,
                 samples: launchTelemetrySamples.slice(-200)
@@ -260,6 +357,16 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
             // Non-blocking persistence path.
         }
     }, [launchTelemetryReport, launchTelemetrySamples, launchTelemetrySummary]);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(SESSION_SCENE_RECORDING_STORAGE_KEY, JSON.stringify(
+                serializeSceneRecordingEvents(sceneRecordingEvents)
+            ));
+        } catch {
+            // Non-blocking persistence path.
+        }
+    }, [sceneRecordingEvents]);
 
     const computeLaunchAt = useCallback(() => {
         return engineAdapter.getSessionLaunchTime(launchQuantizeBars);
@@ -526,6 +633,13 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
         setSceneRecordingEvents([]);
     }, [clearReplayTimers]);
 
+    const undoLastSceneRecordingEvent = useCallback(() => {
+        setSceneRecordingEvents((prev) => {
+            if (prev.length === 0) return prev;
+            return prev.slice(0, prev.length - 1);
+        });
+    }, []);
+
     const resetLaunchTelemetry = useCallback(() => {
         setLaunchTelemetrySamples([]);
     }, []);
@@ -643,9 +757,41 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
         onExternalDrop(trackId, sceneIndex, payload);
     }, [onExternalDrop]);
 
+    const derivedSessionHealthSnapshot = useMemo<SessionHealthSnapshot>(() => {
+        if (sessionHealthSnapshot) {
+            return sessionHealthSnapshot;
+        }
+
+        return {
+            capturedAt: Date.now(),
+            profile: 'stage-safe',
+            hasRealtimeAudio: hasRealtimeAudioActivity,
+            cpuAudioP95Percent: Math.max(0, Number(engineStats?.schedulerCpuLoadP95Percent || 0)),
+            dropoutsDelta: recentDropoutDelta,
+            underrunsDelta: recentUnderrunDelta,
+            launchErrorP95Ms: launchTelemetrySummary.p95LaunchErrorMs,
+            uiFpsP95: 60,
+            uiFrameDropRatio: 0,
+            transportDriftP99Ms: 0,
+            monitorLatencyP95Ms: 0
+        };
+    }, [
+        engineStats?.schedulerCpuLoadP95Percent,
+        hasRealtimeAudioActivity,
+        launchTelemetrySummary.p95LaunchErrorMs,
+        recentDropoutDelta,
+        recentUnderrunDelta,
+        sessionHealthSnapshot
+    ]);
+
+    const priorityDecision = useMemo(() => (
+        reduceSessionHealth(derivedSessionHealthSnapshot)
+    ), [derivedSessionHealthSnapshot]);
+
     const usePulseAnimation = overloadDecision.animationLevel === 'full';
     const showSlotFooter = overloadDecision.mode !== 'critical';
-    const showOverloadBanner = overloadDecision.showOverloadBanner;
+    const showOverloadBanner = priorityDecision.mode === 'critical' && derivedSessionHealthSnapshot.hasRealtimeAudio;
+    const sceneRecordingSummary = useMemo(() => summarizeSceneRecordingEvents(sceneRecordingEvents), [sceneRecordingEvents]);
 
     return (
         <div ref={scrollContainerRef} className="flex-1 bg-[#111218] overflow-x-auto overflow-y-hidden relative p-4">
@@ -666,7 +812,7 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
                     {showOverloadBanner && (
                         <div className="px-2.5 py-1 rounded-sm border border-daw-ruby/45 bg-[#1a1115]/88 text-[9px] uppercase tracking-wider font-bold text-daw-ruby flex items-center gap-2">
                             <span>Audio Priority</span>
-                            <span className={overloadDecision.mode === 'critical' ? 'text-red-300' : 'text-amber-300'}>{overloadDecision.mode.toUpperCase()}</span>
+                            <span className={priorityDecision.mode === 'critical' ? 'text-red-300' : 'text-amber-300'}>{priorityDecision.mode.toUpperCase()}</span>
                             <span className="text-gray-400">{sessionTracks.length}T x {SCENES}S</span>
                         </div>
                     )}
@@ -738,6 +884,14 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
                             CLR GATE
                         </button>
                         <button
+                            onClick={undoLastSceneRecordingEvent}
+                            disabled={sceneRecordingEvents.length === 0}
+                            className={`h-6 rounded-sm border text-[8px] font-bold tracking-wider ${sceneRecordingEvents.length > 0 ? 'border-fuchsia-400/60 bg-fuchsia-500/12 text-fuchsia-200 hover:bg-fuchsia-500/20' : 'border-white/10 bg-[#161a29] text-gray-500 cursor-not-allowed'}`}
+                            title="Undo Last Scene Recording Event"
+                        >
+                            UNDO SCN
+                        </button>
+                        <button
                             onClick={() => { void exportLaunchTelemetryReport(); }}
                             disabled={launchTelemetrySummary.sampleCount === 0}
                             className={`h-6 rounded-sm border text-[8px] font-bold tracking-wider ${launchTelemetrySummary.sampleCount > 0 ? 'border-emerald-400/60 bg-emerald-500/12 text-emerald-200 hover:bg-emerald-500/20' : 'border-white/10 bg-[#161a29] text-gray-500 cursor-not-allowed'}`}
@@ -748,7 +902,10 @@ const SessionView: React.FC<SessionViewProps> = ({ tracks, bpm, engineStats, onE
                     </div>
 
                     <div className="text-[8px] text-gray-500 uppercase tracking-wider text-center">
-                        Scenes REC: {sceneRecordingEvents.length}
+                        Scenes REC: {sceneRecordingSummary.eventCount}
+                    </div>
+                    <div className="text-[8px] text-gray-600 uppercase tracking-wider text-center">
+                        {sceneRecordingSummary.uniqueSceneCount} SCN | {sceneRecordingSummary.uniqueTrackCount} TRK | {sceneRecordingSummary.durationSec.toFixed(2)}s
                     </div>
 
                     <div className="pt-[6px] flex flex-col gap-2">

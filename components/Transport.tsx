@@ -1,11 +1,15 @@
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Play, Square, Circle, Download, RotateCcw, Pause, SkipBack, SkipForward, Repeat, Activity, Minus, X, Maximize2, Minimize2 } from 'lucide-react';
 import { PunchRange, TransportState } from '../types';
 import { MidiDevice } from '../services/MidiService';
 import { audioEngine } from '../services/audioEngine';
 import { platformService } from '../services/platformService';
 import { positionToBarTime } from '../services/transportStateService';
+import {
+    getTransportClockSnapshot,
+    subscribeTransportClock
+} from '../services/transportClockStore';
 import Knob from './Knob';
 import AppLogo from './AppLogo';
 
@@ -239,6 +243,11 @@ const Transport: React.FC<TransportProps> = React.memo(({
     const [logoBreathing, setLogoBreathing] = useState(false);
     const [showPunchPanel, setShowPunchPanel] = useState(false);
     const punchPanelRef = useRef<HTMLDivElement>(null);
+    const transportClock = useSyncExternalStore(
+        subscribeTransportClock,
+        getTransportClockSnapshot,
+        getTransportClockSnapshot
+    );
 
     const triggerLogoBreath = useCallback((durationMs: number) => {
         setLogoBreathing(true);
@@ -334,7 +343,12 @@ const Transport: React.FC<TransportProps> = React.memo(({
     const inactiveClass = "bg-[#2d2d2d] text-gray-400 hover:bg-[#3d3d3d] hover:text-gray-200";
     const engineIsPlaying = audioEngine.getIsPlaying();
     const hasResumeOffset = audioEngine.getCurrentTime() > 0.0001;
-    const isPaused = !transport.isPlaying && !engineIsPlaying && (positionToBarTime(transport) > 1.0001 || hasResumeOffset);
+    const transportDisplayPosition = {
+        currentBar: transportClock.currentBar || transport.currentBar,
+        currentBeat: transportClock.currentBeat || transport.currentBeat,
+        currentSixteenth: transportClock.currentSixteenth || transport.currentSixteenth
+    };
+    const isPaused = !transport.isPlaying && !engineIsPlaying && (positionToBarTime(transportDisplayPosition) > 1.0001 || hasResumeOffset);
     const isLoopEnabled = transport.loopMode !== 'off';
     const loopBadge = transport.loopMode === 'once' ? '1' : transport.loopMode === 'infinite' ? '∞' : '';
     const loopTitle = transport.loopMode === 'off'
@@ -452,10 +466,10 @@ const Transport: React.FC<TransportProps> = React.memo(({
 
     useEffect(() => {
         if (!transport.isPlaying) return;
-        if (transport.currentBeat !== 1 || transport.currentSixteenth !== 1) return;
+        if (transportDisplayPosition.currentBeat !== 1 || transportDisplayPosition.currentSixteenth !== 1) return;
 
         triggerLogoBreath(1040);
-    }, [transport.currentBar, transport.currentBeat, transport.currentSixteenth, transport.isPlaying, triggerLogoBreath]);
+    }, [transport.isPlaying, transportDisplayPosition.currentBar, transportDisplayPosition.currentBeat, transportDisplayPosition.currentSixteenth, triggerLogoBreath]);
 
     useEffect(() => () => {
         if (breathResetTimerRef.current) {
@@ -574,7 +588,11 @@ const Transport: React.FC<TransportProps> = React.memo(({
                         <span className="absolute -top-2 left-1 text-[8px] font-bold text-gray-500 bg-daw-bg px-1 z-10">POSICIÓN</span>
                         <div className="h-8 px-3 bg-[#1a1a1a] border border-daw-border rounded-[2px] flex items-center justify-center min-w-[80px]">
                             <span className="font-mono font-bold text-sm text-daw-violet">
-                                {transport.currentBar}<span className="text-gray-600">.</span>{transport.currentBeat}<span className="text-gray-600">.</span>{transport.currentSixteenth}
+                                {transportDisplayPosition.currentBar}
+                                <span className="text-gray-600">.</span>
+                                {transportDisplayPosition.currentBeat}
+                                <span className="text-gray-600">.</span>
+                                {transportDisplayPosition.currentSixteenth}
                             </span>
                         </div>
                     </div>

@@ -4,7 +4,7 @@ import Transport from './components/Transport';
 import DeviceRack from './components/DeviceRack';
 import Timeline from './components/Timeline';
 import Mixer from './components/Mixer';
-import Editor from './components/Editor';
+import Editor, { type EditorTransportView } from './components/Editor';
 import Browser from './components/Browser';
 import TakeLanesPanel from './components/TakeLanesPanel';
 import type { ApplyScanPayload } from './components/NoteScannerPanel';
@@ -15,7 +15,7 @@ import { FluidPanel } from './components/FluidPanel';
 import AsciiPerformerDock from './components/AsciiPerformerDock';
 import CollabPanel, { CollabActivityEntry } from './components/CollabPanel';
 import { INITIAL_TRACKS, getTrackColorByPosition } from './constants';
-import { LoopMode, Note, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry, PunchRange } from './types';
+import { LoopMode, Note, SessionHealthSnapshot, StudioPerformanceProfile, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry, PunchRange } from './types';
 import { engineAdapter, type EngineDiagnostics } from './services/engineAdapter';
 import { midiService, MidiDevice } from './services/MidiService';
 import { platformService } from './services/platformService';
@@ -62,6 +62,11 @@ import {
     commitRecordingTakeBatch
 } from './services/recordingTakeService';
 import {
+    buildAudioPriorityStabilityReport,
+    createAudioPriorityController,
+    type GlobalAudioPriorityDecision
+} from './services/sessionPerformanceService';
+import {
     applyCompClipEdits,
     isCompDerivedClipId,
     normalizePunchRange,
@@ -84,12 +89,19 @@ import {
 } from 'lucide-react';
 import { HardwareSettingsModal } from './components/HardwareSettingsModal';
 import { audioEngine } from './services/audioEngine';
+import {
+    getTransportClockSnapshot,
+    setTransportClockSnapshot
+} from './services/transportClockStore';
 
 const AISidebar = React.lazy(() => import('./components/AISidebar'));
 const NoteScannerPanel = React.lazy(() => import('./components/NoteScannerPanel'));
 const ExportModal = React.lazy(() => import('./components/ExportModal'));
 
 const TRACK_COLOR_GRADIENT_TARGET = 48;
+const PERFORMANCE_PROFILE: StudioPerformanceProfile = 'stage-safe';
+const SESSION_LAUNCH_LATEST_REPORT_STORAGE_KEY = 'hollowbits.session-launch.latest-report.v1';
+const AUDIO_PRIORITY_TRANSITIONS_STORAGE_KEY = 'hollowbits.audio-priority.transitions.v1';
 
 // --- ATOMIC COMPONENTS (Extracted for Performance) ---
 
@@ -321,7 +333,7 @@ const App: React.FC = () => {
 
     // Zoom & UI
     const [zoom] = useState(40);
-    const [trackHeight] = useState(92);
+    const [trackHeight] = useState(124);
 
     // Engine State
     const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => loadAudioSettingsFromStorage());
@@ -345,6 +357,35 @@ const App: React.FC = () => {
         schedulerP99TickDriftMs: 0,
         schedulerP99LoopMs: 0
     });
+    const [uiFrameTelemetry, setUiFrameTelemetry] = useState<{
+        fpsP95: number;
+        frameDropRatio: number;
+    }>({
+        fpsP95: 60,
+        frameDropRatio: 0
+    });
+    const [sessionLaunchP95Ms, setSessionLaunchP95Ms] = useState(0);
+    const [sessionHealthSnapshot, setSessionHealthSnapshot] = useState<SessionHealthSnapshot>(() => (
+        engineAdapter.getSessionHealthSnapshot({
+            profile: PERFORMANCE_PROFILE,
+            hasRealtimeAudio: false,
+            uiFpsP95: 60,
+            uiFrameDropRatio: 0
+        })
+    ));
+    const [globalAudioPriority, setGlobalAudioPriority] = useState<GlobalAudioPriorityDecision>({
+        mode: 'normal',
+        uiUpdateDebounceMs: 12,
+        reduceAnimations: false,
+        disableHeavyVisuals: false,
+        simplifyMeters: false,
+        showBanner: false,
+        reasons: ['initial']
+    });
+    const engineOverloadBaselineRef = useRef<{
+        dropoutCount: number;
+        underrunCount: number;
+    } | null>(null);
 
     // Refs
     const fileMenuRef = useRef<HTMLDivElement>(null);
@@ -372,6 +413,15 @@ const App: React.FC = () => {
     const boundaryTransitionInFlightRef = useRef(false);
     const finalizeActiveRecordingsRef = useRef<(() => Promise<void>) | null>(null);
     const hasActiveRecordingSessionsRef = useRef<(() => boolean) | null>(null);
+    const audioPriorityControllerRef = useRef(createAudioPriorityController({
+        profile: PERFORMANCE_PROFILE,
+        escalationStreak: 2,
+        criticalEscalationStreak: 1,
+        deescalationStreak: 4,
+        idleDeescalationStreak: 2,
+        deescalationCooldownMs: 10000,
+        maxTransitionsPer20sIdle: 1
+    }));
 
     // Audio Lock Ref (Prevents double-fire on rapid clicks)
     const isPlayingRef = useRef(false);
@@ -599,6 +649,105 @@ const App: React.FC = () => {
     }, [audioSettings.bufferSize, audioSettings.latencyHint, engineStats.activeSampleRate]);
 
     useEffect(() => {
+        if (engineOverloadBaselineRef.current) return;
+        engineOverloadBaselineRef.current = {
+            dropoutCount: Math.max(0, Number(engineStats.schedulerDropoutCount || 0)),
+            underrunCount: Math.max(0, Number(engineStats.schedulerUnderrunCount || 0))
+        };
+    }, [engineStats.schedulerDropoutCount, engineStats.schedulerUnderrunCount]);
+
+    useEffect(() => {
+        let rafId = 0;
+        let lastFrame = performance.now();
+        let sampleFrames = 0;
+        let droppedFrames = 0;
+        const frameIntervalsMs: number[] = [];
+        let sampleWindowStart = performance.now();
+        let active = true;
+
+        const commitTelemetry = (fpsP95: number, frameDropRatio: number) => {
+            setUiFrameTelemetry((prev) => {
+                if (
+                    Math.abs(prev.fpsP95 - fpsP95) < 0.5
+                    && Math.abs(prev.frameDropRatio - frameDropRatio) < 0.005
+                ) {
+                    return prev;
+                }
+                return {
+                    fpsP95,
+                    frameDropRatio
+                };
+            });
+        };
+
+        const tick = (timestamp: number) => {
+            if (!active) return;
+
+            const delta = Math.max(0, timestamp - lastFrame);
+            lastFrame = timestamp;
+
+            if (delta > 0) {
+                frameIntervalsMs.push(delta);
+                if (frameIntervalsMs.length > 320) {
+                    frameIntervalsMs.shift();
+                }
+                sampleFrames += 1;
+                if (delta > 24) {
+                    droppedFrames += 1;
+                }
+            }
+
+            const elapsed = timestamp - sampleWindowStart;
+            if (elapsed >= 1600) {
+                const sorted = [...frameIntervalsMs].sort((left, right) => left - right);
+                const p95Index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * 0.95)));
+                const p95Delta = sorted.length > 0 ? sorted[p95Index] : 16.6667;
+                const fpsP95 = Math.max(1, 1000 / Math.max(1, p95Delta));
+                const frameDropRatio = sampleFrames > 0 ? droppedFrames / sampleFrames : 0;
+                commitTelemetry(fpsP95, frameDropRatio);
+                sampleWindowStart = timestamp;
+                sampleFrames = 0;
+                droppedFrames = 0;
+                frameIntervalsMs.length = 0;
+            }
+
+            rafId = requestAnimationFrame(tick);
+        };
+
+        rafId = requestAnimationFrame(tick);
+        return () => {
+            active = false;
+            if (rafId) cancelAnimationFrame(rafId);
+        };
+    }, []);
+
+    useEffect(() => {
+        const readLaunchP95FromStorage = () => {
+            try {
+                const raw = localStorage.getItem(SESSION_LAUNCH_LATEST_REPORT_STORAGE_KEY);
+                if (!raw) {
+                    setSessionLaunchP95Ms(0);
+                    return;
+                }
+
+                const parsed = JSON.parse(raw) as { summary?: { p95LaunchErrorMs?: number } };
+                const nextP95 = Number.isFinite(parsed?.summary?.p95LaunchErrorMs)
+                    ? Math.max(0, Number(parsed.summary?.p95LaunchErrorMs))
+                    : 0;
+                setSessionLaunchP95Ms((prev) => (
+                    Math.abs(prev - nextP95) < 0.05 ? prev : nextP95
+                ));
+            } catch {
+                setSessionLaunchP95Ms(0);
+            }
+        };
+
+        readLaunchP95FromStorage();
+        const interval = window.setInterval(readLaunchP95FromStorage, 1500);
+        return () => window.clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
         engineAdapter.setAudioConfiguration(audioSettings);
         try {
             localStorage.setItem(AUDIO_SETTINGS_STORAGE_KEY, JSON.stringify(audioSettings));
@@ -607,6 +756,16 @@ const App: React.FC = () => {
             console.warn('No se pudieron guardar preferencias de audio.', error);
         }
     }, [audioSettings]);
+
+    useEffect(() => {
+        setTransportClockSnapshot({
+            currentBar: transport.currentBar,
+            currentBeat: transport.currentBeat,
+            currentSixteenth: transport.currentSixteenth,
+            isPlaying: transport.isPlaying || isPlayingRef.current || engineAdapter.getIsPlaying(),
+            updatedAt: Date.now()
+        });
+    }, [transport.currentBar, transport.currentBeat, transport.currentSixteenth, transport.isPlaying]);
 
     // Sync Ref with State when stopped externally (e.g. end of song)
     useEffect(() => {
@@ -867,6 +1026,10 @@ const App: React.FC = () => {
         return transportCommandTokenRef.current === token;
     }, []);
 
+    const getTransportCursorBar = useCallback(() => {
+        return positionToBarTime(getTransportClockSnapshot());
+    }, []);
+
     const playFromTransportCursor = useCallback(async (commandToken: number): Promise<boolean> => {
         if (isPlayingRef.current || engineAdapter.getIsPlaying()) {
             pauseResumeArmedRef.current = false;
@@ -884,7 +1047,7 @@ const App: React.FC = () => {
             return false;
         }
 
-        const cursorBarTime = positionToBarTime(transport);
+        const cursorBarTime = getTransportCursorBar();
         const cursorTime = barToSeconds(cursorBarTime, transport.bpm);
         const projectEndBar = getProjectEndBar();
         const projectEndTime = barToSeconds(projectEndBar, transport.bpm);
@@ -925,7 +1088,7 @@ const App: React.FC = () => {
         }));
 
         return true;
-    }, [getProjectEndBar, isTransportCommandCurrent, transport]);
+    }, [getProjectEndBar, getTransportCursorBar, isTransportCommandCurrent, transport.bpm, transport.loopMode]);
 
 
     // --- TRANSPORT HANDLERS ---
@@ -1018,7 +1181,11 @@ const App: React.FC = () => {
                         inputGain: typeof track.micSettings?.inputGain === 'number' ? track.micSettings.inputGain : 1,
                         monitoringEnabled: false,
                         monitoringReverb: false,
-                        monitoringEcho: false
+                        monitoringEcho: false,
+                        monitorInputMode: track.micSettings?.monitorInputMode || 'mono',
+                        monitorLatencyCompensationMs: typeof track.micSettings?.monitorLatencyCompensationMs === 'number'
+                            ? track.micSettings.monitorLatencyCompensationMs
+                            : 0
                     };
 
                     const needsUpdate =
@@ -1254,10 +1421,6 @@ const App: React.FC = () => {
         setTransport((prev: TransportState) => ({ ...prev, bpm: clamped }));
         engineAdapter.setBpm(clamped);
     }, []);
-
-    const getTransportCursorBar = useCallback(() => {
-        return positionToBarTime(transport);
-    }, [transport.currentBar, transport.currentBeat, transport.currentSixteenth]);
 
     const toggleSelectedTrackPunch = useCallback(() => {
         if (!selectedTrackId) return;
@@ -1770,12 +1933,13 @@ const App: React.FC = () => {
         const clipLengthBars = Math.max(1, Math.ceil(maxEnd16th / 16));
         const now = Date.now();
         const entropy = Math.floor(Math.random() * 10000);
+        const cursorBar = getTransportCursorBar();
 
         return {
             id: `c-scan-${now}-${entropy}`,
             name: clipName,
             color,
-            start: Math.max(1, transport.currentBar),
+            start: Math.max(1, cursorBar),
             length: clipLengthBars,
             notes,
             offset: 0,
@@ -1784,7 +1948,7 @@ const App: React.FC = () => {
             gain: 1,
             playbackRate: 1
         };
-    }, [transport.currentBar]);
+    }, [getTransportCursorBar]);
 
     const handleCreateMidiTrackFromScan = useCallback((payload: ApplyScanPayload) => {
         if (payload.notes.length === 0) {
@@ -2317,7 +2481,9 @@ const App: React.FC = () => {
                     inputGain: 1,
                     monitoringEnabled: true,
                     monitoringReverb: false,
-                    monitoringEcho: false
+                    monitoringEcho: false,
+                    monitorInputMode: 'mono',
+                    monitorLatencyCompensationMs: 0
                 }
             });
 
@@ -2385,9 +2551,13 @@ const App: React.FC = () => {
         await Promise.all(armedTracks.map(async (track) => {
             try {
                 await engineAdapter.startRecording(track.id, track.inputDeviceId);
+                const monitorLatencyCompBars = Math.max(
+                    0,
+                    ((track.micSettings?.monitorLatencyCompensationMs || 0) / 1000) / secondsPerBar
+                );
                 recordingSessionMetaRef.current.set(track.id, {
                     recordingStartBar: recordingTargetStartBar,
-                    latencyCompensationBars: estimatedLatencyCompensationBars,
+                    latencyCompensationBars: estimatedLatencyCompensationBars + monitorLatencyCompBars,
                     sourceTrimOffsetBars,
                     punchOutBar: punchPlan?.punchOutBar
                 });
@@ -2692,10 +2862,14 @@ const App: React.FC = () => {
                     isPlayingRef.current = false;
                     pauseResumeArmedRef.current = false;
                 }
+                const clockSnapshot = getTransportClockSnapshot();
                 const projectMetadata = createProjectDataSnapshot({
                     ...transport,
                     isPlaying: false,
-                    isRecording: false
+                    isRecording: false,
+                    currentBar: clockSnapshot.currentBar,
+                    currentBeat: clockSnapshot.currentBeat,
+                    currentSixteenth: clockSnapshot.currentSixteenth
                 }, projectName);
                 const jsonString = JSON.stringify(projectMetadata, null, 2);
                 setLoadingMessage("Escribiendo disco...");
@@ -3212,23 +3386,12 @@ const App: React.FC = () => {
 
     const handleTimelineTimeUpdate = useCallback((bar: number, beat: number, sixteenth: number) => {
         const engineIsPlaying = engineAdapter.getIsPlaying() || isPlayingRef.current;
-        setTransport((prev: TransportState) => {
-            if (
-                prev.currentBar === bar
-                && prev.currentBeat === beat
-                && prev.currentSixteenth === sixteenth
-                && prev.isPlaying === engineIsPlaying
-            ) {
-                return prev;
-            }
-
-            return {
-                ...prev,
-                isPlaying: engineIsPlaying,
-                currentBar: bar,
-                currentBeat: beat,
-                currentSixteenth: sixteenth
-            };
+        setTransportClockSnapshot({
+            currentBar: bar,
+            currentBeat: beat,
+            currentSixteenth: sixteenth,
+            isPlaying: engineIsPlaying,
+            updatedAt: Date.now()
         });
     }, []);
 
@@ -3263,15 +3426,193 @@ const App: React.FC = () => {
         appendTrack(newTrack, { reason: 'mixer-create-group', recolor: true });
     }, [appendTrack, tracks, getProgressiveTrackColor]);
 
+    const hasRealtimeAudioActivity = useMemo(() => {
+        if (transport.isPlaying || transport.isRecording || isPlayingRef.current || engineAdapter.getIsPlaying()) {
+            return true;
+        }
+
+        return tracks.some((track) => {
+            if (track.type !== TrackType.AUDIO) {
+                return false;
+            }
+
+            if (track.monitor === 'in') {
+                return true;
+            }
+
+            if (track.monitor === 'auto' && track.isArmed) {
+                return true;
+            }
+
+            return Boolean(track.micSettings?.monitoringEnabled);
+        });
+    }, [tracks, transport.isPlaying, transport.isRecording]);
+    const recentDropoutDelta = useMemo(() => {
+        const baseline = engineOverloadBaselineRef.current;
+        if (!baseline) return 0;
+        return Math.max(0, Number(engineStats.schedulerDropoutCount || 0) - baseline.dropoutCount);
+    }, [engineStats.schedulerDropoutCount]);
+    const recentUnderrunDelta = useMemo(() => {
+        const baseline = engineOverloadBaselineRef.current;
+        if (!baseline) return 0;
+        return Math.max(0, Number(engineStats.schedulerUnderrunCount || 0) - baseline.underrunCount);
+    }, [engineStats.schedulerUnderrunCount]);
+    const computedSessionHealthSnapshot = useMemo(() => {
+        const baseSnapshot = engineAdapter.getSessionHealthSnapshot({
+            capturedAt: Date.now(),
+            profile: PERFORMANCE_PROFILE,
+            hasRealtimeAudio: hasRealtimeAudioActivity,
+            dropoutsDelta: recentDropoutDelta,
+            underrunsDelta: recentUnderrunDelta,
+            launchErrorP95Ms: sessionLaunchP95Ms,
+            uiFpsP95: uiFrameTelemetry.fpsP95,
+            uiFrameDropRatio: uiFrameTelemetry.frameDropRatio
+        });
+
+        return {
+            ...baseSnapshot,
+            cpuAudioP95Percent: Math.max(
+                Number(engineStats.schedulerCpuLoadP95Percent || 0),
+                baseSnapshot.cpuAudioP95Percent
+            ),
+            transportDriftP99Ms: Math.max(
+                Number(engineStats.schedulerP99TickDriftMs || 0),
+                baseSnapshot.transportDriftP99Ms
+            ),
+            monitorLatencyP95Ms: Math.max(
+                Number((engineStats.latency || 0) * 1000),
+                baseSnapshot.monitorLatencyP95Ms
+            )
+        };
+    }, [
+        engineStats.latency,
+        engineStats.schedulerCpuLoadP95Percent,
+        engineStats.schedulerP99TickDriftMs,
+        hasRealtimeAudioActivity,
+        recentDropoutDelta,
+        recentUnderrunDelta,
+        sessionLaunchP95Ms,
+        uiFrameTelemetry.fpsP95,
+        uiFrameTelemetry.frameDropRatio
+    ]);
+    useEffect(() => {
+        setSessionHealthSnapshot((prev) => {
+            const isSame =
+                prev.profile === computedSessionHealthSnapshot.profile
+                && prev.hasRealtimeAudio === computedSessionHealthSnapshot.hasRealtimeAudio
+                && Math.abs(prev.cpuAudioP95Percent - computedSessionHealthSnapshot.cpuAudioP95Percent) < 0.1
+                && prev.dropoutsDelta === computedSessionHealthSnapshot.dropoutsDelta
+                && prev.underrunsDelta === computedSessionHealthSnapshot.underrunsDelta
+                && Math.abs(prev.launchErrorP95Ms - computedSessionHealthSnapshot.launchErrorP95Ms) < 0.1
+                && Math.abs(prev.uiFpsP95 - computedSessionHealthSnapshot.uiFpsP95) < 0.5
+                && Math.abs(prev.uiFrameDropRatio - computedSessionHealthSnapshot.uiFrameDropRatio) < 0.005
+                && Math.abs(prev.transportDriftP99Ms - computedSessionHealthSnapshot.transportDriftP99Ms) < 0.1
+                && Math.abs(prev.monitorLatencyP95Ms - computedSessionHealthSnapshot.monitorLatencyP95Ms) < 0.1;
+
+            if (isSame) {
+                return prev;
+            }
+
+            return computedSessionHealthSnapshot;
+        });
+    }, [computedSessionHealthSnapshot]);
+    useEffect(() => {
+        const decision = audioPriorityControllerRef.current.evaluate(sessionHealthSnapshot);
+        setGlobalAudioPriority((prev) => {
+            const same =
+                prev.mode === decision.mode
+                && prev.uiUpdateDebounceMs === decision.uiUpdateDebounceMs
+                && prev.reduceAnimations === decision.reduceAnimations
+                && prev.disableHeavyVisuals === decision.disableHeavyVisuals
+                && prev.simplifyMeters === decision.simplifyMeters
+                && prev.showBanner === decision.showBanner
+                && prev.reasons.join('|') === decision.reasons.join('|');
+
+            if (same) {
+                return prev;
+            }
+
+            return {
+                mode: decision.mode,
+                uiUpdateDebounceMs: decision.uiUpdateDebounceMs,
+                reduceAnimations: decision.reduceAnimations,
+                disableHeavyVisuals: decision.disableHeavyVisuals,
+                simplifyMeters: decision.simplifyMeters,
+                showBanner: decision.showBanner,
+                reasons: decision.reasons
+            };
+        });
+
+        if (decision.transition) {
+            const transitions = audioPriorityControllerRef.current.getTransitions();
+            const stability = buildAudioPriorityStabilityReport(transitions, 20, 1);
+            try {
+                localStorage.setItem(AUDIO_PRIORITY_TRANSITIONS_STORAGE_KEY, JSON.stringify({
+                    capturedAt: Date.now(),
+                    transitions,
+                    stability
+                }));
+            } catch {
+                // Non-blocking persistence path.
+            }
+        }
+    }, [sessionHealthSnapshot]);
     const isScannerImmersive = showNoteScanner;
     const selectedTrack = tracks.find((track) => track.id === selectedTrackId) || null;
     const selectedAudioTrack = selectedTrack?.type === TrackType.AUDIO ? selectedTrack : null;
     const selectedTrackPunchRange = useMemo(() => (
         selectedAudioTrack ? normalizePunchRange(selectedAudioTrack.punchRange) : null
     ), [selectedAudioTrack]);
+    const handleCloseSettings = useCallback(() => {
+        setShowSettings(false);
+    }, []);
+    const handleAudioSettingsChange = useCallback((nextSettings: AudioSettings) => {
+        setAudioSettings(sanitizeAudioSettings(nextSettings));
+    }, []);
+    const handleAiPatternGenerated = useCallback((notes: Note[], name: string) => {
+        const color = getProgressiveTrackColor(tracks.length, tracks.length + 1);
+        const newTrack = createTrack({
+            id: `t-ai-${Date.now()}`,
+            name: name || 'AI Generator',
+            type: TrackType.MIDI,
+            color,
+            volume: -6,
+            clips: [{
+                id: `c-ai-${Date.now()}`,
+                name,
+                color,
+                start: 1,
+                length: 4,
+                notes,
+                offset: 0,
+                fadeIn: 0,
+                fadeOut: 0,
+                gain: 1,
+                playbackRate: 1
+            }]
+        });
+
+        appendTrack(newTrack, { reason: 'ai-generator-track', recolor: true });
+        closeAllToolPanels();
+    }, [appendTrack, closeAllToolPanels, getProgressiveTrackColor, tracks.length]);
+    const handleTakePanelAudition = useCallback((trackId: string, takeId: string) => {
+        void handleAuditionTakeFromPanel(trackId, takeId);
+    }, [handleAuditionTakeFromPanel]);
+    const handleEditorClipUpdate = useCallback((trackId: string, clipId: string, updates: Partial<Clip>, options?: { noHistory?: boolean; reason?: string }) => {
+        updateClipById(trackId, clipId, updates, { recolor: false, ...options });
+    }, [updateClipById]);
+    const editorTransportView = useMemo<EditorTransportView>(() => ({
+        snapToGrid: transport.snapToGrid,
+        gridSize: transport.gridSize,
+        scaleRoot: transport.scaleRoot,
+        scaleType: transport.scaleType
+    }), [transport.gridSize, transport.scaleRoot, transport.scaleType, transport.snapToGrid]);
 
     return (
-        <div className="daw-immersive-shell flex flex-col h-screen w-screen bg-[#111218] text-daw-text font-sans overflow-hidden selection:bg-daw-ruby selection:text-white">
+        <div
+            data-audio-priority={globalAudioPriority.mode}
+            className={`daw-immersive-shell flex flex-col h-screen w-screen bg-[#111218] text-daw-text font-sans overflow-hidden selection:bg-daw-ruby selection:text-white ${globalAudioPriority.reduceAnimations ? 'audio-priority-reduced' : ''}`}
+        >
 
             {loadingProject && (
                 <div className="fixed inset-0 z-[9999] bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center animate-in fade-in duration-300">
@@ -3299,6 +3640,21 @@ const App: React.FC = () => {
                 </div>
             )}
 
+            {globalAudioPriority.showBanner && (
+                <div className="fixed right-4 top-[56px] z-[130] px-3 py-1.5 rounded-sm border border-daw-ruby/35 bg-[#140e16]/92 backdrop-blur-md text-[9px] uppercase tracking-wider font-bold text-gray-200 flex items-center gap-2 shadow-lg">
+                    <span className="text-daw-ruby">Audio Priority</span>
+                    <span className={globalAudioPriority.mode === 'critical' ? 'text-red-300' : 'text-amber-300'}>
+                        {globalAudioPriority.mode.toUpperCase()}
+                    </span>
+                    <span className="text-gray-500 font-mono">
+                        UI p95 {uiFrameTelemetry.fpsP95.toFixed(1)}fps
+                    </span>
+                    <span className="text-gray-600 font-mono">
+                        Drop {(uiFrameTelemetry.frameDropRatio * 100).toFixed(1)}%
+                    </span>
+                </div>
+            )}
+
             {!isScannerImmersive && (
                 <Transport
                     transport={transport}
@@ -3323,9 +3679,9 @@ const App: React.FC = () => {
 
             <HardwareSettingsModal
                 isOpen={showSettings}
-                onClose={() => setShowSettings(false)}
+                onClose={handleCloseSettings}
                 audioSettings={audioSettings}
-                onAudioSettingsChange={(nextSettings) => setAudioSettings(sanitizeAudioSettings(nextSettings))}
+                onAudioSettingsChange={handleAudioSettingsChange}
                 engineStats={engineStats}
             />
 
@@ -3396,32 +3752,7 @@ const App: React.FC = () => {
                             isOpen={showAI}
                             onClose={closeAllToolPanels}
                             bpm={transport.bpm}
-                            onPatternGenerated={(notes: Note[], name: string) => {
-                                const color = getProgressiveTrackColor(tracks.length, tracks.length + 1);
-                                const newTrack = createTrack({
-                                    id: `t-ai-${Date.now()}`,
-                                    name: name || 'AI Generator',
-                                    type: TrackType.MIDI,
-                                    color,
-                                    volume: -6,
-                                    clips: [{
-                                        id: `c-ai-${Date.now()}`,
-                                        name,
-                                        color,
-                                        start: 1,
-                                        length: 4,
-                                        notes,
-                                        offset: 0,
-                                        fadeIn: 0,
-                                        fadeOut: 0,
-                                        gain: 1,
-                                        playbackRate: 1
-                                    }]
-                                });
-
-                                appendTrack(newTrack, { reason: 'ai-generator-track', recolor: true });
-                                closeAllToolPanels();
-                            }}
+                            onPatternGenerated={handleAiPatternGenerated}
                             tracks={tracks}
                         />
                     </React.Suspense>
@@ -3507,7 +3838,7 @@ const App: React.FC = () => {
                                     onSelectTake={handleSelectTakeFromPanel}
                                     onToggleTakeMute={handleToggleTakeMuteFromPanel}
                                     onToggleTakeSolo={handleToggleTakeSoloFromPanel}
-                                    onAuditionTake={(trackId, takeId) => { void handleAuditionTakeFromPanel(trackId, takeId); }}
+                                    onAuditionTake={handleTakePanelAudition}
                                     onSetCompLane={handleSetCompLaneFromPanel}
                                 />
                             </div>
@@ -3517,6 +3848,7 @@ const App: React.FC = () => {
                             <SessionView
                                 tracks={tracks}
                                 bpm={transport.bpm}
+                                sessionHealthSnapshot={sessionHealthSnapshot}
                                 engineStats={engineStats}
                                 onClipSelect={handleClipSelect}
                                 onExternalDrop={(trackId, sceneIndex, payload) => {
@@ -3557,13 +3889,16 @@ const App: React.FC = () => {
                                         <Editor
                                             track={selectedTrack}
                                             selectedClipId={selectedClipId}
-                                            onClipUpdate={(trackId, clipId, updates, options) => updateClipById(trackId, clipId, updates, { recolor: false, ...options })}
-                                            transport={transport}
+                                            onClipUpdate={handleEditorClipUpdate}
+                                            transport={editorTransportView}
                                         />
                                     </div>
                                 )}
                             </div>
-                            <AsciiPerformerDock isPlaying={transport.isPlaying} />
+                            <AsciiPerformerDock
+                                isPlaying={transport.isPlaying}
+                                suspendAnimation={globalAudioPriority.disableHeavyVisuals}
+                            />
                         </div>
                     </div>
                 </div>

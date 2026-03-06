@@ -1,7 +1,7 @@
 
 import React, { useCallback, useSyncExternalStore } from 'react';
 import { Track } from '../types';
-import { Trash2, Circle } from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 import Knob from './Knob';
 import { trackHeaderMeterStore } from '../services/trackHeaderMeterStore';
 
@@ -16,6 +16,11 @@ interface TrackHeaderProps {
 
 const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isSelected, onSelect, onUpdate, onDelete }) => {
     const monitorModes: Track['monitor'][] = ['in', 'auto', 'off'];
+    const monitorModeActiveClass: Record<Track['monitor'], string> = {
+        in: 'bg-[#ff4fc3] text-[#190a13] border border-[#ff9be3] shadow-[0_0_8px_rgba(255,79,195,0.32)]',
+        auto: 'bg-[#dc87ff] text-[#1b0a23] border border-[#f0bfff] shadow-[0_0_8px_rgba(220,135,255,0.3)]',
+        off: 'bg-[#ff8ea9] text-[#200b14] border border-[#ffc6d5] shadow-[0_0_8px_rgba(255,142,169,0.28)]'
+    };
 
     const meterSnapshot = useSyncExternalStore(
         useCallback((listener) => trackHeaderMeterStore.subscribe(track.id, listener), [track.id]),
@@ -31,11 +36,11 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
         return Math.pow(normalized, 1.35);
     };
 
-    const showKnobs = height >= 70;
-    const showMonitor = height >= 86;
-    const isCompact = height < 100;
-    const compactControls = height < 120;
-    const knobSize = compactControls ? 18 : 24;
+    const showKnobs = height >= 74;
+    const showMonitor = height >= 92;
+    const isCompact = height < 116;
+    const compactControls = height < 122;
+    const knobSize = compactControls ? 20 : 26;
     const showKnobLabels = !compactControls;
     const punchRange = track.punchRange || {
         enabled: false,
@@ -58,7 +63,7 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
         <div
             className={`h-full w-full flex border-b border-daw-border relative group select-none overflow-hidden font-sans transition-colors
         ${isSelected ? 'bg-[#262626]' : 'bg-[#1e1e1e] hover:bg-[#222]'}
-        ${isCompact ? 'p-1' : 'p-2'}
+        ${isCompact ? 'p-1.5' : 'p-2.5'}
       `}
             onClick={(e) => { e.stopPropagation(); onSelect(); }}
         >
@@ -71,7 +76,7 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
             ></div>
 
             <div className="flex-1 flex flex-col min-w-0 relative h-full pl-2">
-                <div className={`flex items-center justify-between shrink-0 h-4 ${showKnobs ? 'mb-0.5' : 'mb-0'}`}>
+                <div className={`flex items-center justify-between shrink-0 h-5 ${showKnobs ? 'mb-1' : 'mb-0'}`}>
                     <div className="flex items-center gap-2 overflow-hidden min-w-0">
                         <span className={`font-black text-[11px] truncate uppercase tracking-wider ${isSelected ? 'text-white' : 'text-gray-400'}`}>
                             {track.name}
@@ -86,7 +91,7 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
                 </div>
 
                 {showKnobs && (
-                    <div className="flex-1 flex items-center justify-between px-1 min-h-0 my-0.5">
+                    <div className="flex-1 flex items-center justify-between px-1.5 min-h-0 my-1">
                         <Knob label="VOL" showLabel={showKnobLabels} value={track.volume} min={-60} max={6} defaultValue={0} size={knobSize} color={track.color} onChange={(val) => onUpdate({ volume: val })} />
                         <Knob label="PAN" showLabel={showKnobLabels} value={track.pan} min={-50} max={50} defaultValue={0} size={knobSize} color="#00fff2" bipolar={true} onChange={(val) => onUpdate({ pan: Math.round(val) })} />
                         <Knob label="REV" showLabel={showKnobLabels} value={track.reverb} min={0} max={100} defaultValue={0} size={knobSize} color="#f43f5e" onChange={(val) => onUpdate({ reverb: val })} />
@@ -97,24 +102,32 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
 
                 <div className="mt-auto flex flex-col gap-1 shrink-0">
                     {showMonitor && (
-                        <div className={`flex items-center gap-1 bg-[#121212] p-0.5 rounded-sm border border-[#333] mb-0.5 ${compactControls ? 'h-3.5' : 'h-4'}`}>
+                        <div className={`flex items-center gap-1 bg-[#121212] px-1 py-0.5 rounded-sm border border-[#333] mb-0.5 ${compactControls ? 'h-[18px]' : 'h-[22px]'}`}>
                             {!compactControls && <span className="text-[7px] font-bold text-gray-600 uppercase pl-1">In</span>}
                             <div className="flex-1 flex gap-[1px]">
                                 {monitorModes.map((mode) => (
-                                    <button key={mode} onClick={(e) => { e.stopPropagation(); onUpdate({ monitor: mode }); }} className={`flex-1 py-0 text-[7px] font-bold uppercase rounded-[1px] transition-all ${track.monitor === mode ? 'bg-daw-cyan text-black' : 'bg-[#1a1a1a] text-gray-500 hover:bg-[#222]'}`}>{mode}</button>
+                                    <button
+                                        key={mode}
+                                        onClick={(e) => { e.stopPropagation(); onUpdate({ monitor: mode }); }}
+                                        className={`flex-1 py-[1px] text-[8px] leading-none font-bold uppercase rounded-[1px] transition-all ${track.monitor === mode
+                                            ? monitorModeActiveClass[mode]
+                                            : 'bg-[#1a1a1a] text-gray-500 border border-[#2a2a2a] hover:bg-[#222] hover:text-gray-300'}`}
+                                    >
+                                        {mode}
+                                    </button>
                                 ))}
                             </div>
                         </div>
                     )}
 
-                    <div className={`grid grid-cols-4 gap-1 relative ${compactControls ? 'h-4' : 'h-5'}`}>
-                        <button onClick={(e) => { e.stopPropagation(); onUpdate({ isMuted: !track.isMuted }) }} className={`rounded-[1px] flex items-center justify-center font-bold ${compactControls ? 'text-[8px]' : 'text-[9px]'} border ${track.isMuted ? 'bg-[#eab308] text-black border-[#eab308]' : 'bg-[#2a2a2a] text-[#eab308] border-[#333]'}`}>M</button>
-                        <button onClick={(e) => { e.stopPropagation(); onUpdate({ isSoloed: !track.isSoloed }) }} className={`rounded-[1px] flex items-center justify-center font-bold ${compactControls ? 'text-[8px]' : 'text-[9px]'} border ${track.isSoloed ? 'bg-[#3b82f6] text-white border-[#3b82f6]' : 'bg-[#2a2a2a] text-[#3b82f6] border-[#333]'}`}>S</button>
+                    <div className={`grid grid-cols-4 gap-1 relative ${compactControls ? 'h-[18px]' : 'h-[22px]'}`}>
+                        <button onClick={(e) => { e.stopPropagation(); onUpdate({ isMuted: !track.isMuted }) }} className={`rounded-[1px] flex items-center justify-center leading-none font-bold ${compactControls ? 'text-[9px]' : 'text-[10px]'} border transition-all ${track.isMuted ? 'bg-[#ff7ebf] text-[#240d1c] border-[#ffb2d9]' : 'bg-[#2a2a2a] text-[#ff7ebf] border-[#333]'}`}>M</button>
+                        <button onClick={(e) => { e.stopPropagation(); onUpdate({ isSoloed: !track.isSoloed }) }} className={`rounded-[1px] flex items-center justify-center leading-none font-bold ${compactControls ? 'text-[9px]' : 'text-[10px]'} border transition-all ${track.isSoloed ? 'bg-[#d99cff] text-[#200f2c] border-[#f0c8ff]' : 'bg-[#2a2a2a] text-[#d99cff] border-[#333]'}`}>S</button>
                         <button
                             onClick={(e) => { e.stopPropagation(); onUpdate({ isArmed: !track.isArmed }) }}
-                            className={`rounded-[1px] flex items-center justify-center border transition-all ${track.isArmed ? 'bg-daw-ruby text-white border-daw-ruby animate-pulse' : 'bg-[#2a2a2a] text-daw-ruby border-[#333]'}`}
+                            className={`rounded-[1px] flex items-center justify-center leading-none font-bold ${compactControls ? 'text-[9px]' : 'text-[10px]'} border transition-all ${track.isArmed ? 'bg-[#ff4b88] text-[#240915] border-[#ff93b7] animate-pulse' : 'bg-[#2a2a2a] text-[#ff4b88] border-[#333]'}`}
                         >
-                            <Circle size={7} fill={track.isArmed ? "currentColor" : "none"} strokeWidth={3} />
+                            O
                         </button>
                         <button
                             onClick={(e) => {
@@ -127,7 +140,7 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
                                 });
                             }}
                             title={`Punch ${punchEnabled ? 'ON' : 'OFF'} (${punchRange.inBar.toFixed(2)}-${punchRange.outBar.toFixed(2)})`}
-                            className={`rounded-[1px] flex items-center justify-center font-bold ${compactControls ? 'text-[8px]' : 'text-[9px]'} border transition-all ${punchEnabled ? 'bg-daw-violet text-white border-daw-violet' : 'bg-[#2a2a2a] text-daw-violet border-[#333]'}`}
+                            className={`rounded-[1px] flex items-center justify-center leading-none font-bold ${compactControls ? 'text-[9px]' : 'text-[10px]'} border transition-all ${punchEnabled ? 'bg-[#be7cff] text-[#1e0f2a] border-[#e2bdff]' : 'bg-[#2a2a2a] text-[#be7cff] border-[#333]'}`}
                         >
                             P
                         </button>

@@ -619,4 +619,4 @@ const NoteScannerPanel: React.FC<NoteScannerPanelProps> = ({
 };
 
 export type { ApplyScanPayload };
-export default NoteScannerPanel;
+export default React.memo(NoteScannerPanel);
