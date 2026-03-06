@@ -29,6 +29,9 @@ interface RecordingSession {
 interface MonitoringSession {
     stream: MediaStream;
     source: MediaStreamAudioSourceNode;
+    inputSplitter: ChannelSplitterNode;
+    monoSum: GainNode;
+    stereoMerge: ChannelMergerNode;
     inputGain: GainNode;
     monitorGate: GainNode;
     reverbSend: GainNode;
@@ -2066,6 +2069,9 @@ class AudioEngine {
             });
 
             const source = this.ctx.createMediaStreamSource(stream);
+            const inputSplitter = this.ctx.createChannelSplitter(2);
+            const monoSum = this.ctx.createGain();
+            const stereoMerge = this.ctx.createChannelMerger(2);
             const inputGain = this.ctx.createGain();
             const monitorGate = this.ctx.createGain();
             const reverbSend = this.ctx.createGain();
@@ -2076,7 +2082,14 @@ class AudioEngine {
             const echoFeedback = this.ctx.createGain();
             const echoWet = this.ctx.createGain();
 
-            source.connect(inputGain);
+            // Fold to mono and duplicate into L/R so monitoring is always centered (binaural output).
+            monoSum.gain.value = 0.5;
+            source.connect(inputSplitter);
+            inputSplitter.connect(monoSum, 0, 0);
+            inputSplitter.connect(monoSum, 1, 0);
+            monoSum.connect(stereoMerge, 0, 0);
+            monoSum.connect(stereoMerge, 0, 1);
+            stereoMerge.connect(inputGain);
             inputGain.connect(monitorGate);
             monitorGate.connect(this.masterGain);
 
@@ -2093,6 +2106,9 @@ class AudioEngine {
             const session: MonitoringSession = {
                 stream,
                 source,
+                inputSplitter,
+                monoSum,
+                stereoMerge,
                 inputGain,
                 monitorGate,
                 reverbSend,
@@ -2119,6 +2135,9 @@ class AudioEngine {
 
         const nodes: AudioNode[] = [
             session.source,
+            session.inputSplitter,
+            session.monoSum,
+            session.stereoMerge,
             session.inputGain,
             session.monitorGate,
             session.reverbSend,

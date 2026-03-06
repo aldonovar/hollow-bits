@@ -1004,6 +1004,46 @@ const App: React.FC = () => {
                 applyTrackMutation((prevTracks) => commitRecordingTakeBatch(prevTracks, recordingCommits), { recolor: false });
             }
 
+            // Always stop monitor loopback and disarm tracks that were recording.
+            const finalizedTrackIds = new Set(activeRecordingTrackIds);
+            applyTrackMutation((prevTracks) => {
+                let changed = false;
+                const nextTracks = prevTracks.map((track) => {
+                    if (!finalizedTrackIds.has(track.id) || track.type !== TrackType.AUDIO) {
+                        return track;
+                    }
+
+                    const nextMicSettings = {
+                        profile: track.micSettings?.profile || 'studio-voice',
+                        inputGain: typeof track.micSettings?.inputGain === 'number' ? track.micSettings.inputGain : 1,
+                        monitoringEnabled: false,
+                        monitoringReverb: false,
+                        monitoringEcho: false
+                    };
+
+                    const needsUpdate =
+                        track.isArmed
+                        || track.monitor !== 'auto'
+                        || (track.micSettings?.monitoringEnabled ?? false)
+                        || (track.micSettings?.monitoringReverb ?? false)
+                        || (track.micSettings?.monitoringEcho ?? false);
+
+                    if (!needsUpdate) {
+                        return track;
+                    }
+
+                    changed = true;
+                    return {
+                        ...track,
+                        isArmed: false,
+                        monitor: 'auto' as const,
+                        micSettings: nextMicSettings
+                    };
+                });
+
+                return changed ? nextTracks : prevTracks;
+            }, { recolor: false });
+
             if (finalizeErrors.length > 0) {
                 console.warn('[Recording] Finalize completed with issues:', finalizeErrors);
             }

@@ -32,7 +32,7 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
     };
 
     const showKnobs = height >= 70;
-    const showMonitor = height >= 140;
+    const showMonitor = height >= 86;
     const isCompact = height < 100;
     const punchRange = track.punchRange || {
         enabled: false,
