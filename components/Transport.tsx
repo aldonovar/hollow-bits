@@ -1,7 +1,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Play, Square, Circle, Download, RotateCcw, Pause, SkipBack, SkipForward, Repeat, Activity, Minus, X, Maximize2, Minimize2 } from 'lucide-react';
-import { TransportState } from '../types';
+import { PunchRange, TransportState } from '../types';
 import { MidiDevice } from '../services/MidiService';
 import { audioEngine } from '../services/audioEngine';
 import { platformService } from '../services/platformService';
@@ -143,6 +143,52 @@ const DraggableNumber: React.FC<DraggableNumberProps> = ({
     );
 };
 
+interface PunchFieldProps {
+    label: string;
+    value: number;
+    min: number;
+    max: number;
+    step: number;
+    decimals?: number;
+    disabled?: boolean;
+    onChange: (value: number) => void;
+}
+
+const PunchField: React.FC<PunchFieldProps> = ({
+    label,
+    value,
+    min,
+    max,
+    step,
+    decimals = 2,
+    disabled = false,
+    onChange
+}) => {
+    const normalizedValue = Number.isFinite(value) ? value : min;
+    const clampedValue = Math.max(min, Math.min(max, normalizedValue));
+    const displayValue = clampedValue.toFixed(decimals);
+
+    return (
+        <label className="flex items-center gap-1 text-[9px] font-bold tracking-wide text-gray-400 uppercase">
+            <span className="w-9 text-right">{label}</span>
+            <input
+                type="number"
+                value={displayValue}
+                step={step}
+                min={min}
+                max={max}
+                disabled={disabled}
+                onChange={(event) => {
+                    const parsed = Number.parseFloat(event.target.value);
+                    if (!Number.isFinite(parsed)) return;
+                    onChange(Math.max(min, Math.min(max, parsed)));
+                }}
+                className={`w-[72px] h-6 bg-[#101012] border rounded-[2px] px-1.5 text-[10px] font-mono text-gray-100 focus:outline-none focus:border-daw-cyan ${disabled ? 'opacity-40 cursor-not-allowed border-daw-border' : 'border-[#2f2f36]'}`}
+            />
+        </label>
+    );
+};
+
 // --- MAIN TRANSPORT COMPONENT ---
 
 interface TransportProps {
@@ -161,6 +207,9 @@ interface TransportProps {
     setScaleRoot?: (root: number) => void;
     setScaleType?: (type: string) => void;
     projectName?: string;
+    selectedTrackName?: string | null;
+    selectedTrackPunchRange?: PunchRange | null;
+    onSelectedTrackPunchUpdate?: (updates: Partial<PunchRange>) => void;
 }
 
 const Transport: React.FC<TransportProps> = React.memo(({
@@ -175,7 +224,10 @@ const Transport: React.FC<TransportProps> = React.memo(({
     onSkipEnd,
     setBpm,
     setMasterTranspose,
-    onExport
+    onExport,
+    selectedTrackName,
+    selectedTrackPunchRange,
+    onSelectedTrackPunchUpdate
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const frequencyDataRef = useRef<Uint8Array | null>(null);
@@ -185,6 +237,8 @@ const Transport: React.FC<TransportProps> = React.memo(({
     const [isMaximized, setIsMaximized] = useState(false);
     const [windowControlPulse, setWindowControlPulse] = useState<'min' | 'max' | 'close' | null>(null);
     const [logoBreathing, setLogoBreathing] = useState(false);
+    const [showPunchPanel, setShowPunchPanel] = useState(false);
+    const punchPanelRef = useRef<HTMLDivElement>(null);
 
     const triggerLogoBreath = useCallback((durationMs: number) => {
         setLogoBreathing(true);
@@ -294,6 +348,18 @@ const Transport: React.FC<TransportProps> = React.memo(({
     const displayedBpm = Math.round(effectiveBpmExact);
     const bpmMin = Math.round(20 * pitchTempoMultiplier);
     const bpmMax = Math.round(999 * pitchTempoMultiplier);
+    const punchRange = selectedTrackPunchRange || {
+        enabled: false,
+        inBar: 1,
+        outBar: 2,
+        preRollBars: 1,
+        countInBars: 0
+    };
+    const canEditPunch = Boolean(onSelectedTrackPunchUpdate && selectedTrackName);
+    const punchInBar = Math.max(1, punchRange.inBar);
+    const punchOutBar = Math.max(punchInBar + 0.25, punchRange.outBar);
+    const preRollBars = Math.max(0, punchRange.preRollBars || 0);
+    const countInBars = Math.max(0, punchRange.countInBars || 0);
 
     const handleDisplayedBpmChange = (newDisplayedBpm: number) => {
         const quantizedBpm = Math.round(newDisplayedBpm);
@@ -301,6 +367,11 @@ const Transport: React.FC<TransportProps> = React.memo(({
         const normalizedBpm = clampedBpm / pitchTempoMultiplier;
         setBpm(normalizedBpm);
     };
+
+    const applyPunchUpdate = useCallback((updates: Partial<PunchRange>) => {
+        if (!onSelectedTrackPunchUpdate || !selectedTrackName) return;
+        onSelectedTrackPunchUpdate(updates);
+    }, [onSelectedTrackPunchUpdate, selectedTrackName]);
 
     const isDesktop = platformService.isDesktop;
 
@@ -329,6 +400,20 @@ const Transport: React.FC<TransportProps> = React.memo(({
         const timer = window.setTimeout(() => setWindowControlPulse(null), 180);
         return () => window.clearTimeout(timer);
     }, [windowControlPulse]);
+
+    useEffect(() => {
+        if (!showPunchPanel) return;
+
+        const handleWindowPointerDown = (event: MouseEvent) => {
+            const target = event.target as Node;
+            if (punchPanelRef.current && !punchPanelRef.current.contains(target)) {
+                setShowPunchPanel(false);
+            }
+        };
+
+        window.addEventListener('mousedown', handleWindowPointerDown);
+        return () => window.removeEventListener('mousedown', handleWindowPointerDown);
+    }, [showPunchPanel]);
 
     useEffect(() => {
         let isDisposed = false;
@@ -417,7 +502,7 @@ const Transport: React.FC<TransportProps> = React.memo(({
 
     return (
         <div
-            className="h-[50px] bg-[#11131a]/92 backdrop-blur-md border-b border-white/10 flex items-center px-4 justify-between select-none z-50 text-daw-text font-sans transition-[background-color,border-color] duration-500"
+            className="relative h-[50px] bg-[#11131a]/92 backdrop-blur-md border-b border-white/10 flex items-center px-4 justify-between select-none z-50 text-daw-text font-sans transition-[background-color,border-color] duration-500"
             style={{ WebkitAppRegion: isDesktop ? 'drag' : 'no-drag' } as AppRegionStyle}
             onDoubleClick={handleTransportDoubleClick}
         >
@@ -540,6 +625,95 @@ const Transport: React.FC<TransportProps> = React.memo(({
                     >
                         <Circle size={10} fill="currentColor" />
                     </button>
+
+                    <div className="relative ml-1" ref={punchPanelRef}>
+                        <button
+                            onClick={() => setShowPunchPanel((prev) => !prev)}
+                            className={`${buttonClass} ${punchRange.enabled ? 'bg-daw-violet text-white shadow-[0_0_10px_rgba(168,85,247,0.5)]' : inactiveClass}`}
+                            title="Panel Punch In/Out"
+                        >
+                            P
+                        </button>
+
+                        {showPunchPanel && (
+                            <div className="absolute top-[calc(100%+8px)] left-0 w-[288px] rounded-sm border border-daw-border bg-[#0b0d13]/98 backdrop-blur-md shadow-[0_16px_34px_rgba(0,0,0,0.55)] z-[220] p-2.5">
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="min-w-0">
+                                        <div className="text-[10px] font-black uppercase tracking-wider text-daw-violet">Punch Pro</div>
+                                        <div className="text-[10px] text-gray-400 truncate">
+                                            {selectedTrackName ? `Track: ${selectedTrackName}` : 'Selecciona una pista de audio'}
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => applyPunchUpdate({ enabled: !punchRange.enabled })}
+                                        disabled={!canEditPunch}
+                                        className={`h-6 px-2 rounded-[2px] text-[9px] font-bold uppercase border transition-colors ${punchRange.enabled ? 'bg-daw-violet/25 text-daw-violet border-daw-violet/60' : 'bg-[#1f2027] text-gray-400 border-[#2f3340]'} ${!canEditPunch ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                    >
+                                        {punchRange.enabled ? 'ON' : 'OFF'}
+                                    </button>
+                                </div>
+
+                                <div className="mt-2 grid grid-cols-1 gap-1.5">
+                                    <PunchField
+                                        label="IN"
+                                        value={punchInBar}
+                                        min={1}
+                                        max={999}
+                                        step={0.25}
+                                        decimals={2}
+                                        disabled={!canEditPunch}
+                                        onChange={(value) => applyPunchUpdate({
+                                            enabled: true,
+                                            inBar: value,
+                                            outBar: Math.max(punchOutBar, value + 0.25)
+                                        })}
+                                    />
+                                    <PunchField
+                                        label="OUT"
+                                        value={punchOutBar}
+                                        min={1.25}
+                                        max={1000}
+                                        step={0.25}
+                                        decimals={2}
+                                        disabled={!canEditPunch}
+                                        onChange={(value) => applyPunchUpdate({
+                                            enabled: true,
+                                            inBar: Math.min(punchInBar, value - 0.25),
+                                            outBar: value
+                                        })}
+                                    />
+                                    <PunchField
+                                        label="PRE"
+                                        value={preRollBars}
+                                        min={0}
+                                        max={16}
+                                        step={0.25}
+                                        decimals={2}
+                                        disabled={!canEditPunch}
+                                        onChange={(value) => applyPunchUpdate({
+                                            preRollBars: value
+                                        })}
+                                    />
+                                    <PunchField
+                                        label="COUNT"
+                                        value={countInBars}
+                                        min={0}
+                                        max={8}
+                                        step={1}
+                                        decimals={0}
+                                        disabled={!canEditPunch}
+                                        onChange={(value) => applyPunchUpdate({
+                                            countInBars: Math.max(0, Math.round(value))
+                                        })}
+                                    />
+                                </div>
+
+                                <div className="mt-2 text-[9px] text-gray-500 leading-snug">
+                                    Atajos: <span className="text-gray-300 font-mono">Alt+P</span> toggle, <span className="text-gray-300 font-mono">Alt+I</span> Punch In, <span className="text-gray-300 font-mono">Alt+O</span> Punch Out.
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
 

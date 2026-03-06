@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { Track, TrackType, Clip, AutomationPoint } from '../types';
+import { Track, TrackType, Clip, AutomationPoint, CompSegment } from '../types';
 import TrackHeader from './TrackHeader';
 import AutomationLane from './AutomationLane';
 import { audioEngine } from '../services/audioEngine';
@@ -45,6 +45,8 @@ const TRACK_VIRTUALIZATION_OVERSCAN_PX = 480;
 const MAX_ACTIVE_METER_TRACKS = 128;
 const WAVEFORM_CACHE_LIMIT = 320;
 const MIDI_DECORATION_CACHE_LIMIT = 640;
+const COMP_CLIP_ID_PREFIX = 'comp-seg-';
+const MIN_CROSSFADE_BARS = 1 / 1024;
 
 interface TimelineViewportRect {
     left: number;
@@ -81,12 +83,24 @@ const seededRatio = (seed: number): number => {
     return value - Math.floor(value);
 };
 
-type DragAction = {
+type ClipDragAction = {
     type: 'trim-left' | 'trim-right' | 'fade-in' | 'fade-out' | 'stretch';
     clip: Clip;
     startX: number;
     startY: number;
 };
+
+type CrossfadeDragAction = {
+    type: 'crossfade';
+    leftClip: Clip;
+    rightClip: Clip;
+    overlapLengthBars: number;
+    initialFadeBars: number;
+    startX: number;
+    startY: number;
+};
+
+type DragAction = ClipDragAction | CrossfadeDragAction;
 
 const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     track,
@@ -110,6 +124,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     // Local State for Smart Tool Dragging
     const [dragAction, setDragAction] = useState<DragAction | null>(null);
     const dragPreviewRef = useRef<Partial<Clip> | null>(null);
+    const crossfadePreviewRef = useRef<number | null>(null);
     const waveformCacheRef = useRef<Map<string, CachedWaveformShape>>(new Map());
     const midiDecorationCacheRef = useRef<Map<string, MidiDecorationBar[]>>(new Map());
 
@@ -120,6 +135,23 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         const handleGlobalMove = (e: MouseEvent) => {
             const dx = e.clientX - dragAction.startX;
             const deltaBars = dx / zoom / 4;
+
+            if (dragAction.type === 'crossfade') {
+                const maxFadeBars = Math.max(MIN_CROSSFADE_BARS, dragAction.overlapLengthBars);
+                const nextFadeBars = Math.max(0, Math.min(maxFadeBars, dragAction.initialFadeBars + deltaBars));
+
+                crossfadePreviewRef.current = nextFadeBars;
+                onClipUpdate(track.id, dragAction.leftClip.id, { fadeOut: nextFadeBars }, {
+                    noHistory: true,
+                    reason: 'timeline-crossfade-preview-left'
+                });
+                onClipUpdate(track.id, dragAction.rightClip.id, { fadeIn: nextFadeBars }, {
+                    noHistory: true,
+                    reason: 'timeline-crossfade-preview-right'
+                });
+                return;
+            }
+
             const { clip } = dragAction;
 
             let updates: Partial<Clip> = {};
@@ -174,9 +206,26 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         };
 
         const handleGlobalUp = () => {
+            if (dragAction.type === 'crossfade') {
+                const fadeBars = crossfadePreviewRef.current;
+                if (typeof fadeBars === 'number') {
+                    onClipUpdate(track.id, dragAction.leftClip.id, { fadeOut: fadeBars }, {
+                        noHistory: true,
+                        reason: 'timeline-crossfade-finalize-left'
+                    });
+                    onClipUpdate(track.id, dragAction.rightClip.id, { fadeIn: fadeBars }, {
+                        reason: 'timeline-crossfade-adjust'
+                    });
+                }
+                crossfadePreviewRef.current = null;
+                dragPreviewRef.current = null;
+                setDragAction(null);
+                return;
+            }
+
             const updates = dragPreviewRef.current;
             if (updates) {
-                const reasonByType: Record<DragAction['type'], string> = {
+                const reasonByType: Record<ClipDragAction['type'], string> = {
                     'trim-left': 'timeline-clip-trim-left',
                     'trim-right': 'timeline-clip-trim-right',
                     'fade-in': 'timeline-clip-fade-in',
@@ -190,6 +239,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
             }
 
             dragPreviewRef.current = null;
+            crossfadePreviewRef.current = null;
             setDragAction(null);
         };
 
@@ -415,8 +465,43 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         };
     }, [zoom, totalWidth, showBeatGrid, showDetailGrid, gridSize]);
 
+    const visibleCompSegments = useMemo(() => {
+        const compLane = (track.takeLanes || []).find((lane) => lane.id === track.activeCompLaneId && lane.isCompLane)
+            || (track.takeLanes || []).find((lane) => lane.isCompLane);
+        if (!compLane?.compSegments?.length) {
+            return [];
+        }
+
+        const clipViewportStartPx = Math.max(0, visibleRect.left - 300);
+        const clipViewportEndPx = visibleRect.left + visibleRect.width + 300;
+
+        return compLane.compSegments
+            .map((segment: CompSegment) => {
+                const segmentLengthBars = Math.max(MIN_CROSSFADE_BARS, segment.sourceEndBar - segment.sourceStartBar);
+                const leftPx = (segment.targetStartBar - 1) * 4 * zoom;
+                const widthPx = segmentLengthBars * 4 * zoom;
+                return {
+                    segment,
+                    leftPx,
+                    widthPx,
+                    takeAlias: segment.takeId.split('-').pop() || segment.takeId
+                };
+            })
+            .filter((segment) => (segment.leftPx + segment.widthPx) > clipViewportStartPx && segment.leftPx < clipViewportEndPx)
+            .sort((left, right) => left.leftPx - right.leftPx);
+    }, [track.takeLanes, track.activeCompLaneId, visibleRect.left, visibleRect.width, zoom]);
+
     const crossfades = useMemo(() => {
-        const fades = [];
+        const fades: Array<{
+            id: string;
+            left: number;
+            width: number;
+            overlapWidth: number;
+            leftClip: Clip;
+            rightClip: Clip;
+            overlapLengthBars: number;
+            fadeLengthBars: number;
+        }> = [];
         const sortedClips = [...track.clips].sort((a, b) => a.start - b.start);
 
         for (let i = 0; i < sortedClips.length - 1; i++) {
@@ -430,14 +515,22 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 const overlapEnd = Math.min(currentEnd, next.start + next.length);
                 const overlapLen = overlapEnd - overlapStart;
 
-                if (overlapLen > 0) {
+                if (overlapLen > MIN_CROSSFADE_BARS) {
+                    const configuredFade = Math.max(0, Math.min(overlapLen, Math.max(current.fadeOut || 0, next.fadeIn || 0)));
+                    const fadeLengthBars = configuredFade > MIN_CROSSFADE_BARS ? configuredFade : overlapLen;
                     const leftPx = (overlapStart - 1) * 4 * zoom;
-                    const widthPx = overlapLen * 4 * zoom;
+                    const overlapWidthPx = overlapLen * 4 * zoom;
+                    const widthPx = Math.max(2, fadeLengthBars * 4 * zoom);
 
                     fades.push({
                         id: `xfade-${current.id}-${next.id}`,
                         left: leftPx,
-                        width: widthPx
+                        width: widthPx,
+                        overlapWidth: overlapWidthPx,
+                        leftClip: current,
+                        rightClip: next,
+                        overlapLengthBars: overlapLen,
+                        fadeLengthBars
                     });
                 }
             }
@@ -493,12 +586,33 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 onDrop={handleLaneDrop}
                 style={gridStyle}
             >
+                {visibleCompSegments.length > 0 && (
+                    <div className="absolute inset-0 z-[12] pointer-events-none">
+                        {visibleCompSegments.map((item) => (
+                            <div
+                                key={`comp-overlay-${item.segment.id}`}
+                                className="absolute top-0 bottom-0 border border-daw-violet/40 bg-gradient-to-r from-daw-violet/12 via-daw-cyan/5 to-transparent"
+                                style={{
+                                    left: `${item.leftPx}px`,
+                                    width: `${item.widthPx}px`
+                                }}
+                            >
+                                <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-daw-violet/80 via-daw-cyan/70 to-transparent" />
+                                <div className="absolute right-1 top-1 text-[8px] uppercase tracking-wide text-daw-violet/90 bg-black/35 px-1 rounded-sm">
+                                    Comp {item.takeAlias}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
                 {/* CLIPS (VIRTUALIZED) */}
                 {visibleClips.map(clip => {
                     const widthPx = clip.length * 4 * zoom;
                     const showClipName = widthPx > 30; // LOD: Hide text if too small
                     const showHandles = widthPx > 50; // Only show handles if clip is wide enough
                     const EDGE_WIDTH = 8; // Trim handle hit zone width
+                    const isCompDerivedClip = clip.id.startsWith(COMP_CLIP_ID_PREFIX) || clip.name.startsWith('[COMP]');
 
                     return (
                         <div
@@ -523,9 +637,12 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                             style={{
                                 left: `${(clip.start - 1) * 4 * zoom}px`,
                                 width: `${widthPx}px`,
-                                backgroundColor: showWaveforms ? 'rgba(255, 255, 255, 0.04)' : `${track.color}20`,
-                                borderLeft: `2px solid ${track.color}`,
-                                borderRight: `1px solid ${track.color}40`
+                                background: isCompDerivedClip
+                                    ? `linear-gradient(120deg, ${track.color}3A 0%, rgba(13, 14, 22, 0.92) 75%)`
+                                    : (showWaveforms ? 'rgba(255, 255, 255, 0.04)' : `${track.color}20`),
+                                borderLeft: `2px solid ${isCompDerivedClip ? '#a855f7' : track.color}`,
+                                borderRight: `1px solid ${isCompDerivedClip ? '#a855f780' : `${track.color}40`}`,
+                                boxShadow: isCompDerivedClip ? 'inset 0 0 0 1px rgba(168,85,247,0.38)' : undefined
                             }}
                         >
                             {/* === LEFT TRIM HANDLE === */}
@@ -626,13 +743,18 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                             {/* Clip Name Overlay */}
                             {showClipName && (
                                 <div className="absolute top-0 left-0 right-0 h-4 z-30 pointer-events-none opacity-80 group-hover/clip:opacity-100 transition-opacity bg-gradient-to-b from-black/60 to-transparent">
-                                    <div className="flex items-center px-1">
+                                    <div className="flex items-center justify-between px-1 gap-1">
                                         <span
                                             className="text-[9px] font-bold text-gray-100 uppercase tracking-wide truncate"
                                             style={{ color: track.color }}
                                         >
                                             {clip.name}
                                         </span>
+                                        {isCompDerivedClip && (
+                                            <span className="shrink-0 text-[8px] font-black uppercase tracking-wide text-daw-violet bg-daw-violet/20 border border-daw-violet/40 px-1 rounded-[2px]">
+                                                COMP
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
                             )}
@@ -682,28 +804,47 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                         className="absolute top-0 bottom-0 z-30 pointer-events-none"
                         style={{
                             left: `${xfade.left}px`,
-                            width: `${xfade.width}px`,
-                            background: 'linear-gradient(to right, rgba(0,0,0,0), rgba(255,255,255,0.05), rgba(0,0,0,0))'
+                            width: `${xfade.overlapWidth}px`,
+                            background: 'linear-gradient(to right, rgba(0,0,0,0), rgba(255,255,255,0.035), rgba(0,0,0,0))'
                         }}
                     >
-                        <svg width="100%" height="100%" preserveAspectRatio="none" className="overflow-visible">
+                        <svg width={xfade.width} height="100%" preserveAspectRatio="none" className="overflow-visible">
                             <path
                                 d={`M 0 0 C ${xfade.width * 0.5} 0, ${xfade.width * 0.5} ${trackHeight}, ${xfade.width} ${trackHeight}`}
                                 fill="none"
-                                stroke="white"
+                                stroke="#e5e7eb"
                                 strokeWidth="1.5"
-                                strokeOpacity="0.8"
+                                strokeOpacity="0.72"
                                 vectorEffect="non-scaling-stroke"
                             />
                             <path
                                 d={`M 0 ${trackHeight} C ${xfade.width * 0.5} ${trackHeight}, ${xfade.width * 0.5} 0, ${xfade.width} 0`}
                                 fill="none"
-                                stroke="white"
+                                stroke="#e5e7eb"
                                 strokeWidth="1.5"
-                                strokeOpacity="0.8"
+                                strokeOpacity="0.72"
                                 vectorEffect="non-scaling-stroke"
                             />
                         </svg>
+
+                        <button
+                            data-handle-type="crossfade"
+                            className="pointer-events-auto absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full border border-daw-cyan/80 bg-[#0a0a0f] shadow-[0_0_10px_rgba(34,211,238,0.35)] hover:scale-110 transition-transform"
+                            style={{ left: `${Math.max(0, xfade.width - 7)}px` }}
+                            title={`Crossfade ${xfade.fadeLengthBars.toFixed(2)} bars`}
+                            onMouseDown={(event) => {
+                                event.stopPropagation();
+                                setDragAction({
+                                    type: 'crossfade',
+                                    leftClip: xfade.leftClip,
+                                    rightClip: xfade.rightClip,
+                                    overlapLengthBars: xfade.overlapLengthBars,
+                                    initialFadeBars: xfade.fadeLengthBars,
+                                    startX: event.clientX,
+                                    startY: event.clientY
+                                });
+                            }}
+                        />
                     </div>
                 ))}
             </div>

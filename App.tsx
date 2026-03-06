@@ -14,7 +14,7 @@ import { FluidPanel } from './components/FluidPanel';
 import AsciiPerformerDock from './components/AsciiPerformerDock';
 import CollabPanel, { CollabActivityEntry } from './components/CollabPanel';
 import { INITIAL_TRACKS, getTrackColorByPosition } from './constants';
-import { LoopMode, Note, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry } from './types';
+import { LoopMode, Note, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry, PunchRange } from './types';
 import { engineAdapter, type EngineDiagnostics } from './services/engineAdapter';
 import { midiService, MidiDevice } from './services/MidiService';
 import { platformService } from './services/platformService';
@@ -63,6 +63,7 @@ import {
 import {
     applyCompClipEdits,
     isCompDerivedClipId,
+    normalizePunchRange,
     promoteTakeToComp,
     resolvePunchRecordingPlan,
     splitTakeForClip,
@@ -1234,6 +1235,15 @@ const App: React.FC = () => {
             });
         }), { recolor: false, reason: `punch-set-${boundary}` });
     }, [applyTrackMutation, getTransportCursorBar, selectedTrackId]);
+
+    const handleSelectedTrackPunchUpdate = useCallback((updates: Partial<PunchRange>) => {
+        if (!selectedTrackId) return;
+
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== selectedTrackId || track.type !== TrackType.AUDIO) return track;
+            return updateTrackPunchRange(track, updates);
+        }), { recolor: false, reason: 'transport-punch-panel-update' });
+    }, [applyTrackMutation, selectedTrackId]);
 
     useEffect(() => {
         const handlePunchHotkeys = (event: KeyboardEvent) => {
@@ -3117,6 +3127,10 @@ const App: React.FC = () => {
 
     const isScannerImmersive = showNoteScanner;
     const selectedTrack = tracks.find((track) => track.id === selectedTrackId) || null;
+    const selectedAudioTrack = selectedTrack?.type === TrackType.AUDIO ? selectedTrack : null;
+    const selectedTrackPunchRange = useMemo(() => (
+        selectedAudioTrack ? normalizePunchRange(selectedAudioTrack.punchRange) : null
+    ), [selectedAudioTrack]);
 
     return (
         <div className="daw-immersive-shell flex flex-col h-screen w-screen bg-[#111218] text-daw-text font-sans overflow-hidden selection:bg-daw-ruby selection:text-white">
@@ -3163,6 +3177,9 @@ const App: React.FC = () => {
                     onExport={() => setShowExportModal(true)}
                     setScaleRoot={(r) => setTransport((p: TransportState) => ({ ...p, scaleRoot: r }))}
                     setScaleType={(t: string) => setTransport((p: TransportState) => ({ ...p, scaleType: t as TransportState['scaleType'] }))}
+                    selectedTrackName={selectedAudioTrack?.name || null}
+                    selectedTrackPunchRange={selectedTrackPunchRange}
+                    onSelectedTrackPunchUpdate={handleSelectedTrackPunchUpdate}
                 />
             )}
 
