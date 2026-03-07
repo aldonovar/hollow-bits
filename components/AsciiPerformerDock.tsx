@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useCallback } from 'react';
 interface AsciiPerformerDockProps {
     isPlaying: boolean;
     suspendAnimation?: boolean;
+    frameIntervalMs?: number;
 }
 
 interface StageParticle {
@@ -297,7 +298,11 @@ const drawPatch = (
     targetCtx.restore();
 };
 
-const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying, suspendAnimation = false }) => {
+const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({
+    isPlaying,
+    suspendAnimation = false,
+    frameIntervalMs = 16
+}) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const contextRef = useRef<CanvasRenderingContext2D | null>(null);
     const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -317,6 +322,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying, susp
     const loadedRef = useRef(false);
     const isPlayingRef = useRef(isPlaying);
     const suspendAnimationRef = useRef(suspendAnimation);
+    const frameIntervalMsRef = useRef(clamp(frameIntervalMs, 16, 250));
 
     useEffect(() => {
         isPlayingRef.current = isPlaying;
@@ -325,6 +331,10 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying, susp
     useEffect(() => {
         suspendAnimationRef.current = suspendAnimation;
     }, [suspendAnimation]);
+
+    useEffect(() => {
+        frameIntervalMsRef.current = clamp(frameIntervalMs, 16, 250);
+    }, [frameIntervalMs]);
 
     const updateBlinkState = useCallback((timeMs: number) => {
         const blink = blinkStateRef.current;
@@ -542,7 +552,15 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({ isPlaying, susp
         }
 
         const previous = lastTimestampRef.current ?? timestamp;
-        const deltaMs = clamp(timestamp - previous, 0, MAX_FRAME_DELTA_MS);
+        const rawDeltaMs = Math.max(0, timestamp - previous);
+        const targetFrameIntervalMs = frameIntervalMsRef.current;
+
+        if (rawDeltaMs < targetFrameIntervalMs) {
+            animFrameRef.current = requestAnimationFrame(draw);
+            return;
+        }
+
+        const deltaMs = clamp(rawDeltaMs, 0, MAX_FRAME_DELTA_MS);
         lastTimestampRef.current = timestamp;
 
         const playbackRate = isPlayingRef.current ? 1 : 0.55;

@@ -16,6 +16,8 @@ interface MixerProps {
   canRecallSnapshotA?: boolean;
   canRecallSnapshotB?: boolean;
   activeSnapshot?: 'A' | 'B' | null;
+  meterUpdateIntervalMs?: number;
+  maxMeterTracks?: number;
 }
 
 interface MeterSnapshot {
@@ -163,7 +165,9 @@ const Mixer: React.FC<MixerProps> = ({
   onToggleSnapshotCompare,
   canRecallSnapshotA = false,
   canRecallSnapshotB = false,
-  activeSnapshot = null
+  activeSnapshot = null,
+  meterUpdateIntervalMs = 33,
+  maxMeterTracks = 128
 }) => {
   const [trackMeters, setTrackMeters] = useState<Record<string, MeterSnapshot>>({});
   const [trackClipHolds, setTrackClipHolds] = useState<Record<string, boolean>>({});
@@ -188,6 +192,20 @@ const Mixer: React.FC<MixerProps> = ({
     return [...standardTracks, ...groupTracks, ...returnTracks];
   }, [tracks, groupTracks, returnTracks]);
   const trackIds = useMemo(() => tracks.map((track) => track.id), [tracks]);
+  const effectiveMaxMeterTracks = useMemo(() => Math.max(1, Math.floor(maxMeterTracks)), [maxMeterTracks]);
+  const activeMeterTrackIds = useMemo(() => {
+    const ids = trackIds.slice(0, effectiveMaxMeterTracks);
+
+    if (focusedTrackId && !ids.includes(focusedTrackId)) {
+      if (ids.length >= effectiveMaxMeterTracks) {
+        ids[ids.length - 1] = focusedTrackId;
+      } else {
+        ids.push(focusedTrackId);
+      }
+    }
+
+    return ids;
+  }, [effectiveMaxMeterTracks, focusedTrackId, trackIds]);
 
   useEffect(() => {
     if (!focusedTrackId && orderedTracks.length > 0) {
@@ -203,12 +221,13 @@ const Mixer: React.FC<MixerProps> = ({
   useEffect(() => {
     let rafId = 0;
     let lastFrame = 0;
+    const effectiveUpdateIntervalMs = Math.max(16, meterUpdateIntervalMs);
 
         const animate = (time: number) => {
-          if (time - lastFrame >= 33) {
+          if (time - lastFrame >= effectiveUpdateIntervalMs) {
             lastFrame = time;
 
-            const snapshot = audioEngine.getMeterSnapshot(trackIds);
+            const snapshot = audioEngine.getMeterSnapshot(activeMeterTrackIds);
 
             setTrackMeters((prev) => (areTrackMetersDifferent(prev, snapshot.tracks) ? snapshot.tracks : prev));
             setTrackClipHolds((prev) => (areClipHoldsDifferent(prev, snapshot.clipHolds) ? snapshot.clipHolds : prev));
@@ -221,7 +240,7 @@ const Mixer: React.FC<MixerProps> = ({
 
     rafId = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(rafId);
-  }, [trackIds]);
+  }, [activeMeterTrackIds, meterUpdateIntervalMs]);
 
   useEffect(() => {
     setMasterVolumeDb(audioEngine.getMasterVolumeDb());

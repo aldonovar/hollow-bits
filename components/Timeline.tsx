@@ -1065,6 +1065,9 @@ interface TimelineProps {
     selectedTrackPunchRange?: PunchRange | null;
     selectedTrackColor?: string | null;
     containerRef: React.RefObject<HTMLDivElement | null>;
+    uiFrameBudgetMs?: number;
+    meterFrameBudgetMs?: number;
+    maxActiveMeterTracks?: number;
 }
 
 const Timeline: React.FC<TimelineProps> = React.memo(({
@@ -1095,7 +1098,10 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     selectedTrackId,
     selectedTrackPunchRange,
     selectedTrackColor,
-    containerRef
+    containerRef,
+    uiFrameBudgetMs = 16,
+    meterFrameBudgetMs = 0,
+    maxActiveMeterTracks = MAX_ACTIVE_METER_TRACKS
 }) => {
     const totalBeats = bars * 4;
     const totalGridWidth = totalBeats * zoom;
@@ -1213,12 +1219,14 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
 
     const allTrackIds = useMemo(() => trackRows.map((row) => row.track.id), [trackRows]);
     const visibleTrackIds = useMemo(() => visibleTrackRows.map((row) => row.track.id), [visibleTrackRows]);
+    const effectiveMaxActiveMeterTracks = Math.max(1, Math.floor(maxActiveMeterTracks));
+    const effectiveMeterFrameBudgetMs = Math.max(0, meterFrameBudgetMs);
 
     const activeMeterTrackIds = useMemo(() => {
-        const ids = [...visibleTrackIds].slice(0, MAX_ACTIVE_METER_TRACKS);
+        const ids = [...visibleTrackIds].slice(0, effectiveMaxActiveMeterTracks);
 
         if (selectedTrackId && !ids.includes(selectedTrackId)) {
-            if (ids.length >= MAX_ACTIVE_METER_TRACKS) {
+            if (ids.length >= effectiveMaxActiveMeterTracks) {
                 ids[ids.length - 1] = selectedTrackId;
             } else {
                 ids.push(selectedTrackId);
@@ -1230,7 +1238,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         }
 
         return allTrackIds.slice(0, Math.min(12, allTrackIds.length));
-    }, [allTrackIds, selectedTrackId, visibleTrackIds]);
+    }, [allTrackIds, effectiveMaxActiveMeterTracks, selectedTrackId, visibleTrackIds]);
 
     const activeMeterTrackIdsKey = useMemo(() => activeMeterTrackIds.join('|'), [activeMeterTrackIds]);
     const allTrackIdsKey = useMemo(() => allTrackIds.join('|'), [allTrackIds]);
@@ -1251,7 +1259,8 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
             const trackLoad = activeMeterTrackIds.length;
             const playingFps = trackLoad > 96 ? 12 : trackLoad > 48 ? 18 : 24;
             const idleFps = trackLoad > 96 ? 5 : 8;
-            const minFrameDelta = audioEngine.getIsPlaying() ? (1000 / playingFps) : (1000 / idleFps);
+            const baseFrameDelta = audioEngine.getIsPlaying() ? (1000 / playingFps) : (1000 / idleFps);
+            const minFrameDelta = Math.max(baseFrameDelta, effectiveMeterFrameBudgetMs);
             if ((timestamp - lastFrameTime) >= minFrameDelta) {
                 lastFrameTime = timestamp;
                 const meterSnapshot = audioEngine.getMeterSnapshot(activeMeterTrackIds);
@@ -1286,7 +1295,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         return () => {
             cancelAnimationFrame(rafId);
         };
-    }, [activeMeterTrackIds, activeMeterTrackIdsKey, allTrackIds, allTrackIdsKey]);
+    }, [activeMeterTrackIds, activeMeterTrackIdsKey, allTrackIds, allTrackIdsKey, effectiveMeterFrameBudgetMs]);
 
     // Drag State with Ghost Preview
     const [dragging, setDragging] = useState<{
@@ -1337,7 +1346,8 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         let lastBar = 0, lastBeat = 0, lastSixteenth = 0; // Throttle state updates
 
         const updateCursor = (timestamp: number) => {
-            const minFrameDelta = isPlaying ? (1000 / 60) : (1000 / 10);
+            const baseFrameDelta = isPlaying ? (1000 / 60) : (1000 / 10);
+            const minFrameDelta = Math.max(baseFrameDelta, Math.max(8, uiFrameBudgetMs));
             if (timestamp - lastFrameTime < minFrameDelta) {
                 animationFrameId = requestAnimationFrame(updateCursor);
                 return;
@@ -1384,7 +1394,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
             cancelAnimationFrame(animationFrameId);
             window.removeEventListener('click', closeMenu);
         };
-    }, [bpm, isPlaying, zoom, onTimeUpdate]);
+    }, [bpm, isPlaying, onTimeUpdate, uiFrameBudgetMs, zoom]);
 
     // Global Drag Events with Ghost Preview
     useEffect(() => {

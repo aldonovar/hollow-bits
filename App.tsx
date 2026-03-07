@@ -3715,6 +3715,32 @@ const App: React.FC = () => {
         scaleRoot: transport.scaleRoot,
         scaleType: transport.scaleType
     }), [transport.gridSize, transport.scaleRoot, transport.scaleType, transport.snapToGrid]);
+    const timelineUiFrameBudgetMs = Math.max(8, globalAudioPriority.uiUpdateDebounceMs);
+    const timelineMeterFrameBudgetMs = globalAudioPriority.mode === 'critical'
+        ? 140
+        : globalAudioPriority.mode === 'guarded'
+            ? 80
+            : 0;
+    const timelineMaxActiveMeterTracks = globalAudioPriority.mode === 'critical'
+        ? 16
+        : globalAudioPriority.mode === 'guarded'
+            ? 48
+            : 128;
+    const mixerMeterUpdateIntervalMs = globalAudioPriority.mode === 'critical'
+        ? 120
+        : globalAudioPriority.mode === 'guarded'
+            ? 66
+            : 33;
+    const mixerMaxMeterTracks = globalAudioPriority.mode === 'critical'
+        ? 24
+        : globalAudioPriority.mode === 'guarded'
+            ? 72
+            : 128;
+    const performerFrameIntervalMs = globalAudioPriority.mode === 'critical'
+        ? 220
+        : globalAudioPriority.mode === 'guarded'
+            ? 80
+            : 33;
 
     return (
         <div
@@ -3937,6 +3963,9 @@ const App: React.FC = () => {
                                     selectedTrackColor={selectedAudioTrack?.color || null}
                                     containerRef={timelineContainerRef}
                                     onTimeUpdate={handleTimelineTimeUpdate}
+                                    uiFrameBudgetMs={timelineUiFrameBudgetMs}
+                                    meterFrameBudgetMs={timelineMeterFrameBudgetMs}
+                                    maxActiveMeterTracks={timelineMaxActiveMeterTracks}
                                 />
                             </div>
                             <div className="absolute right-0 top-0 bottom-0 w-[292px] z-[85]">
@@ -3978,6 +4007,8 @@ const App: React.FC = () => {
                                 activeSnapshot={activeMixSnapshot}
                                 onMacroApply={handleMixerMacroApply}
                                 onCreateGroup={handleMixerCreateGroup}
+                                meterUpdateIntervalMs={mixerMeterUpdateIntervalMs}
+                                maxMeterTracks={mixerMaxMeterTracks}
                             />
                         </div>
                     )}
@@ -4006,6 +4037,7 @@ const App: React.FC = () => {
                             <AsciiPerformerDock
                                 isPlaying={transport.isPlaying}
                                 suspendAnimation={globalAudioPriority.disableHeavyVisuals}
+                                frameIntervalMs={performerFrameIntervalMs}
                             />
                         </div>
                     </div>
