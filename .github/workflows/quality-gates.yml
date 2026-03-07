@@ -40,8 +40,10 @@ jobs:
         if: ${{ hashFiles('benchmarks/audio-performance/latest-report.json') != '' }}
         run: npm run perf:gate -- --report benchmarks/audio-performance/latest-report.json --out benchmarks/audio-performance/latest-gate.json
 
-      - name: Session launch gate (report-driven)
-        if: ${{ hashFiles('benchmarks/session-launch/latest-report.json') != '' }}
+      - name: Live capture benchmark (48x8)
+        run: npm run capture:live:48x8
+
+      - name: Session launch strict gate
         run: npm run launch:gate:strict -- --report benchmarks/session-launch/latest-report.json --out benchmarks/session-launch/latest-gate.json
         env:
           SESSION_LAUNCH_MIN_SAMPLES: "384"
@@ -49,6 +51,14 @@ jobs:
           SESSION_LAUNCH_MIN_SCENES: "8"
           SESSION_LAUNCH_GATE_TARGET_MS: "2"
           SESSION_LAUNCH_STRICT_LIVE_CAPTURE: "1"
+
+      - name: Stress 48x8 strict gate
+        run: npm run stress:48x8:gate:strict -- --report benchmarks/stress-48x8/latest-report.json
+        env:
+          STRESS_48X8_STRICT_LIVE_CAPTURE: "1"
+
+      - name: Audio priority flapping gate
+        run: npm run audio-priority:gate
 
       - name: Upload performance gate artifacts
         if: ${{ always() && hashFiles('benchmarks/audio-performance/latest-report.json') != '' }}
@@ -60,10 +70,27 @@ jobs:
             benchmarks/audio-performance/latest-gate.json
 
       - name: Upload session launch gate artifacts
-        if: ${{ always() && hashFiles('benchmarks/session-launch/latest-report.json') != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: session-launch-gate
           path: |
             benchmarks/session-launch/latest-report.json
             benchmarks/session-launch/latest-gate.json
+
+      - name: Upload stress 48x8 artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-48x8-gate
+          path: |
+            benchmarks/stress-48x8/latest-report.json
+
+      - name: Upload audio priority artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-priority-gate
+          path: |
+            benchmarks/audio-priority/latest-transitions.json
+            benchmarks/audio-priority/latest-gate.json

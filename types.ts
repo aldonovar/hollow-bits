@@ -250,6 +250,36 @@ export interface SessionHealthSnapshot {
   monitorLatencyP95Ms: number;
 }
 
+export interface LiveCaptureRunConfig {
+  tracks: number;
+  scenes: number;
+  quantizeBars: number;
+  durationMinutes: number;
+  recordingCycles: number;
+  timeoutMs: number;
+  seed: number;
+}
+
+export type LiveCaptureArtifactType =
+  | 'session-launch'
+  | 'stress-48x8'
+  | 'audio-priority-transitions';
+
+export interface LiveCaptureArtifactEnvelope<TPayload = unknown> {
+  schemaVersion: 1;
+  type: LiveCaptureArtifactType;
+  generatedAt: number;
+  scenario: {
+    name: string;
+    tracks: number;
+    scenes: number;
+    source: 'live-capture';
+  };
+  summary: Record<string, number | string | boolean>;
+  source: 'live-capture';
+  payload: TPayload;
+}
+
 // LIGHTWEIGHT PROJECT MANIFEST
 // Just logic, no binaries.
 export interface ProjectData {
@@ -315,6 +345,15 @@ export interface DesktopHostAPI {
   saveProject: (data: string, filename: string) => Promise<{ success: boolean; filePath?: string }>;
   openProject: () => Promise<{ text: string; filename: string } | null>;
   transcodeAudio?: (request: AudioTranscodeRequest) => Promise<AudioTranscodeResult>;
+  onBenchmarkStart?: (callback: (config: LiveCaptureRunConfig) => void) => (() => void);
+  publishBenchmarkArtifact?: (
+    name: LiveCaptureArtifactType,
+    payload: LiveCaptureArtifactEnvelope
+  ) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+  publishBenchmarkStatus?: (
+    status: 'running' | 'success' | 'fail',
+    details?: Record<string, unknown>
+  ) => Promise<{ success: boolean; error?: string }>;
   platform: string;
 }
 

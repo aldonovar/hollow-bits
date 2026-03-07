@@ -23,4 +23,30 @@ contextBridge.exposeInMainWorld('electron', {
     selectDirectory: () => ipcRenderer.invoke('select-directory'),
     scanDirectoryFiles: (request) => ipcRenderer.invoke('scan-directory-files', request),
     transcodeAudio: (request) => ipcRenderer.invoke('transcode-audio', request),
+    onBenchmarkStart: (callback) => {
+        const handler = (_event, payload) => {
+            callback(payload);
+        };
+
+        ipcRenderer.on('benchmark-start', handler);
+        ipcRenderer.invoke('benchmark-get-config')
+            .then((config) => {
+                if (config) {
+                    callback(config);
+                }
+            })
+            .catch(() => {
+                // Non-blocking bootstrap path.
+            });
+
+        return () => {
+            ipcRenderer.removeListener('benchmark-start', handler);
+        };
+    },
+    publishBenchmarkArtifact: (name, payload) => (
+        ipcRenderer.invoke('benchmark-publish-artifact', { name, payload })
+    ),
+    publishBenchmarkStatus: (status, details) => (
+        ipcRenderer.invoke('benchmark-publish-status', { status, details })
+    ),
 });

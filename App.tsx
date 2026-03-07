@@ -67,6 +67,10 @@ import {
     type GlobalAudioPriorityDecision
 } from './services/sessionPerformanceService';
 import {
+    createArtifactEnvelope,
+    runLiveCaptureHarness
+} from './services/liveCaptureHarnessService';
+import {
     applyCompClipEdits,
     isCompDerivedClipId,
     normalizePunchRange,
@@ -413,6 +417,7 @@ const App: React.FC = () => {
     const boundaryTransitionInFlightRef = useRef(false);
     const finalizeActiveRecordingsRef = useRef<(() => Promise<void>) | null>(null);
     const hasActiveRecordingSessionsRef = useRef<(() => boolean) | null>(null);
+    const benchmarkRunInFlightRef = useRef(false);
     const audioPriorityControllerRef = useRef(createAudioPriorityController({
         profile: PERFORMANCE_PROFILE,
         escalationStreak: 2,
@@ -766,6 +771,109 @@ const App: React.FC = () => {
             updatedAt: Date.now()
         });
     }, [transport.currentBar, transport.currentBeat, transport.currentSixteenth, transport.isPlaying]);
+
+    useEffect(() => {
+        const benchmarkApi = window.electron;
+        if (
+            !benchmarkApi?.onBenchmarkStart
+            || !benchmarkApi.publishBenchmarkArtifact
+            || !benchmarkApi.publishBenchmarkStatus
+        ) {
+            return;
+        }
+
+        const unsubscribe = benchmarkApi.onBenchmarkStart((incomingConfig) => {
+            if (benchmarkRunInFlightRef.current) {
+                return;
+            }
+
+            benchmarkRunInFlightRef.current = true;
+
+            void (async () => {
+                try {
+                    await benchmarkApi.publishBenchmarkStatus?.('running', {
+                        phase: 'bootstrap',
+                        config: incomingConfig
+                    });
+
+                    const result = await runLiveCaptureHarness(incomingConfig, {
+                        onProgress: (progress) => {
+                            void benchmarkApi.publishBenchmarkStatus?.(
+                                'running',
+                                progress as unknown as Record<string, unknown>
+                            );
+                        }
+                    });
+
+                    const launchSummary = {
+                        sampleCount: result.launchReport.summary.sampleCount,
+                        p95LaunchErrorMs: Number(result.launchReport.summary.p95LaunchErrorMs.toFixed(3)),
+                        gatePass: result.launchReport.summary.gatePass
+                    };
+                    const stressGate = (result.stressReport.gates as { pass?: boolean }) || {};
+                    const transitionsPayload = result.audioPriorityTransitionsReport as {
+                        stability?: { pass?: boolean; maxTransitionsInWindow?: number };
+                    };
+                    const transitionsStability = transitionsPayload.stability || {};
+
+                    await benchmarkApi.publishBenchmarkArtifact?.(
+                        'session-launch',
+                        createArtifactEnvelope(
+                            'session-launch',
+                            result.config,
+                            launchSummary,
+                            result.launchReport as unknown as Record<string, unknown>
+                        )
+                    );
+                    await benchmarkApi.publishBenchmarkArtifact?.(
+                        'stress-48x8',
+                        createArtifactEnvelope(
+                            'stress-48x8',
+                            result.config,
+                            {
+                                gatePass: Boolean(stressGate.pass),
+                                durationMinutes: result.config.durationMinutes,
+                                recordingCycles: result.config.recordingCycles
+                            },
+                            result.stressReport
+                        )
+                    );
+                    await benchmarkApi.publishBenchmarkArtifact?.(
+                        'audio-priority-transitions',
+                        createArtifactEnvelope(
+                            'audio-priority-transitions',
+                            result.config,
+                            {
+                                gatePass: Boolean(transitionsStability.pass),
+                                maxTransitionsInWindow: Number(transitionsStability.maxTransitionsInWindow || 0)
+                            },
+                            result.audioPriorityTransitionsReport as Record<string, unknown>
+                        )
+                    );
+
+                    await benchmarkApi.publishBenchmarkStatus?.('success', {
+                        launchP95Ms: launchSummary.p95LaunchErrorMs,
+                        launchSamples: launchSummary.sampleCount,
+                        stressPass: Boolean(stressGate.pass),
+                        audioPriorityPass: Boolean(transitionsStability.pass)
+                    });
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    await benchmarkApi.publishBenchmarkStatus?.('fail', {
+                        error: message
+                    });
+                } finally {
+                    benchmarkRunInFlightRef.current = false;
+                }
+            })();
+        });
+
+        return () => {
+            if (typeof unsubscribe === 'function') {
+                unsubscribe();
+            }
+        };
+    }, []);
 
     // Sync Ref with State when stopped externally (e.g. end of song)
     useEffect(() => {

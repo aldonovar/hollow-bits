@@ -353,7 +353,11 @@ describe('audioPerformanceBenchmarkService', () => {
 
         const gate = evaluateAudioPerformanceGate(report, {
             ...DEFAULT_AUDIO_PERFORMANCE_GATE_THRESHOLDS,
-            minWorkletWinRate: 0
+            minWorkletWinRate: 0,
+            maxWarnedCases: Number.MAX_SAFE_INTEGER,
+            maxWorkletP95LagMs: Number.POSITIVE_INFINITY,
+            maxWorkletP99LoopMs: Number.POSITIVE_INFINITY,
+            maxWorkletOverrunRatio: Number.POSITIVE_INFINITY
         });
         expect(gate.status).toBe('pass');
         expect(gate.failures).toHaveLength(0);

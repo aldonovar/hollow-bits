@@ -3,6 +3,12 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
+const {
+    BENCHMARK_MODE,
+    parseLiveCaptureConfig,
+    resolveBenchmarkArtifactPath,
+    sanitizeBenchmarkStatus
+} = require('./benchmarkBridge.cjs');
 
 const AUDIO_FORMATS = new Set(['wav', 'aiff', 'flac', 'mp3']);
 const AUDIO_MIME_BY_FORMAT = {
@@ -93,6 +99,13 @@ const MAX_IMPORT_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_IMPORT_BATCH_BYTES = 1024 * 1024 * 1024;
 
 let mainWindow = null;
+const liveBenchmarkConfig = parseLiveCaptureConfig(process.argv, process.env);
+const liveBenchmarkRuntime = {
+    enabled: Boolean(liveBenchmarkConfig),
+    startedAt: 0,
+    completedAt: 0,
+    status: 'idle'
+};
 
 const logMainError = (label, error) => {
     const message = error instanceof Error
@@ -213,6 +226,100 @@ ipcMain.on('window-close', (event) => {
 ipcMain.handle('window-get-state', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     return serializeWindowState(win);
+});
+
+ipcMain.handle('benchmark-get-config', () => {
+    if (!liveBenchmarkRuntime.enabled || !liveBenchmarkConfig) {
+        return null;
+    }
+    return {
+        tracks: liveBenchmarkConfig.tracks,
+        scenes: liveBenchmarkConfig.scenes,
+        quantizeBars: liveBenchmarkConfig.quantizeBars,
+        durationMinutes: liveBenchmarkConfig.durationMinutes,
+        recordingCycles: liveBenchmarkConfig.recordingCycles,
+        timeoutMs: liveBenchmarkConfig.timeoutMs,
+        seed: liveBenchmarkConfig.seed
+    };
+});
+
+ipcMain.handle('benchmark-publish-artifact', async (_event, payload) => {
+    if (!liveBenchmarkRuntime.enabled) {
+        return { success: false, error: 'Benchmark mode is disabled.' };
+    }
+
+    const name = typeof payload?.name === 'string' ? payload.name : '';
+    const resolved = resolveBenchmarkArtifactPath(name, process.cwd());
+    if (!resolved) {
+        return { success: false, error: `Artifact '${name}' is not whitelisted.` };
+    }
+
+    const artifactPayload = payload?.payload;
+    if (artifactPayload === undefined) {
+        return { success: false, error: 'Missing artifact payload.' };
+    }
+
+    try {
+        const serializedPayload = (
+            artifactPayload
+            && typeof artifactPayload === 'object'
+            && Object.prototype.hasOwnProperty.call(artifactPayload, 'payload')
+        )
+            ? artifactPayload.payload
+            : artifactPayload;
+
+        await fs.mkdir(path.dirname(resolved.absolutePath), { recursive: true });
+        await fs.writeFile(resolved.absolutePath, JSON.stringify(serializedPayload, null, 2), 'utf8');
+        console.log(`[benchmark] artifact '${name}' -> ${resolved.absolutePath}`);
+        return { success: true, filePath: resolved.absolutePath };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[benchmark] failed writing '${name}': ${message}`);
+        return { success: false, error: message };
+    }
+});
+
+ipcMain.handle('benchmark-publish-status', async (_event, payload) => {
+    if (!liveBenchmarkRuntime.enabled) {
+        return { success: false, error: 'Benchmark mode is disabled.' };
+    }
+
+    const sanitized = sanitizeBenchmarkStatus(payload);
+    if (!sanitized) {
+        return { success: false, error: 'Invalid benchmark status payload.' };
+    }
+
+    const now = Date.now();
+    if (liveBenchmarkRuntime.startedAt === 0) {
+        liveBenchmarkRuntime.startedAt = now;
+    }
+    liveBenchmarkRuntime.status = sanitized.status;
+    if (sanitized.status === 'success' || sanitized.status === 'fail') {
+        liveBenchmarkRuntime.completedAt = now;
+    }
+
+    const envelope = {
+        mode: BENCHMARK_MODE,
+        status: sanitized.status,
+        at: now,
+        details: sanitized.details
+    };
+
+    console.log(`[benchmark] status=${sanitized.status}`);
+    console.log(`BENCHMARK_STATUS:${JSON.stringify(envelope)}`);
+
+    if (sanitized.status === 'success' || sanitized.status === 'fail') {
+        const exitCode = sanitized.status === 'success' ? 0 : 1;
+        process.exitCode = exitCode;
+        setTimeout(() => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.close();
+            }
+            app.exit(exitCode);
+        }, 150);
+    }
+
+    return { success: true };
 });
 
 // --- File System Handlers ---
@@ -466,6 +573,19 @@ const createWindow = () => {
         } catch {
             // keep running even if platform does not support call
         }
+
+        if (liveBenchmarkRuntime.enabled && liveBenchmarkConfig) {
+            console.log(`[benchmark] mode=${BENCHMARK_MODE} config=${JSON.stringify(liveBenchmarkConfig)}`);
+            mainWindow.webContents.send('benchmark-start', {
+                tracks: liveBenchmarkConfig.tracks,
+                scenes: liveBenchmarkConfig.scenes,
+                quantizeBars: liveBenchmarkConfig.quantizeBars,
+                durationMinutes: liveBenchmarkConfig.durationMinutes,
+                recordingCycles: liveBenchmarkConfig.recordingCycles,
+                timeoutMs: liveBenchmarkConfig.timeoutMs,
+                seed: liveBenchmarkConfig.seed
+            });
+        }
     });
 
     // Check if running in dev mode
@@ -486,7 +606,9 @@ const createWindow = () => {
             } catch {
                 // keep running even if platform does not support call
             }
-            mainWindow.show();
+            if (!liveBenchmarkRuntime.enabled) {
+                mainWindow.show();
+            }
             broadcastWindowState(mainWindow);
         }
     });
