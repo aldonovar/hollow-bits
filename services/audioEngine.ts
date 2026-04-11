@@ -3845,7 +3845,47 @@ class AudioEngine {
     // --- UTILS ---
     async decodeAudioData(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {
         if (!this.ctx) await this.init();
-        return this.ctx!.decodeAudioData(arrayBuffer);
+
+        // 1. Try native Web Audio decode first (fast path)
+        try {
+            return await this.ctx!.decodeAudioData(arrayBuffer.slice(0));
+        } catch (nativeError) {
+            // Native decode failed — attempt FFmpeg fallback on desktop
+            console.warn('[AudioEngine] Native decodeAudioData failed, attempting FFmpeg fallback.', nativeError);
+        }
+
+        // 2. Fallback: Transcode to WAV via FFmpeg (desktop only)
+        try {
+            const { desktopRuntimeService } = await import('./desktopRuntimeService');
+            const host = desktopRuntimeService.api;
+
+            if (!host?.transcodeAudio) {
+                throw new Error(
+                    'El formato de audio no es compatible con el navegador y FFmpeg no esta disponible.'
+                );
+            }
+
+            const transcodeResult = await host.transcodeAudio({
+                inputData: arrayBuffer,
+                outputFormat: 'wav',
+                sampleRate: this.ctx!.sampleRate || 44100,
+                bitDepth: 16
+            });
+
+            if (!transcodeResult.success || !transcodeResult.data) {
+                throw new Error(
+                    transcodeResult.error || 'FFmpeg no pudo transcodificar el archivo de audio.'
+                );
+            }
+
+            console.info('[AudioEngine] FFmpeg fallback transcoded successfully, decoding WAV result.');
+            return await this.ctx!.decodeAudioData(transcodeResult.data);
+        } catch (fallbackError) {
+            console.error('[AudioEngine] FFmpeg fallback also failed.', fallbackError);
+            throw fallbackError instanceof Error
+                ? fallbackError
+                : new Error('No se pudo decodificar el archivo de audio.');
+        }
     }
 
     async startRecording(trackId: string, deviceId?: string) {
