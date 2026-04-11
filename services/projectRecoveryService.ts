@@ -1,4 +1,5 @@
 import { ProjectData } from '../types';
+import { repairProjectData } from './projectIntegrityService';
 
 const AUTOSAVE_STORAGE_KEY = 'hollowbits.project-autosave.v1';
 const ACTIVE_SESSION_KEY = 'hollowbits.session-active.v1';
@@ -36,14 +37,12 @@ export interface RecoverySessionInfo {
 }
 
 const isValidProjectData = (value: unknown): value is ProjectData => {
-    if (!value || typeof value !== 'object') return false;
-    const candidate = value as Partial<ProjectData>;
-    return Boolean(
-        typeof candidate.version === 'string'
-        && typeof candidate.name === 'string'
-        && Array.isArray(candidate.tracks)
-        && candidate.transport
-    );
+    try {
+        repairProjectData(value, { source: 'autosave-validate' });
+        return true;
+    } catch {
+        return false;
+    }
 };
 
 const sanitizeSnapshot = (value: unknown): ProjectAutosaveSnapshot | null => {
@@ -61,13 +60,15 @@ const sanitizeSnapshot = (value: unknown): ProjectAutosaveSnapshot | null => {
         return null;
     }
 
+    const sanitizedProject = repairProjectData(candidate.project, { source: 'autosave-load' }).project;
+
     return {
         id: candidate.id,
         timestamp: Number(candidate.timestamp),
         reason: candidate.reason,
         commandCount: Number(candidate.commandCount),
         projectName: candidate.projectName,
-        project: candidate.project
+        project: sanitizedProject
     };
 };
 

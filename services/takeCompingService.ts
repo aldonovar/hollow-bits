@@ -1,4 +1,4 @@
-import { Clip, CompSegment, PunchRange, TakeLane, Track, TrackType } from '../types';
+import { Clip, CompSegment, PunchRange, RecordingTake, TakeLane, Track, TrackType } from '../types';
 
 const COMP_LANE_NAME = 'Comp Lane';
 const COMP_LANE_ID_PREFIX = 'lane-comp';
@@ -27,6 +27,16 @@ export interface PunchRecordingPlan {
 
 export interface PunchRecordingSessionMetaLike {
     punchOutBar?: number;
+}
+
+export interface TrackClipEditingContext {
+    clip: Clip | null;
+    isCompClip: boolean;
+    isTakeClip: boolean;
+    take?: RecordingTake;
+    takeLane?: TakeLane;
+    compLane?: TakeLane;
+    compSegment?: CompSegment;
 }
 
 interface PromoteTakeToCompOptions {
@@ -155,6 +165,80 @@ export const isCompDerivedClipId = (clipId: string): boolean => {
 
 export const isCompDerivedClip = (clip: Clip): boolean => {
     return isCompDerivedClipId(clip.id);
+};
+
+const clampClipMutation = (clip: Clip, updates: Partial<Clip>): Partial<Clip> => {
+    const nextStart = Object.prototype.hasOwnProperty.call(updates, 'start')
+        ? Math.max(0, clampNumber(updates.start ?? clip.start, clip.start))
+        : clip.start;
+    const nextLength = Object.prototype.hasOwnProperty.call(updates, 'length')
+        ? Math.max(MIN_RANGE_BARS, clampNumber(updates.length ?? clip.length, clip.length))
+        : clip.length;
+    const nextOffset = Object.prototype.hasOwnProperty.call(updates, 'offset')
+        ? Math.max(0, clampNumber(updates.offset ?? (clip.offset || 0), clip.offset || 0))
+        : (clip.offset || 0);
+    const maxFadeBars = Math.max(MIN_RANGE_BARS, nextLength);
+
+    const nextFadeIn = Object.prototype.hasOwnProperty.call(updates, 'fadeIn')
+        ? Math.max(0, Math.min(maxFadeBars, clampNumber(updates.fadeIn ?? (clip.fadeIn || 0), clip.fadeIn || 0)))
+        : (clip.fadeIn || 0);
+    const nextFadeOut = Object.prototype.hasOwnProperty.call(updates, 'fadeOut')
+        ? Math.max(0, Math.min(maxFadeBars, clampNumber(updates.fadeOut ?? (clip.fadeOut || 0), clip.fadeOut || 0)))
+        : (clip.fadeOut || 0);
+
+    return {
+        ...updates,
+        ...(Object.prototype.hasOwnProperty.call(updates, 'start') ? { start: nextStart } : {}),
+        ...(Object.prototype.hasOwnProperty.call(updates, 'length') ? { length: nextLength } : {}),
+        ...(Object.prototype.hasOwnProperty.call(updates, 'offset') ? { offset: nextOffset } : {}),
+        ...(Object.prototype.hasOwnProperty.call(updates, 'fadeIn') ? { fadeIn: nextFadeIn } : {}),
+        ...(Object.prototype.hasOwnProperty.call(updates, 'fadeOut') ? { fadeOut: nextFadeOut } : {}),
+        ...(Object.prototype.hasOwnProperty.call(updates, 'gain')
+            ? { gain: Math.max(0, clampNumber(updates.gain ?? clip.gain, clip.gain)) }
+            : {}),
+        ...(Object.prototype.hasOwnProperty.call(updates, 'playbackRate')
+            ? { playbackRate: Math.max(0.25, clampNumber(updates.playbackRate ?? clip.playbackRate, clip.playbackRate)) }
+            : {}),
+        ...(Object.prototype.hasOwnProperty.call(updates, 'transpose')
+            ? { transpose: Math.round(clampNumber(updates.transpose ?? (clip.transpose || 0), clip.transpose || 0)) }
+            : {})
+    };
+};
+
+export const resolveTrackClipEditingContext = (track: Track, clipId: string): TrackClipEditingContext => {
+    const clip = track.clips.find((candidate) => candidate.id === clipId) || null;
+    const isCompClip = isCompDerivedClipId(clipId);
+    const take = (track.recordingTakes || []).find((candidate) => candidate.clipId === clipId);
+    const takeLane = take
+        ? (track.takeLanes || []).find((lane) => lane.id === take.laneId)
+        : undefined;
+
+    if (!isCompClip) {
+        return {
+            clip,
+            isCompClip: false,
+            isTakeClip: Boolean(take),
+            take,
+            takeLane
+        };
+    }
+
+    const segmentId = clipId.slice(COMP_CLIP_ID_PREFIX.length);
+    const compLane = (track.takeLanes || []).find((lane) => lane.compSegments?.some((segment) => segment.id === segmentId));
+    const compSegment = compLane?.compSegments?.find((segment) => segment.id === segmentId);
+    const sourceTake = compSegment
+        ? (track.recordingTakes || []).find((candidate) => candidate.id === compSegment.takeId)
+        : undefined;
+
+    return {
+        clip,
+        isCompClip: true,
+        isTakeClip: false,
+        take: sourceTake,
+        takeLane: sourceTake ? (track.takeLanes || []).find((lane) => lane.id === sourceTake.laneId) : undefined,
+        compLane,
+        compSegment
+    };
 };
 
 export const normalizePunchRange = (range?: PunchRange): PunchRange => {
@@ -396,14 +480,22 @@ export const applyCompClipEdits = (track: Track, compClipId: string, updates: Pa
                 nextSourceEnd = Math.min(takeEnd, nextSourceStart + MIN_RANGE_BARS);
             }
 
+            const segmentLength = Math.max(MIN_RANGE_BARS, nextSourceEnd - nextSourceStart);
+            const nextFadeIn = Object.prototype.hasOwnProperty.call(updates, 'fadeIn')
+                ? Math.max(0, Math.min(segmentLength, clampNumber(updates.fadeIn ?? segment.fadeInBars ?? 0, segment.fadeInBars ?? 0)))
+                : (segment.fadeInBars ?? 0);
+            const nextFadeOut = Object.prototype.hasOwnProperty.call(updates, 'fadeOut')
+                ? Math.max(0, Math.min(segmentLength, clampNumber(updates.fadeOut ?? segment.fadeOutBars ?? 0, segment.fadeOutBars ?? 0)))
+                : (segment.fadeOutBars ?? 0);
+
             didUpdate = true;
             return {
                 ...segment,
                 sourceStartBar: nextSourceStart,
                 sourceEndBar: nextSourceEnd,
                 targetStartBar: nextTargetStart,
-                fadeInBars: updates.fadeIn ?? segment.fadeInBars,
-                fadeOutBars: updates.fadeOut ?? segment.fadeOutBars
+                fadeInBars: nextFadeIn,
+                fadeOutBars: nextFadeOut
             };
         });
 
@@ -421,6 +513,47 @@ export const applyCompClipEdits = (track: Track, compClipId: string, updates: Pa
         ...track,
         takeLanes: nextTakeLanes
     });
+};
+
+export const applyTrackClipEdits = (track: Track, clipId: string, updates: Partial<Clip>): Track => {
+    if (isCompDerivedClipId(clipId)) {
+        return applyCompClipEdits(track, clipId, updates);
+    }
+
+    let clipChanged = false;
+    const nextClips = track.clips.map((clip) => {
+        if (clip.id !== clipId) return clip;
+        clipChanged = true;
+        return {
+            ...clip,
+            ...clampClipMutation(clip, updates)
+        };
+    });
+
+    let sessionClipChanged = false;
+    const nextSessionClips = track.sessionClips.map((slot) => {
+        if (!slot.clip || slot.clip.id !== clipId) return slot;
+        sessionClipChanged = true;
+        return {
+            ...slot,
+            clip: {
+                ...slot.clip,
+                ...clampClipMutation(slot.clip, updates)
+            }
+        };
+    });
+
+    if (!clipChanged && !sessionClipChanged) {
+        return track;
+    }
+
+    const updatedTrack: Track = {
+        ...track,
+        clips: nextClips,
+        sessionClips: nextSessionClips
+    };
+
+    return syncTakeMetadataForClip(updatedTrack, clipId);
 };
 
 export const syncTakeMetadataForClip = (track: Track, clipId: string): Track => {

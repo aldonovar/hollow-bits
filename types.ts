@@ -14,6 +14,98 @@ export interface Note {
   velocity: number;
 }
 
+export type ScoreHand = 'left' | 'right';
+export type ScoreWorkspaceMode = 'score' | 'transcribe' | 'correct' | 'compare';
+
+export interface ScoreSourceRef {
+  kind: 'midi' | 'audio-derived';
+  trackId: string;
+  clipId: string;
+  derivedMidiTrackId?: string;
+  derivedMidiClipId?: string;
+}
+
+export interface ScoreNotationOverride {
+  id: string;
+  noteKey: string;
+  hand?: ScoreHand;
+  spelling?: string;
+  voice?: number;
+  tieStart?: boolean;
+  tieEnd?: boolean;
+  pedal?: boolean;
+}
+
+export interface ScoreLayoutPreferences {
+  splitRatio: number;
+  followTransport: boolean;
+  zoom: number;
+}
+
+export interface ScoreConfidenceRegion {
+  id: string;
+  start16th: number;
+  end16th: number;
+  confidence: number;
+  label?: string;
+}
+
+export interface ScoreEvent {
+  id: string;
+  type: 'note' | 'rest' | 'pedal';
+  start16th: number;
+  duration16th: number;
+  voice: number;
+  hand: ScoreHand;
+  pitch?: number;
+  velocity?: number;
+  spelling?: string;
+  tieStart?: boolean;
+  tieEnd?: boolean;
+  pedalDown?: boolean;
+  confidence?: number;
+  sourceNoteKey?: string;
+  sourceNoteIndex?: number;
+}
+
+export interface ScoreVoice {
+  id: string;
+  hand: ScoreHand;
+  voice: number;
+  events: ScoreEvent[];
+}
+
+export interface ScoreMeasure {
+  index: number;
+  start16th: number;
+  duration16th: number;
+  voices: ScoreVoice[];
+  confidence?: number;
+}
+
+export interface ScoreDocument {
+  id: string;
+  title: string;
+  bpm: number;
+  timeSignature: [number, number];
+  total16ths: number;
+  sourceNoteCount: number;
+  generatedAt: number;
+  measures: ScoreMeasure[];
+}
+
+export interface ScoreWorkspaceState {
+  id: string;
+  title: string;
+  mode: ScoreWorkspaceMode;
+  source: ScoreSourceRef;
+  layout: ScoreLayoutPreferences;
+  notationOverrides: ScoreNotationOverride[];
+  confidenceRegions: ScoreConfidenceRegion[];
+  lastAverageConfidence?: number;
+  updatedAt: number;
+}
+
 export interface Clip {
   id: string;
   name: string;
@@ -131,6 +223,80 @@ export interface PunchRange {
   countInBars?: number;
 }
 
+export interface AudioClipEditorViewState {
+  clipId: string;
+  isCompClip: boolean;
+  isTakeClip: boolean;
+  takeId?: string;
+  takeLabel?: string;
+  takeLaneId?: string;
+  takeLaneName?: string;
+  compLaneId?: string;
+  compSegmentId?: string;
+  punchRange?: PunchRange | null;
+}
+
+export type RecordingJournalPhase =
+  | 'armed'
+  | 'start-requested'
+  | 'started'
+  | 'stop-requested'
+  | 'stopped'
+  | 'finalized'
+  | 'committed'
+  | 'failed'
+  | 'recovered';
+
+export type RecordingJournalStatus = 'active' | 'committed' | 'failed' | 'recovered';
+
+export interface RecordingJournalEvent {
+  phase: RecordingJournalPhase;
+  at: number;
+  barTime?: number;
+  contextTimeSec?: number;
+  message?: string;
+  details?: Record<string, string | number | boolean | null>;
+}
+
+export type MonitoringRouteMode = 'mono' | 'stereo' | 'left' | 'right';
+
+export interface RecordingJournalEntry {
+  id: string;
+  trackId: string;
+  trackName: string;
+  createdAt: number;
+  updatedAt: number;
+  inputDeviceId?: string;
+  monitorMode: MonitoringRouteMode;
+  status: RecordingJournalStatus;
+  clipId?: string;
+  takeId?: string;
+  sourceId?: string;
+  failureReason?: string;
+  phases: RecordingJournalEvent[];
+}
+
+export interface RecordingCommitResult {
+  journalId: string;
+  trackId: string;
+  clipId: string;
+  takeId: string;
+  sourceId: string;
+  committedAt: number;
+  latencyCompensationBars: number;
+  monitorMode: MonitoringRouteMode;
+}
+
+export interface MonitoringRouteSnapshot {
+  trackId: string;
+  trackName: string;
+  active: boolean;
+  mode: MonitoringRouteMode;
+  latencyCompensationMs: number;
+  monitoringEnabled: boolean;
+  sharedInputStream: boolean;
+}
+
 export interface Track {
   id: string;
   name: string;
@@ -165,7 +331,7 @@ export interface Track {
 }
 
 export type MicInputProfile = 'studio-voice' | 'podcast' | 'raw';
-export type MicInputChannelMode = 'mono' | 'stereo' | 'left' | 'right';
+export type MicInputChannelMode = MonitoringRouteMode;
 
 export interface MicSettings {
   profile: MicInputProfile;
@@ -194,6 +360,19 @@ export interface TransportState {
   snapToGrid: boolean;
   scaleRoot: number;
   scaleType: 'major' | 'minor' | 'dorian' | 'phrygian' | 'chromatic' | 'pentatonic-major' | 'pentatonic-minor';
+}
+
+export interface TransportAuthoritySnapshot {
+  capturedAt: number;
+  contextState: AudioContextState | 'closed';
+  schedulerMode: 'interval' | 'worklet-clock';
+  bpm: number;
+  currentTimeSec: number;
+  currentBarTime: number;
+  currentBar: number;
+  currentBeat: number;
+  currentSixteenth: number;
+  isPlaying: boolean;
 }
 
 export interface AudioSettings {
@@ -250,6 +429,58 @@ export interface SessionHealthSnapshot {
   monitorLatencyP95Ms: number;
 }
 
+export interface AudioIncidentWindow {
+  active: boolean;
+  windowStartedAt: number;
+  baselineDropoutCount: number;
+  baselineUnderrunCount: number;
+  lastCounterChangeAt: number | null;
+  dropoutsDeltaWindow: number;
+  underrunsDeltaWindow: number;
+}
+
+export type TransportPlaybackSessionId = number;
+
+export type VisualPerformanceMode = 'normal' | 'guarded' | 'degraded';
+export type DiagnosticsVisibilityMode = 'hidden' | 'debug';
+
+export type VisualPerformanceReasonCode =
+  | 'steady'
+  | 'idle'
+  | 'ui-fps-guarded'
+  | 'ui-fps-degraded'
+  | 'ui-frame-drop-guarded'
+  | 'ui-frame-drop-degraded';
+
+export interface VisualPerformanceSnapshot {
+  capturedAt: number;
+  uiFpsP95: number;
+  frameDropRatio: number;
+  hasPlaybackActivity: boolean;
+  worstBurstMs: number;
+  sampleWindowMs: number;
+  hasActiveViewportInteraction: boolean;
+}
+
+export interface AutomationRuntimeValue {
+  trackId: string;
+  volume?: number;
+  pan?: number;
+  reverb?: number;
+}
+
+export interface AutomationRuntimeFrame {
+  capturedAt: number;
+  barTime: number;
+  values: AutomationRuntimeValue[];
+}
+
+export interface AutomationPlaybackSnapshot {
+  capturedAt: number;
+  barTime: number;
+  appliedTrackCount: number;
+}
+
 export interface LiveCaptureRunConfig {
   tracks: number;
   scenes: number;
@@ -263,7 +494,10 @@ export interface LiveCaptureRunConfig {
 export type LiveCaptureArtifactType =
   | 'session-launch'
   | 'stress-48x8'
-  | 'audio-priority-transitions';
+  | 'audio-priority-transitions'
+  | 'recording-reliability'
+  | 'monitoring-runtime'
+  | 'transport-runtime';
 
 export interface LiveCaptureArtifactEnvelope<TPayload = unknown> {
   schemaVersion: 1;
@@ -288,6 +522,7 @@ export interface ProjectData {
   tracks: Track[];
   transport: TransportState;
   audioSettings: AudioSettings;
+  scoreWorkspaces?: ScoreWorkspaceState[];
   createdAt: number;
   lastModified: number;
 }

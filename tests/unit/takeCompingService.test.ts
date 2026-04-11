@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { createTrack } from '../../services/projectCoreService';
 import {
+    applyTrackClipEdits,
     applyCompClipEdits,
     COMP_CLIP_ID_PREFIX,
     promoteTakeToComp,
     rebuildCompDerivedClips,
+    resolveTrackClipEditingContext,
     resolvePunchRecordingPlan,
     shouldFinalizePunchRecording,
     splitTakeForClip,
@@ -331,6 +333,116 @@ describe('takeCompingService.applyCompClipEdits', () => {
         expect(compClip?.start).toBe(11);
         expect(compClip?.length).toBe(2);
         expect(compClip?.offset).toBe(1);
+    });
+});
+
+describe('takeCompingService.resolveTrackClipEditingContext', () => {
+    it('describes take clips and comp-derived clips from the same track', () => {
+        const sourceClip = makeAudioClip('clip-context-source', 1, 4);
+        const track = rebuildCompDerivedClips(createTrack({
+            id: 'track-context',
+            name: 'CTX',
+            type: TrackType.AUDIO,
+            clips: [sourceClip],
+            recordingTakes: [
+                {
+                    id: 'take-context',
+                    clipId: 'clip-context-source',
+                    trackId: 'track-context',
+                    laneId: 'lane-rec',
+                    startBar: 1,
+                    lengthBars: 4,
+                    offsetBars: 0,
+                    createdAt: 1
+                }
+            ],
+            takeLanes: [
+                {
+                    id: 'lane-rec',
+                    name: 'Take Lane 1',
+                    trackId: 'track-context',
+                    takeIds: ['take-context']
+                },
+                {
+                    id: 'lane-comp',
+                    name: 'Comp Lane',
+                    trackId: 'track-context',
+                    isCompLane: true,
+                    takeIds: [],
+                    compSegments: [
+                        {
+                            id: 'seg-context',
+                            takeId: 'take-context',
+                            sourceStartBar: 1,
+                            sourceEndBar: 5,
+                            targetStartBar: 8
+                        }
+                    ]
+                }
+            ],
+            activeCompLaneId: 'lane-comp'
+        }));
+
+        const takeContext = resolveTrackClipEditingContext(track, 'clip-context-source');
+        expect(takeContext.isTakeClip).toBe(true);
+        expect(takeContext.isCompClip).toBe(false);
+        expect(takeContext.take?.id).toBe('take-context');
+
+        const compContext = resolveTrackClipEditingContext(track, `${COMP_CLIP_ID_PREFIX}seg-context`);
+        expect(compContext.isCompClip).toBe(true);
+        expect(compContext.compSegment?.id).toBe('seg-context');
+        expect(compContext.take?.id).toBe('take-context');
+    });
+});
+
+describe('takeCompingService.applyTrackClipEdits', () => {
+    it('clamps direct clip edits and synchronizes associated take metadata', () => {
+        const sourceClip = makeAudioClip('clip-direct', 3, 2);
+        const track = createTrack({
+            id: 'track-direct',
+            name: 'DIRECT',
+            type: TrackType.AUDIO,
+            clips: [sourceClip],
+            recordingTakes: [
+                {
+                    id: 'take-direct',
+                    clipId: 'clip-direct',
+                    trackId: 'track-direct',
+                    laneId: 'lane-rec',
+                    startBar: 3,
+                    lengthBars: 2,
+                    offsetBars: 0,
+                    createdAt: 1
+                }
+            ],
+            takeLanes: [
+                {
+                    id: 'lane-rec',
+                    name: 'Take Lane 1',
+                    trackId: 'track-direct',
+                    takeIds: ['take-direct']
+                }
+            ]
+        });
+
+        const edited = applyTrackClipEdits(track, 'clip-direct', {
+            start: -4,
+            length: -1,
+            offset: -2,
+            fadeIn: 8,
+            fadeOut: 8,
+            playbackRate: 0.1
+        });
+
+        const nextClip = edited.clips.find((clip) => clip.id === 'clip-direct');
+        expect(nextClip?.start).toBe(0);
+        expect(nextClip?.length).toBeGreaterThan(0);
+        expect(nextClip?.offset).toBe(0);
+        expect(nextClip?.fadeIn).toBe(nextClip?.length);
+        expect(nextClip?.fadeOut).toBe(nextClip?.length);
+        expect(nextClip?.playbackRate).toBe(0.25);
+        expect(edited.recordingTakes?.[0].startBar).toBe(0);
+        expect(edited.recordingTakes?.[0].offsetBars).toBe(0);
     });
 });
 

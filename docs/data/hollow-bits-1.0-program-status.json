@@ -1,0 +1,104 @@
+{
+  "release": {
+    "name": "Hollow Bits 1.0 Public",
+    "targetDate": "2026-09-18",
+    "positioning": {
+      "primary": "live-reliability",
+      "secondary": "recording-recovery"
+    },
+    "platforms": {
+      "windows": "ga",
+      "linux": "preview"
+    },
+    "pluginFormats": [
+      "vst3",
+      "clap"
+    ]
+  },
+  "blocks": [
+    {
+      "id": "block-0",
+      "title": "Benchmark competitivo y freeze de arquitectura",
+      "status": "done",
+      "releaseBlocking": true,
+      "notes": "Matriz competitiva, freeze de arquitectura, release governance, backlog P0/P1/P2/P3 y readiness automatizado ya quedan cerrados como contrato formal de Public 1.0."
+    },
+    {
+      "id": "block-1",
+      "title": "Transporte impecable y single-playback-session",
+      "status": "done",
+      "releaseBlocking": true,
+      "notes": "Contrato de sesion, invalidacion determinista y smoke runtime live-capture del transporte ya quedan cerrados con gate propio en CI."
+    },
+    {
+      "id": "block-2",
+      "title": "Audio health veraz y UX limpia",
+      "status": "done",
+      "releaseBlocking": true,
+      "notes": "Salud de audio recent-truth consolidada, senalizacion tecnica oculta por defecto y Session/ shell alineados a una sola decision global con modo debug explicito."
+    },
+    {
+      "id": "block-3",
+      "title": "Renderer 60fps con detalle maximo",
+      "status": "done",
+      "releaseBlocking": true,
+      "notes": "Playhead imperativo, cache canvas/bitmap de waveforms, hot-path trimming del shell y gate visual real via live-capture ya quedan cerrados; el renderer 1.0 cumple el objetivo de validacion sostenida para esta fase."
+    },
+    {
+      "id": "block-4",
+      "title": "Recording core profesional",
+      "status": "done",
+      "releaseBlocking": true,
+      "notes": "Journal transaccional, finalize, recovery UX visible, monitor router v2 auditable, reporte operativo de latencia y monitoring-runtime gate ya quedan cerrados para esta fase con quality:live-strict en verde."
+    },
+    {
+      "id": "block-5",
+      "title": "Editing pro: takes, comping y punch",
+      "status": "done",
+      "releaseBlocking": true,
+      "notes": "Modelo hibrido cerrado con TakeLanesPanel + editor inferior contextual de audio, semantica take/comp alineada, punch/pre-roll/count-in integrados, roundtrip reparable y block5:gate ya en PASS."
+    },
+    {
+      "id": "block-6",
+      "title": "Session flagship y live workflow superior",
+      "status": "done",
+      "releaseBlocking": true,
+      "notes": "Session flagship ya queda consolidado con launch cuantizado persistente, scene recording + replay determinista, replay del ultimo evento, estado stage-safe visible en la Session UI y `block6:gate` en PASS sobre launch/stress/tests."
+    },
+    {
+      "id": "block-7",
+      "title": "Mixer, routing y automation de nivel 1.0",
+      "status": "done",
+      "releaseBlocking": true,
+      "notes": "Mixer 1.0 ya queda cerrado con groups, returns, sends pre/post, cue monitor PFL/AFL, VCA, solo-safe, automation read/touch/latch/write fuera del hot path de React, auditoria viva del mixer en UI y `block7:gate` en PASS."
+    },
+    {
+      "id": "block-8",
+      "title": "Open plugin ecosystem (VST3 + CLAP)",
+      "status": "planned",
+      "releaseBlocking": true,
+      "notes": "Hay UI/host placeholders; falta boundary serio, scan, quarantine y crash containment."
+    },
+    {
+      "id": "block-9",
+      "title": "Export, interchange y delivery",
+      "status": "planned",
+      "releaseBlocking": true,
+      "notes": "Export existe; falta parity report completo y endurecimiento del flujo profesional."
+    },
+    {
+      "id": "block-10",
+      "title": "Browser, MIDI y herramientas de produccion",
+      "status": "planned",
+      "releaseBlocking": false,
+      "notes": "Ya hay base de browser, MIDI y note scan; se amplia solo si no compromete el core."
+    },
+    {
+      "id": "block-11",
+      "title": "Plataforma y release discipline",
+      "status": "planned",
+      "releaseBlocking": true,
+      "notes": "Falta cerrar Windows GA, Linux Preview y la disciplina final de instaladores, smoke y known issues."
+    }
+  ]
+}

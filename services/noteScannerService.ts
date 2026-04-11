@@ -50,7 +50,7 @@ const CHUNK_OVERLAP_SECONDS = 1.1;
 const ANALYZE_PROGRESS_START = 0.1;
 const ANALYZE_PROGRESS_SPAN = 0.78;
 
-const DEFAULT_SCAN_SETTINGS: NoteScanSettings = {
+export const DEFAULT_SCAN_SETTINGS: NoteScanSettings = {
     mode: 'polyphonic',
     sensitivity: 0.72,
     minMidi: 21,
@@ -1446,4 +1446,3 @@ class NoteScannerService {
 }
 
 export const noteScannerService = new NoteScannerService();
-export { DEFAULT_SCAN_SETTINGS };

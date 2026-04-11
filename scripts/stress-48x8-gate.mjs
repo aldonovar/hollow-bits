@@ -48,6 +48,7 @@ const evaluateGate = (report, options) => {
   const warnings = [];
   const gateResults = report?.gates?.results || {};
   const scenario = report?.scenario || {};
+  const uiTelemetry = report?.telemetry?.ui || {};
   const mandatoryGateKeys = Array.isArray(report?.gates?.mandatoryGateKeys)
     ? report.gates.mandatoryGateKeys
     : ['grid48x8', 'liveDuration', 'recordingCycles', 'takeLoss', 'launchErrorP95'];
@@ -61,6 +62,22 @@ const evaluateGate = (report, options) => {
 
   if (!gateResults.driftP99 || gateResults.driftP99.pass !== true) {
     warnings.push('Gate driftP99 fuera de objetivo (no bloqueante).');
+  }
+
+  const uiFpsP95 = Number(uiTelemetry.fpsP95 ?? Number.NEGATIVE_INFINITY);
+  const frameDropRatio = Number(uiTelemetry.frameDropRatio ?? Number.POSITIVE_INFINITY);
+  const uiSampleCount = Number(uiTelemetry.sampleCount ?? 0);
+
+  if (!Number.isFinite(uiFpsP95) || uiFpsP95 < 58) {
+    failures.push(`Gate visualFps fuera de objetivo: fpsP95=${Number.isFinite(uiFpsP95) ? uiFpsP95.toFixed(2) : 'n/a'}.`);
+  }
+
+  if (frameDropRatio > 0.02) {
+    warnings.push(`Frame drop ratio alto para playback visual: ${(frameDropRatio * 100).toFixed(2)}%.`);
+  }
+
+  if (uiSampleCount < 3) {
+    warnings.push(`Muestras visuales escasas: ${uiSampleCount}.`);
   }
 
   const source = typeof scenario.source === 'string' ? scenario.source : 'unknown';
@@ -84,6 +101,8 @@ const evaluateGate = (report, options) => {
       source,
       durationMinutes: scenario.durationMinutes || 0,
       recordingCycles: scenario.recordingCycles || 0,
+      uiFpsP95: Number.isFinite(uiFpsP95) ? uiFpsP95 : 0,
+      frameDropRatio: Number.isFinite(frameDropRatio) ? frameDropRatio : 0,
       mandatoryGateKeys
     },
     failures,
@@ -100,6 +119,7 @@ const printResult = (reportPath, result) => {
   console.log(`- source: ${result.summary.source}`);
   console.log(`- duration: ${result.summary.durationMinutes} min`);
   console.log(`- recording cycles: ${result.summary.recordingCycles}`);
+  console.log(`- ui fps p95: ${result.summary.uiFpsP95}`);
 
   if (result.failures.length > 0) {
     console.log('Failures:');

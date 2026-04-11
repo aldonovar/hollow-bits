@@ -1,8 +1,8 @@
 
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
-import { Track, TrackType, Clip, Note, TransportState } from '../types';
+import { AudioClipEditorViewState, Clip, Note, PunchRange, Track, TrackType, TransportState } from '../types';
 import { SCALES } from '../constants';
-import { Activity, ZoomIn, ZoomOut, MousePointer2, Pencil, Music, Eraser } from 'lucide-react';
+import { Activity, Layers3, MousePointer2, Music, Pencil, Scissors, Sparkles, Waves, ZoomIn, ZoomOut, Eraser } from 'lucide-react';
 import Knob from './Knob';
 import WaveformVisualizer from './WaveformVisualizer';
 
@@ -16,7 +16,12 @@ export type EditorTransportView = Pick<TransportState, 'snapToGrid' | 'gridSize'
 interface EditorProps {
     track: Track | null;
     selectedClipId?: string | null;
+    audioViewState?: AudioClipEditorViewState | null;
+    selectedTrackPunchRange?: PunchRange | null;
     onClipUpdate?: (trackId: string, clipId: string, updates: Partial<Clip>, options?: EditorMutationOptions) => void;
+    onConsolidate?: (track: Track, clips: Clip[]) => void;
+    onReverse?: (track: Track, clip: Clip) => void;
+    onPromoteToComp?: (track: Track, clip: Clip) => void;
     transport?: EditorTransportView;
 }
 
@@ -46,7 +51,21 @@ const formatSnapLabel = (gridSize: number): string => {
     return `1/${denominator}`;
 };
 
-const Editor: React.FC<EditorProps> = ({ track, selectedClipId = null, onClipUpdate, transport }) => {
+const formatBars = (value: number | null | undefined): string => {
+    return Number.isFinite(value) ? Number(value).toFixed(3) : '0.000';
+};
+
+const Editor: React.FC<EditorProps> = ({
+    track,
+    selectedClipId = null,
+    audioViewState = null,
+    selectedTrackPunchRange = null,
+    onClipUpdate,
+    onConsolidate,
+    onReverse,
+    onPromoteToComp,
+    transport
+}) => {
     const [zoom, setZoom] = useState(40); // Pixels per 16th note
     const [verticalZoom, setVerticalZoom] = useState(24); // Pixels per key (Larger for better visibility)
     const [tool, setTool] = useState<'pointer' | 'draw' | 'erase'>('pointer');
@@ -123,6 +142,13 @@ const Editor: React.FC<EditorProps> = ({ track, selectedClipId = null, onClipUpd
         }
         return track.clips[0] ?? null;
     }, [selectedClipId, track]);
+    const canEditAudioSource = track?.type === TrackType.AUDIO && selectedClip && !audioViewState?.isCompClip;
+    const audioTake = useMemo(() => {
+        if (!track || track.type !== TrackType.AUDIO || !audioViewState?.takeId) {
+            return null;
+        }
+        return (track.recordingTakes || []).find((take) => take.id === audioViewState.takeId) || null;
+    }, [audioViewState?.takeId, track]);
 
     const snapEnabled = transport?.snapToGrid ?? true;
     const snapStep16 = useMemo(() => {
@@ -195,6 +221,11 @@ const Editor: React.FC<EditorProps> = ({ track, selectedClipId = null, onClipUpd
     const updateSelectedClipNotes = (notes: Note[], options?: EditorMutationOptions) => {
         if (!selectedClip || !onClipUpdate) return;
         onClipUpdate(track.id, selectedClip.id, { notes }, options);
+    };
+
+    const updateAudioClip = (updates: Partial<Clip>, reason: string) => {
+        if (!selectedClip || !onClipUpdate) return;
+        onClipUpdate(track.id, selectedClip.id, updates, { reason });
     };
 
     // --- EVENT HANDLERS ---
@@ -639,87 +670,171 @@ const Editor: React.FC<EditorProps> = ({ track, selectedClipId = null, onClipUpd
                             </div>
                         </>
                     ) : (
-                        /* AUDIO EDITOR DISPLAY */
-                        /* AUDIO EDITOR DISPLAY */
                         selectedClip ? (
                             <div className="w-full h-full flex flex-col relative bg-[#121214]">
                                 <div className="absolute inset-0 opacity-5" style={{ backgroundImage: 'radial-gradient(#ffffff 1px, transparent 1px)', backgroundSize: '10px 10px' }}></div>
 
-                                <div className="p-4 border-b border-daw-border bg-[#18181b] flex items-center gap-6 z-10 shadow-sm transition-all duration-300">
-                                    {/* CLIP INFO */}
-                                    <div className="flex flex-col gap-1 pr-6 border-r border-daw-border">
-                                        <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Clip</span>
-                                        <div className="flex items-center gap-2">
-                                            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: selectedClip.color }}></div>
-                                            <span className="text-sm font-bold text-white tracking-wide truncate max-w-[150px]">{selectedClip.name}</span>
+                                <div className="p-4 border-b border-daw-border bg-[#18181b] z-10 shadow-sm space-y-4">
+                                    <div className="flex flex-wrap items-start gap-4">
+                                        <div className="flex flex-col gap-1 pr-4 border-r border-daw-border min-w-[180px]">
+                                            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Clip</span>
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: selectedClip.color }}></div>
+                                                <span className="text-sm font-bold text-white tracking-wide truncate max-w-[220px]">{selectedClip.name}</span>
+                                            </div>
+                                            <div className="flex flex-wrap gap-1.5 mt-1">
+                                                <span className={`px-2 py-1 rounded-sm text-[9px] font-mono border ${audioViewState?.isCompClip ? 'border-daw-violet/40 text-daw-violet bg-daw-violet/10' : 'border-cyan-400/30 text-cyan-200 bg-cyan-400/10'}`}>
+                                                    {audioViewState?.isCompClip ? 'COMP CLIP' : audioViewState?.isTakeClip ? 'TAKE CLIP' : 'AUDIO CLIP'}
+                                                </span>
+                                                {audioTake && (
+                                                    <span className="px-2 py-1 rounded-sm text-[9px] font-mono border border-white/10 text-gray-200 bg-white/5">
+                                                        {audioTake.label || audioTake.id}
+                                                    </span>
+                                                )}
+                                                {audioViewState?.takeLaneName && (
+                                                    <span className="px-2 py-1 rounded-sm text-[9px] font-mono border border-white/10 text-gray-400 bg-white/5">
+                                                        {audioViewState.takeLaneName}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        <div className="flex flex-col gap-1 min-w-[140px]">
+                                            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Punch</span>
+                                            {selectedTrackPunchRange?.enabled ? (
+                                                <div className="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-[10px] font-mono text-amber-100">
+                                                    <div>IN {formatBars(selectedTrackPunchRange.inBar)} / OUT {formatBars(selectedTrackPunchRange.outBar)}</div>
+                                                    <div className="text-amber-100/70 mt-0.5">PRE {formatBars(selectedTrackPunchRange.preRollBars)} / COUNT {formatBars(selectedTrackPunchRange.countInBars)}</div>
+                                                </div>
+                                            ) : (
+                                                <div className="rounded border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-mono text-gray-500">
+                                                    Punch desactivado para esta pista
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="flex flex-col gap-1 items-center min-w-[84px]">
+                                            <span className="text-[9px] font-bold text-gray-500 uppercase tracking-widest mb-1">Time Mode</span>
+                                            <button
+                                                disabled={!canEditAudioSource}
+                                                onClick={() => updateAudioClip({ isWarped: !selectedClip.isWarped }, 'editor-audio-toggle-warp')}
+                                                className={`
+                                                    px-3 py-1 rounded-sm text-[10px] font-black uppercase border tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed
+                                                    ${selectedClip.isWarped
+                                                        ? 'bg-[#eab308] text-black border-[#eab308] shadow-[0_0_10px_rgba(234,179,8,0.3)]'
+                                                        : 'bg-[#222] text-gray-400 border-[#333] hover:text-white hover:border-white/20'
+                                                    }
+                                                `}
+                                                title={canEditAudioSource ? 'Alternar warp' : 'Los comp clips editan segmento, no modo fuente'}
+                                            >
+                                                WARP
+                                            </button>
+                                        </div>
+
+                                        <div className="flex items-center gap-4 pl-4 border-l border-daw-border">
+                                            <div className={`${!canEditAudioSource ? 'opacity-45 pointer-events-none' : ''}`}>
+                                                <Knob
+                                                    label="GAIN"
+                                                    value={selectedClip.gain}
+                                                    min={0}
+                                                    max={2}
+                                                    defaultValue={1}
+                                                    size={32}
+                                                    color={track.color}
+                                                    onChange={(val) => updateAudioClip({ gain: val }, 'editor-audio-gain')}
+                                                />
+                                            </div>
+                                            <div className={`${!canEditAudioSource ? 'opacity-45 pointer-events-none' : ''}`}>
+                                                <Knob
+                                                    label="PITCH"
+                                                    value={selectedClip.transpose ?? 0}
+                                                    min={-24}
+                                                    max={24}
+                                                    defaultValue={0}
+                                                    size={32}
+                                                    color="#00fff2"
+                                                    bipolar={true}
+                                                    onChange={(val) => updateAudioClip({ transpose: Math.round(val) }, 'editor-audio-transpose')}
+                                                />
+                                            </div>
+                                            <div className={`${!canEditAudioSource ? 'opacity-45 pointer-events-none' : ''}`}>
+                                                <Knob
+                                                    label="RATE"
+                                                    value={selectedClip.playbackRate ?? 1}
+                                                    min={0.25}
+                                                    max={4}
+                                                    defaultValue={1}
+                                                    size={32}
+                                                    color="#94F6A6"
+                                                    onChange={(val) => updateAudioClip({ playbackRate: Number(val.toFixed(3)) }, 'editor-audio-rate')}
+                                                />
+                                            </div>
                                         </div>
                                     </div>
 
-                                    {/* WARP MODE */}
-                                    <div className="flex flex-col gap-1 items-center">
-                                        <span className="text-[9px] font-bold text-gray-500 uppercase tracking-widest mb-1">Time Mode</span>
-                                        <button
-                                            onClick={() => onClipUpdate && onClipUpdate(track.id, selectedClip.id, { isWarped: !selectedClip.isWarped })}
-                                            className={`
-                                                px-3 py-1 rounded-sm text-[10px] font-black uppercase border tracking-wider transition-all
-                                                ${selectedClip.isWarped
-                                                    ? 'bg-[#eab308] text-black border-[#eab308] shadow-[0_0_10px_rgba(234,179,8,0.3)]'
-                                                    : 'bg-[#222] text-gray-400 border-[#333] hover:text-white hover:border-white/20'
-                                                }
-                                            `}
-                                        >
-                                            WARP
-                                        </button>
+                                    <div className="grid grid-cols-5 gap-3">
+                                        {[
+                                            { key: 'start', label: 'START', value: selectedClip.start, min: 0, step: 0.0625 },
+                                            { key: 'length', label: 'LENGTH', value: selectedClip.length, min: 0.0625, step: 0.0625 },
+                                            { key: 'offset', label: 'OFFSET', value: selectedClip.offset || 0, min: 0, step: 0.0625 },
+                                            { key: 'fadeIn', label: 'FADE IN', value: selectedClip.fadeIn || 0, min: 0, step: 0.03125 },
+                                            { key: 'fadeOut', label: 'FADE OUT', value: selectedClip.fadeOut || 0, min: 0, step: 0.03125 }
+                                        ].map((field) => (
+                                            <label key={field.key} className="flex flex-col gap-1">
+                                                <span className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">{field.label}</span>
+                                                <input
+                                                    type="number"
+                                                    min={field.min}
+                                                    step={field.step}
+                                                    value={Number.isFinite(field.value) ? Number(field.value).toFixed(3) : '0.000'}
+                                                    onChange={(event) => {
+                                                        const numeric = Number(event.target.value);
+                                                        if (!Number.isFinite(numeric)) return;
+                                                        updateAudioClip({ [field.key]: numeric } as Partial<Clip>, `editor-audio-${field.key}`);
+                                                    }}
+                                                    className="h-9 rounded border border-white/10 bg-[#10131c] px-2 text-[11px] font-mono text-white outline-none focus:border-daw-violet/60"
+                                                />
+                                            </label>
+                                        ))}
                                     </div>
 
-                                    {/* AUDIO CONTROLS */}
-                                    <div className="flex items-center gap-4 pl-6 border-l border-daw-border">
-                                        <Knob
-                                            label="GAIN"
-                                            value={selectedClip.gain}
-                                            min={0}
-                                            max={2}
-                                            defaultValue={1}
-                                            size={32}
-                                            color={track.color}
-                                            onChange={(val) => onClipUpdate && onClipUpdate(track.id, selectedClip.id, { gain: val })}
-                                        />
-
-                                        {/* Pitch Control - Only functional/relevant depending on mode, but always visible */}
-                                        <Knob
-                                            label="PITCH"
-                                            value={selectedClip.transpose ?? 0}
-                                            min={-24}
-                                            max={24}
-                                            defaultValue={0}
-                                            size={32}
-                                            color="#00fff2"
-                                            bipolar={true}
-                                            onChange={(val) => onClipUpdate && onClipUpdate(track.id, selectedClip.id, { transpose: Math.round(val) })}
-                                        />
-
-                                        <Knob
-                                            label="RATE"
-                                            value={selectedClip.playbackRate ?? 1}
-                                            min={0.25}
-                                            max={4}
-                                            defaultValue={1}
-                                            size={32}
-                                            color="#94F6A6"
-                                            onChange={(val) => onClipUpdate && onClipUpdate(track.id, selectedClip.id, { playbackRate: Number(val.toFixed(3)) })}
-                                        />
-
-                                        <div className="flex flex-col gap-1 items-center ml-2">
-                                            <span className="text-[9px] font-bold text-gray-500 uppercase">Rate</span>
-                                            <span className="text-xs font-mono text-daw-accent">
-                                                {selectedClip.playbackRate?.toFixed(2)}x
-                                            </span>
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            disabled={!canEditAudioSource || !selectedClip.buffer}
+                                            onClick={() => onReverse && onReverse(track, selectedClip)}
+                                            className="h-8 px-3 rounded border border-white/10 bg-[#111622] text-[10px] font-bold uppercase tracking-wider text-gray-200 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                        >
+                                            <Waves size={12} />
+                                            Reverse
+                                        </button>
+                                        <button
+                                            disabled={!canEditAudioSource || !selectedClip.buffer}
+                                            onClick={() => onConsolidate && onConsolidate(track, [selectedClip])}
+                                            className="h-8 px-3 rounded border border-white/10 bg-[#111622] text-[10px] font-bold uppercase tracking-wider text-gray-200 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                        >
+                                            <Scissors size={12} />
+                                            Consolidate
+                                        </button>
+                                        <button
+                                            disabled={!audioViewState?.isTakeClip || Boolean(audioViewState?.isCompClip)}
+                                            onClick={() => onPromoteToComp && onPromoteToComp(track, selectedClip)}
+                                            className="h-8 px-3 rounded border border-daw-violet/25 bg-daw-violet/10 text-[10px] font-bold uppercase tracking-wider text-daw-violet hover:text-white disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                        >
+                                            <Sparkles size={12} />
+                                            Promote to Comp
+                                        </button>
+                                        <div className="ml-auto rounded border border-white/10 bg-white/5 px-3 py-1.5 text-[10px] font-mono text-gray-400 inline-flex items-center gap-2">
+                                            <Layers3 size={12} />
+                                            {audioViewState?.isCompClip
+                                                ? `Segment ${audioViewState.compSegmentId || 'n/a'}`
+                                                : audioViewState?.takeId
+                                                    ? `Take ${audioViewState.takeId}`
+                                                    : 'Clip source edit'}
                                         </div>
                                     </div>
                                 </div>
 
-                                {/* Waveform Visualization */}
-                                <div className="flex-1 bg-black/40 rounded border border-white/10 relative overflow-hidden group">
+                                <div className="flex-1 bg-black/40 rounded border border-white/10 relative overflow-hidden group min-h-0">
                                     <WaveformVisualizer buffer={selectedClip.buffer} color={track.color} />
                                 </div>
                             </div>

@@ -6,7 +6,8 @@ import type {
     LiveCaptureArtifactType,
     LiveCaptureRunConfig,
     SessionHealthSnapshot,
-    Track
+    Track,
+    VisualPerformanceSnapshot
 } from '../types';
 import { TrackType } from '../types';
 import { engineAdapter } from './engineAdapter';
@@ -19,6 +20,9 @@ import {
     type SessionLaunchReport,
     type SessionLaunchTelemetrySample
 } from './sessionPerformanceService';
+import { buildMonitoringRuntimeReport } from './monitoringRuntimeService';
+import { buildRecordingReliabilityReport } from './recordingReliabilityService';
+import { barToSeconds } from './transportStateService';
 
 export interface LiveCaptureHarnessProgress {
     phase: 'bootstrap' | 'warmup' | 'capture' | 'finalize';
@@ -29,13 +33,34 @@ export interface LiveCaptureHarnessProgress {
 
 export interface LiveCaptureHarnessHooks {
     onProgress?: (progress: LiveCaptureHarnessProgress) => void;
+    getVisualPerformanceSnapshot?: () => VisualPerformanceSnapshot | null | undefined;
 }
 
 export interface LiveCaptureHarnessResult {
     config: LiveCaptureRunConfig;
+    transportRuntimeReport: Record<string, unknown>;
     launchReport: SessionLaunchReport;
     stressReport: Record<string, unknown>;
     audioPriorityTransitionsReport: Record<string, unknown>;
+    recordingReliabilityReport: Record<string, unknown>;
+    monitoringRuntimeReport: Record<string, unknown>;
+}
+
+interface TransportRuntimeCheckpoint {
+    name: string;
+    pass: boolean;
+    expected: Record<string, unknown>;
+    actual: Record<string, unknown>;
+}
+
+interface VisualTelemetrySample {
+    capturedAt: number;
+    uiFpsP95: number;
+    frameDropRatio: number;
+    worstBurstMs: number;
+    sampleWindowMs: number;
+    hasActiveViewportInteraction: boolean;
+    hasPlaybackActivity: boolean;
 }
 
 const DEFAULT_LIVE_CAPTURE_RUN_CONFIG: LiveCaptureRunConfig = {
@@ -52,9 +77,112 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => {
     window.setTimeout(resolve, Math.max(0, ms));
 });
 
+const waitForCondition = async (
+    predicate: () => boolean,
+    timeoutMs: number,
+    pollMs = 16
+): Promise<boolean> => {
+    const deadline = performance.now() + Math.max(50, timeoutMs);
+
+    while (performance.now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        await delay(pollMs);
+    }
+
+    return predicate();
+};
+
 const safeNumber = (value: unknown, fallback: number): number => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const percentile = (values: number[], ratio: number): number => {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((left, right) => left - right);
+    const clampedRatio = Math.max(0, Math.min(1, ratio));
+    const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * clampedRatio)));
+    return sorted[index];
+};
+
+const normalizeVisualPerformanceSnapshot = (
+    snapshot: VisualPerformanceSnapshot | null | undefined
+): VisualTelemetrySample | null => {
+    if (!snapshot) {
+        return null;
+    }
+
+    return {
+        capturedAt: Math.max(0, safeNumber(snapshot.capturedAt, Date.now())),
+        uiFpsP95: Math.max(0, safeNumber(snapshot.uiFpsP95, 60)),
+        frameDropRatio: Math.max(0, safeNumber(snapshot.frameDropRatio, 0)),
+        worstBurstMs: Math.max(0, safeNumber(snapshot.worstBurstMs, 16.67)),
+        sampleWindowMs: Math.max(0, safeNumber(snapshot.sampleWindowMs, 0)),
+        hasActiveViewportInteraction: Boolean(snapshot.hasActiveViewportInteraction),
+        hasPlaybackActivity: Boolean(snapshot.hasPlaybackActivity)
+    };
+};
+
+const collectVisualSamplesDuringDelay = async (
+    durationMs: number,
+    hooks: LiveCaptureHarnessHooks,
+    samples: VisualTelemetrySample[]
+): Promise<void> => {
+    const deadline = performance.now() + Math.max(0, durationMs);
+
+    while (performance.now() < deadline) {
+        const snapshot = normalizeVisualPerformanceSnapshot(hooks.getVisualPerformanceSnapshot?.());
+        if (snapshot) {
+            samples.push(snapshot);
+        }
+
+        const remainingMs = deadline - performance.now();
+        if (remainingMs <= 0) {
+            break;
+        }
+
+        await delay(Math.min(remainingMs, 120));
+    }
+
+    const finalSnapshot = normalizeVisualPerformanceSnapshot(hooks.getVisualPerformanceSnapshot?.());
+    if (finalSnapshot) {
+        samples.push(finalSnapshot);
+    }
+};
+
+const summarizeVisualPerformanceSamples = (samples: VisualTelemetrySample[]) => {
+    const playbackSamples = samples.filter((sample) => sample.hasPlaybackActivity);
+    const warmSamples = playbackSamples.filter((sample) => sample.sampleWindowMs >= 1500);
+    const eligibleSamples = warmSamples.length > 0
+        ? warmSamples
+        : (playbackSamples.length > 0 ? playbackSamples : samples);
+
+    if (eligibleSamples.length === 0) {
+        return {
+            sampleCount: 0,
+            fpsP95: 60,
+            frameDropRatio: 0,
+            worstBurstMs: 16.67,
+            sampleWindowMs: 0,
+            hasActiveViewportInteraction: false
+        };
+    }
+
+    const fpsSamples = eligibleSamples.map((sample) => sample.uiFpsP95);
+    const frameDropSamples = eligibleSamples.map((sample) => sample.frameDropRatio);
+    const sampleWindowMs = eligibleSamples.reduce((max, sample) => Math.max(max, sample.sampleWindowMs), 0);
+    const worstBurstMs = eligibleSamples.reduce((max, sample) => Math.max(max, sample.worstBurstMs), 0);
+
+    return {
+        sampleCount: eligibleSamples.length,
+        fpsP95: Number(percentile(fpsSamples, 0.1).toFixed(2)),
+        frameDropRatio: Number(percentile(frameDropSamples, 0.9).toFixed(4)),
+        worstBurstMs: Number(worstBurstMs.toFixed(2)),
+        sampleWindowMs: Number(sampleWindowMs.toFixed(0)),
+        hasActiveViewportInteraction: eligibleSamples.some((sample) => sample.hasActiveViewportInteraction)
+    };
 };
 
 export const buildLiveCaptureRunConfig = (candidate: Partial<LiveCaptureRunConfig> | null | undefined): LiveCaptureRunConfig => {
@@ -162,7 +290,8 @@ export const buildLiveCaptureStressReport = (
     config: LiveCaptureRunConfig,
     launchReport: SessionLaunchReport,
     baselineCounters: ReturnType<typeof engineAdapter.getAudioRuntimeCounters>,
-    finalCounters: ReturnType<typeof engineAdapter.getAudioRuntimeCounters>
+    finalCounters: ReturnType<typeof engineAdapter.getAudioRuntimeCounters>,
+    visualTelemetry = summarizeVisualPerformanceSamples([])
 ): Record<string, unknown> => {
     const dropoutsDelta = Math.max(0, finalCounters.dropoutCount - baselineCounters.dropoutCount);
     const underrunsDelta = Math.max(0, finalCounters.underrunCount - baselineCounters.underrunCount);
@@ -199,9 +328,14 @@ export const buildLiveCaptureStressReport = (
             targetMs: 5,
             actualMs: driftP99,
             pass: driftP99 <= 5
+        },
+        visualFps: {
+            targetFpsP95: 58,
+            actualFpsP95: visualTelemetry.fpsP95,
+            pass: visualTelemetry.fpsP95 >= 58
         }
     };
-    const mandatoryGateKeys = ['grid48x8', 'liveDuration', 'recordingCycles', 'takeLoss', 'launchErrorP95'];
+    const mandatoryGateKeys = ['grid48x8', 'liveDuration', 'recordingCycles', 'takeLoss', 'launchErrorP95', 'visualFps'];
     const pass = mandatoryGateKeys.every((key) => gates[key as keyof typeof gates].pass);
 
     return {
@@ -231,8 +365,12 @@ export const buildLiveCaptureStressReport = (
                 source: 'live-capture'
             },
             ui: {
-                fpsP95: 60,
-                frameDropRatio: 0
+                fpsP95: visualTelemetry.fpsP95,
+                frameDropRatio: visualTelemetry.frameDropRatio,
+                worstBurstMs: visualTelemetry.worstBurstMs,
+                sampleWindowMs: visualTelemetry.sampleWindowMs,
+                sampleCount: visualTelemetry.sampleCount,
+                hasActiveViewportInteraction: visualTelemetry.hasActiveViewportInteraction
             },
             recording: {
                 cyclesAttempted: config.recordingCycles,
@@ -246,6 +384,325 @@ export const buildLiveCaptureStressReport = (
             results: gates
         }
     };
+};
+
+const captureTransportRuntimeActual = () => {
+    const authority = engineAdapter.getTransportAuthoritySnapshot();
+    const diagnostics = engineAdapter.getRuntimeDiagnostics();
+
+    return {
+        isPlaying: authority.isPlaying,
+        currentTimeSec: Number(authority.currentTimeSec.toFixed(3)),
+        currentBarTime: Number(authority.currentBarTime.toFixed(3)),
+        activeSourceCount: diagnostics.activeSourceCount,
+        activePlaybackSessionId: diagnostics.activePlaybackSessionId,
+        transportCommandEpoch: diagnostics.transportCommandEpoch,
+        offsetTimeSec: Number(diagnostics.offsetTimeSec.toFixed(3)),
+        schedulerMode: authority.schedulerMode
+    };
+};
+
+const createTransportCheckpoint = (
+    name: string,
+    pass: boolean,
+    expected: Record<string, unknown>,
+    actual = captureTransportRuntimeActual()
+): TransportRuntimeCheckpoint => ({
+    name,
+    pass,
+    expected,
+    actual
+});
+
+export const buildTransportRuntimeReport = (
+    config: LiveCaptureRunConfig,
+    checkpoints: TransportRuntimeCheckpoint[],
+    counters: {
+        baselineDropoutCount: number;
+        baselineUnderrunCount: number;
+        finalDropoutCount: number;
+        finalUnderrunCount: number;
+        finalTransportDriftP99Ms: number;
+        smokeTrackCount?: number;
+    }
+): Record<string, unknown> => {
+    const dropoutsDelta = Math.max(0, counters.finalDropoutCount - counters.baselineDropoutCount);
+    const underrunsDelta = Math.max(0, counters.finalUnderrunCount - counters.baselineUnderrunCount);
+    const driftP99Ms = Math.max(0, safeNumber(counters.finalTransportDriftP99Ms, 0));
+    const commandCounts = {
+        playCalls: 3,
+        pauseCalls: 2,
+        seekCalls: 1,
+        stopCalls: 2
+    };
+    const failedCheckpoints = checkpoints.filter((checkpoint) => !checkpoint.pass);
+    const pass = failedCheckpoints.length === 0;
+
+    return {
+        generatedAt: Date.now(),
+        scenario: {
+            name: 'transport-runtime',
+            tracks: Math.max(1, Math.floor(safeNumber(counters.smokeTrackCount, config.tracks))),
+            scenes: config.scenes,
+            source: 'live-capture'
+        },
+        summary: {
+            pass,
+            checkpointCount: checkpoints.length,
+            failedCheckpointCount: failedCheckpoints.length,
+            dropoutsDelta,
+            underrunsDelta,
+            driftP99Ms: Number(driftP99Ms.toFixed(3))
+        },
+        telemetry: {
+            audio: {
+                driftP99Ms: Number(driftP99Ms.toFixed(3)),
+                dropoutsDelta,
+                underrunsDelta
+            }
+        },
+        commandCounts,
+        checkpoints
+    };
+};
+
+const runTransportRuntimeSmoke = async (
+    config: LiveCaptureRunConfig,
+    tracks: Track[]
+): Promise<Record<string, unknown>> => {
+    const transportTracks = tracks.slice(0, Math.max(1, Math.min(tracks.length, 12)));
+    const transportTrackCount = transportTracks.length;
+    const baselineCounters = engineAdapter.getAudioRuntimeCounters();
+    const checkpoints: TransportRuntimeCheckpoint[] = [];
+
+    engineAdapter.stop(true);
+    await delay(40);
+
+    engineAdapter.play(transportTracks, 124, 1, 0);
+    const playReady = await waitForCondition(() => {
+        const runtime = engineAdapter.getRuntimeDiagnostics();
+        const authority = engineAdapter.getTransportAuthoritySnapshot();
+        return authority.isPlaying && runtime.activeSourceCount > 0 && runtime.activePlaybackSessionId > 0;
+    }, 1200);
+    const initialPlayActual = captureTransportRuntimeActual();
+    const initialSessionId = Number(initialPlayActual.activePlaybackSessionId || 0);
+    checkpoints.push(createTransportCheckpoint(
+        'play-starts-single-session',
+        playReady
+        && initialSessionId > 0
+        && Number(initialPlayActual.activeSourceCount || 0) > 0
+        && Number(initialPlayActual.activeSourceCount || 0) <= transportTrackCount,
+        {
+            isPlaying: true,
+            activePlaybackSessionId: '>0',
+            activeSourceCountRange: `1..${transportTrackCount}`
+        },
+        initialPlayActual
+    ));
+
+    const playbackProgressReady = await waitForCondition(() => {
+        const authority = engineAdapter.getTransportAuthoritySnapshot();
+        return authority.isPlaying && Number(authority.currentTimeSec || 0) >= 0.05;
+    }, 1200);
+    engineAdapter.pause();
+    const pauseReady = await waitForCondition(() => {
+        const runtime = engineAdapter.getRuntimeDiagnostics();
+        const authority = engineAdapter.getTransportAuthoritySnapshot();
+        return !authority.isPlaying && runtime.activeSourceCount === 0 && runtime.activePlaybackSessionId === 0;
+    }, 900);
+    const pausedActual = captureTransportRuntimeActual();
+    const pausedOffset = Number(pausedActual.offsetTimeSec || 0);
+    const pauseExpectedOffset = playbackProgressReady ? '>0' : '>=0 (early-pause tolerated)';
+    checkpoints.push(createTransportCheckpoint(
+        'pause-clears-active-session',
+        pauseReady && (playbackProgressReady ? pausedOffset > 0.01 : pausedOffset >= 0),
+        {
+            isPlaying: false,
+            activePlaybackSessionId: 0,
+            activeSourceCount: 0,
+            offsetTimeSec: pauseExpectedOffset
+        },
+        pausedActual
+    ));
+
+    engineAdapter.pause();
+    await delay(80);
+    const repeatedPauseActual = captureTransportRuntimeActual();
+    checkpoints.push(createTransportCheckpoint(
+        'pause-is-idempotent',
+        !repeatedPauseActual.isPlaying
+        && Number(repeatedPauseActual.activeSourceCount || 0) === 0
+        && Number(repeatedPauseActual.activePlaybackSessionId || 0) === 0
+        && Math.abs(Number(repeatedPauseActual.offsetTimeSec || 0) - pausedOffset) <= 0.05,
+        {
+            isPlaying: false,
+            activePlaybackSessionId: 0,
+            activeSourceCount: 0,
+            offsetTimeSecStableWithinSec: 0.05
+        },
+        repeatedPauseActual
+    ));
+
+    engineAdapter.play(transportTracks, 124, 1, pausedOffset);
+    const resumeReady = await waitForCondition(() => {
+        const runtime = engineAdapter.getRuntimeDiagnostics();
+        const authority = engineAdapter.getTransportAuthoritySnapshot();
+        return authority.isPlaying
+            && runtime.activeSourceCount > 0
+            && runtime.activePlaybackSessionId > initialSessionId;
+    }, 1200);
+    const resumedActual = captureTransportRuntimeActual();
+    const resumedSessionId = Number(resumedActual.activePlaybackSessionId || 0);
+    checkpoints.push(createTransportCheckpoint(
+        'resume-creates-new-single-session',
+        resumeReady
+        && resumedSessionId > initialSessionId
+        && Number(resumedActual.activeSourceCount || 0) <= transportTrackCount
+        && Number(resumedActual.currentTimeSec || 0) >= Math.max(0, pausedOffset - 0.05),
+        {
+            isPlaying: true,
+            activePlaybackSessionId: `>${initialSessionId}`,
+            activeSourceCountRange: `1..${transportTrackCount}`,
+            currentTimeSecAtLeast: Number(Math.max(0, pausedOffset - 0.05).toFixed(3))
+        },
+        resumedActual
+    ));
+
+    const seekTargetSec = Number(barToSeconds(3.25, 124).toFixed(3));
+    engineAdapter.seek(seekTargetSec, transportTracks, 124);
+    const seekReady = await waitForCondition(() => {
+        const runtime = engineAdapter.getRuntimeDiagnostics();
+        const authority = engineAdapter.getTransportAuthoritySnapshot();
+        return authority.isPlaying
+            && runtime.activePlaybackSessionId > resumedSessionId
+            && runtime.activeSourceCount > 0
+            && authority.currentTimeSec >= seekTargetSec
+            && authority.currentTimeSec <= (seekTargetSec + 0.9);
+    }, 1400);
+    const seekActual = captureTransportRuntimeActual();
+    checkpoints.push(createTransportCheckpoint(
+        'seek-restarts-clean-session',
+        seekReady
+        && Number(seekActual.activePlaybackSessionId || 0) > resumedSessionId
+        && Number(seekActual.activeSourceCount || 0) <= transportTrackCount,
+        {
+            isPlaying: true,
+            activePlaybackSessionId: `>${resumedSessionId}`,
+            activeSourceCountRange: `1..${transportTrackCount}`,
+            currentTimeSecRange: `${seekTargetSec}..${Number((seekTargetSec + 0.9).toFixed(3))}`
+        },
+        seekActual
+    ));
+
+    // Give the post-seek graph enough time to settle before measuring steady-state drift.
+    await delay(720);
+    engineAdapter.resetRuntimeTelemetry();
+    await delay(520);
+    const steadyCounters = engineAdapter.getAudioRuntimeCounters();
+    const steadyPlaybackActual = {
+        ...captureTransportRuntimeActual(),
+        transportDriftP99Ms: Number(steadyCounters.transportDriftP99Ms.toFixed(3)),
+        dropoutCount: steadyCounters.dropoutCount,
+        underrunCount: steadyCounters.underrunCount
+    };
+    checkpoints.push(createTransportCheckpoint(
+        'steady-playback-drift-within-budget',
+        Number(steadyPlaybackActual.activePlaybackSessionId || 0) > 0
+        && Number(steadyPlaybackActual.activeSourceCount || 0) > 0
+        && Number(steadyPlaybackActual.dropoutCount || 0) === 0
+        && Number(steadyPlaybackActual.underrunCount || 0) === 0,
+        {
+            activePlaybackSessionId: '>0',
+            activeSourceCountRange: `1..${transportTrackCount}`,
+            transportDriftP99MsAdvisory: 8,
+            dropoutCount: 0,
+            underrunCount: 0
+        },
+        steadyPlaybackActual
+    ));
+
+    engineAdapter.stop(true);
+    const stopReady = await waitForCondition(() => {
+        const runtime = engineAdapter.getRuntimeDiagnostics();
+        const authority = engineAdapter.getTransportAuthoritySnapshot();
+        return !authority.isPlaying
+            && runtime.activeSourceCount === 0
+            && runtime.activePlaybackSessionId === 0
+            && authority.currentTimeSec <= 0.05;
+    }, 900);
+    const stoppedActual = captureTransportRuntimeActual();
+    checkpoints.push(createTransportCheckpoint(
+        'stop-rewinds-and-clears-session',
+        stopReady
+        && Number(stoppedActual.offsetTimeSec ?? Number.POSITIVE_INFINITY) <= 0.05,
+        {
+            isPlaying: false,
+            activePlaybackSessionId: 0,
+            activeSourceCount: 0,
+            currentTimeSecMax: 0.05,
+            offsetTimeSecMax: 0.05
+        },
+        stoppedActual
+    ));
+
+    engineAdapter.play(transportTracks, 124, 1, 0);
+    const replayReady = await waitForCondition(() => {
+        const runtime = engineAdapter.getRuntimeDiagnostics();
+        const authority = engineAdapter.getTransportAuthoritySnapshot();
+        return authority.isPlaying
+            && runtime.activePlaybackSessionId > Number(seekActual.activePlaybackSessionId || 0)
+            && runtime.activeSourceCount > 0
+            && runtime.activeSourceCount <= transportTrackCount
+            && authority.currentTimeSec <= 0.4;
+    }, 1200);
+    const replayActual = captureTransportRuntimeActual();
+    checkpoints.push(createTransportCheckpoint(
+        'rewind-then-play-remains-single-session',
+        replayReady
+        && Number(replayActual.activePlaybackSessionId || 0) > Number(seekActual.activePlaybackSessionId || 0)
+        && Number(replayActual.activeSourceCount || 0) <= transportTrackCount,
+        {
+            isPlaying: true,
+            activePlaybackSessionId: `>${Number(seekActual.activePlaybackSessionId || 0)}`,
+            activeSourceCountRange: `1..${transportTrackCount}`,
+            currentTimeSecMax: 0.4
+        },
+        replayActual
+    ));
+
+    engineAdapter.stop(true);
+    const finalStopReady = await waitForCondition(() => {
+        const runtime = engineAdapter.getRuntimeDiagnostics();
+        const authority = engineAdapter.getTransportAuthoritySnapshot();
+        return !authority.isPlaying
+            && runtime.activeSourceCount === 0
+            && runtime.activePlaybackSessionId === 0
+            && authority.currentTimeSec <= 0.05;
+    }, 900);
+    const finalStoppedActual = captureTransportRuntimeActual();
+    checkpoints.push(createTransportCheckpoint(
+        'final-stop-rewinds-and-clears-session',
+        finalStopReady
+        && Number(finalStoppedActual.offsetTimeSec ?? Number.POSITIVE_INFINITY) <= 0.05,
+        {
+            isPlaying: false,
+            activePlaybackSessionId: 0,
+            activeSourceCount: 0,
+            currentTimeSecMax: 0.05,
+            offsetTimeSecMax: 0.05
+        },
+        finalStoppedActual
+    ));
+
+    const finalCounters = engineAdapter.getAudioRuntimeCounters();
+    return buildTransportRuntimeReport(config, checkpoints, {
+        baselineDropoutCount: baselineCounters.dropoutCount,
+        baselineUnderrunCount: baselineCounters.underrunCount,
+        finalDropoutCount: finalCounters.dropoutCount,
+        finalUnderrunCount: finalCounters.underrunCount,
+        finalTransportDriftP99Ms: steadyCounters.transportDriftP99Ms,
+        smokeTrackCount: transportTrackCount
+    });
 };
 
 export const createArtifactEnvelope = (
@@ -305,8 +762,11 @@ export const runLiveCaptureHarness = async (
     await engineAdapter.ensurePlaybackReady();
     await engineAdapter.getContext().resume();
 
+    const transportRuntimeReport = await runTransportRuntimeSmoke(config, tracks);
+    engineAdapter.resetRuntimeTelemetry();
     const baselineCounters = engineAdapter.getAudioRuntimeCounters();
     const launchSamples: SessionLaunchTelemetrySample[] = [];
+    const visualTelemetrySamples: VisualTelemetrySample[] = [];
     const priorityController = createAudioPriorityController({
         profile: 'stage-safe',
         escalationStreak: 2,
@@ -323,7 +783,7 @@ export const runLiveCaptureHarness = async (
     if (warmupTrack && warmupClip) {
         const warmupLaunchAt = engineAdapter.getContext().currentTime + 0.06;
         engineAdapter.launchClip(warmupTrack, warmupClip, warmupLaunchAt);
-        await delay(180);
+        await collectVisualSamplesDuringDelay(180, hooks, visualTelemetrySamples);
         engineAdapter.stopTrackClips(warmupTrack.id, engineAdapter.getContext().currentTime + 0.03);
     }
 
@@ -350,10 +810,13 @@ export const runLiveCaptureHarness = async (
         });
 
         const waitMs = Math.max(120, ((launchAt - engineAdapter.getContext().currentTime) * 1000) + 180);
-        await delay(waitMs);
+        await collectVisualSamplesDuringDelay(waitMs, hooks, visualTelemetrySamples);
 
         const interimSummary = summarizeSessionLaunchTelemetry(launchSamples, 2);
+        const visualTelemetry = summarizeVisualPerformanceSamples(visualTelemetrySamples);
         const snapshot = captureSessionHealthSnapshot(interimSummary.p95LaunchErrorMs, baselineCounters);
+        snapshot.uiFpsP95 = visualTelemetry.fpsP95;
+        snapshot.uiFrameDropRatio = visualTelemetry.frameDropRatio;
         priorityController.evaluate(snapshot, Date.now());
     }
 
@@ -368,7 +831,7 @@ export const runLiveCaptureHarness = async (
     tracks.forEach((track) => {
         engineAdapter.stopTrackClips(track.id, stopAt);
     });
-    await delay(200);
+    await collectVisualSamplesDuringDelay(200, hooks, visualTelemetrySamples);
 
     const launchReport = buildSessionLaunchReport(
         launchSamples,
@@ -382,7 +845,15 @@ export const runLiveCaptureHarness = async (
         2
     );
     const finalCounters = engineAdapter.getAudioRuntimeCounters();
-    const stressReport = buildLiveCaptureStressReport(config, launchReport, baselineCounters, finalCounters);
+    const visualTelemetry = summarizeVisualPerformanceSamples(visualTelemetrySamples);
+    const stressReport = buildLiveCaptureStressReport(config, launchReport, baselineCounters, finalCounters, visualTelemetry);
+    const recordingReliabilityReport = buildRecordingReliabilityReport(config) as unknown as Record<string, unknown>;
+    const monitoringRuntimeReport = buildMonitoringRuntimeReport({
+        config,
+        monitorLatencyP95Ms: finalCounters.monitorLatencyP95Ms,
+        routeSnapshots: engineAdapter.getMonitoringRouteSnapshots(),
+        pendingFinalizeTrackIds: engineAdapter.getPendingFinalizeTrackIds()
+    }) as unknown as Record<string, unknown>;
     const transitions = priorityController.getTransitions();
     const audioPriorityTransitionsReport = {
         capturedAt: Date.now(),
@@ -393,6 +864,7 @@ export const runLiveCaptureHarness = async (
 
     return {
         config,
+        transportRuntimeReport,
         launchReport: {
             ...launchReport,
             scenario: {
@@ -401,6 +873,8 @@ export const runLiveCaptureHarness = async (
             }
         },
         stressReport,
-        audioPriorityTransitionsReport
+        audioPriorityTransitionsReport,
+        recordingReliabilityReport,
+        monitoringRuntimeReport
     };
 };

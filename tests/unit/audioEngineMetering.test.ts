@@ -178,6 +178,24 @@ describe('audioEngine metering cache', () => {
         expect(channelReads).toBe(2);
     });
 
+    it('preserves stereo channel extrema in waveform envelopes', () => {
+        const left = Float32Array.from([0.08, -0.06, 0.12, -0.1]);
+        const right = Float32Array.from([0.92, -0.84, 0.78, -0.72]);
+        const buffer = {
+            numberOfChannels: 2,
+            length: left.length,
+            sampleRate: 48000,
+            getChannelData: (channel: number) => (channel === 1 ? right : left)
+        } as unknown as AudioBuffer;
+
+        const envelope = audioEngine.getWaveformEnvelopeData(buffer, 2);
+
+        expect(envelope.max[0]).toBeCloseTo(0.92, 5);
+        expect(envelope.min[0]).toBeCloseTo(-0.84, 5);
+        expect(envelope.max[1]).toBeCloseTo(0.78, 5);
+        expect(envelope.min[1]).toBeCloseTo(-0.72, 5);
+    });
+
     it('sweeps queue candidates across timeline windows', () => {
         const track = buildQueueTrack('track-q', [
             { clipId: 'clip-a', start: 1, length: 4 },

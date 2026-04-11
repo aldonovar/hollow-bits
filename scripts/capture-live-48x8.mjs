@@ -66,26 +66,37 @@ const parseArgs = (argv) => {
 };
 
 const assertLiveCaptureArtifacts = () => {
+  const transportPath = path.resolve('benchmarks/transport/latest-runtime.json');
   const launchPath = path.resolve('benchmarks/session-launch/latest-report.json');
   const stressPath = path.resolve('benchmarks/stress-48x8/latest-report.json');
   const transitionsPath = path.resolve('benchmarks/audio-priority/latest-transitions.json');
+  const recordingPath = path.resolve('benchmarks/recording-reliability/latest-report.json');
 
-  const requiredFiles = [launchPath, stressPath, transitionsPath];
+  const requiredFiles = [transportPath, launchPath, stressPath, transitionsPath, recordingPath];
   requiredFiles.forEach((filePath) => {
     if (!fs.existsSync(filePath)) {
       throw new Error(`Missing live-capture artifact: ${filePath}`);
     }
   });
 
+  const transport = JSON.parse(fs.readFileSync(transportPath, 'utf8'));
   const launch = JSON.parse(fs.readFileSync(launchPath, 'utf8'));
   const stress = JSON.parse(fs.readFileSync(stressPath, 'utf8'));
+  const recording = JSON.parse(fs.readFileSync(recordingPath, 'utf8'));
+  const transportSource = transport?.scenario?.source;
   const launchSource = launch?.scenario?.source;
   const stressSource = stress?.scenario?.source;
+  if (transportSource !== 'live-capture') {
+    throw new Error(`Transport runtime report source must be live-capture, got '${transportSource || 'unknown'}'.`);
+  }
   if (launchSource !== 'live-capture') {
     throw new Error(`Session launch report source must be live-capture, got '${launchSource || 'unknown'}'.`);
   }
   if (stressSource !== 'live-capture') {
     throw new Error(`Stress report source must be live-capture, got '${stressSource || 'unknown'}'.`);
+  }
+  if (recording?.summary?.gatePass !== true) {
+    throw new Error('Recording reliability report must stay in PASS during live capture validation.');
   }
 };
 

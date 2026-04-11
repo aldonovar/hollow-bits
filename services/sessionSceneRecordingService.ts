@@ -20,6 +20,24 @@ export interface SceneReplayEvent {
     entries: SceneTrackClipRef[];
 }
 
+export interface SceneRecordingIndex {
+    eventCount: number;
+    uniqueSceneCount: number;
+    uniqueTrackCount: number;
+    latestSceneIndex: number | null;
+    latestLaunchAtSec: number;
+    perSceneEventCount: Record<number, number>;
+}
+
+export interface SceneReplaySummary {
+    eventCount: number;
+    uniqueSceneCount: number;
+    uniqueTrackCount: number;
+    startReplayLaunchAtSec: number;
+    endReplayLaunchAtSec: number;
+    durationSec: number;
+}
+
 export interface SceneRecordingPersistedPayload {
     version: 1;
     capturedAt: number;
@@ -224,5 +242,85 @@ export const summarizeSceneRecordingEvents = (
         startLaunchAtSec,
         endLaunchAtSec,
         durationSec: Math.max(0, endLaunchAtSec - startLaunchAtSec)
+    };
+};
+
+export const buildSceneRecordingIndex = (
+    events: SceneRecordingEvent[]
+): SceneRecordingIndex => {
+    if (events.length === 0) {
+        return {
+            eventCount: 0,
+            uniqueSceneCount: 0,
+            uniqueTrackCount: 0,
+            latestSceneIndex: null,
+            latestLaunchAtSec: 0,
+            perSceneEventCount: {}
+        };
+    }
+
+    const sorted = [...events].sort((left, right) => {
+        if (left.launchAtSec !== right.launchAtSec) {
+            return left.launchAtSec - right.launchAtSec;
+        }
+        return left.recordedAtMs - right.recordedAtMs;
+    });
+
+    const latest = sorted[sorted.length - 1];
+    const uniqueScenes = new Set<number>();
+    const uniqueTracks = new Set<string>();
+    const perSceneEventCount: Record<number, number> = {};
+
+    sorted.forEach((event) => {
+        uniqueScenes.add(event.sceneIndex);
+        perSceneEventCount[event.sceneIndex] = (perSceneEventCount[event.sceneIndex] || 0) + 1;
+        event.entries.forEach((entry) => uniqueTracks.add(entry.trackId));
+    });
+
+    return {
+        eventCount: sorted.length,
+        uniqueSceneCount: uniqueScenes.size,
+        uniqueTrackCount: uniqueTracks.size,
+        latestSceneIndex: latest.sceneIndex,
+        latestLaunchAtSec: latest.launchAtSec,
+        perSceneEventCount
+    };
+};
+
+export const summarizeSceneReplayPlan = (
+    replayPlan: SceneReplayEvent[]
+): SceneReplaySummary => {
+    if (replayPlan.length === 0) {
+        return {
+            eventCount: 0,
+            uniqueSceneCount: 0,
+            uniqueTrackCount: 0,
+            startReplayLaunchAtSec: 0,
+            endReplayLaunchAtSec: 0,
+            durationSec: 0
+        };
+    }
+
+    const sorted = [...replayPlan].sort((left, right) => left.replayLaunchAtSec - right.replayLaunchAtSec);
+    const startReplayLaunchAtSec = Math.max(0, safeNumber(sorted[0].replayLaunchAtSec, 0));
+    const endReplayLaunchAtSec = Math.max(
+        startReplayLaunchAtSec,
+        safeNumber(sorted[sorted.length - 1].replayLaunchAtSec, startReplayLaunchAtSec)
+    );
+    const uniqueScenes = new Set<number>();
+    const uniqueTracks = new Set<string>();
+
+    sorted.forEach((event) => {
+        uniqueScenes.add(event.sceneIndex);
+        event.entries.forEach((entry) => uniqueTracks.add(entry.trackId));
+    });
+
+    return {
+        eventCount: sorted.length,
+        uniqueSceneCount: uniqueScenes.size,
+        uniqueTrackCount: uniqueTracks.size,
+        startReplayLaunchAtSec,
+        endReplayLaunchAtSec,
+        durationSec: Math.max(0, endReplayLaunchAtSec - startReplayLaunchAtSec)
     };
 };

@@ -1,5 +1,11 @@
 import type { EngineDiagnostics } from './engineAdapter';
-import type { SessionHealthSnapshot, StudioPerformanceProfile } from '../types';
+import type {
+    SessionHealthSnapshot,
+    StudioPerformanceProfile,
+    VisualPerformanceMode,
+    VisualPerformanceReasonCode,
+    VisualPerformanceSnapshot
+} from '../types';
 
 export type SessionOverloadMode = 'normal' | 'guarded' | 'critical';
 export type SessionAnimationLevel = 'full' | 'reduced' | 'minimal';
@@ -54,6 +60,7 @@ export interface GlobalAudioPriorityDecision {
     simplifyMeters: boolean;
     showBanner: boolean;
     reasons: string[];
+    reasonCode: AudioPriorityReasonCode;
 }
 
 export type AudioPriorityReasonCode =
@@ -64,14 +71,29 @@ export type AudioPriorityReasonCode =
     | 'audio-cpu-critical'
     | 'launch-jitter-high'
     | 'launch-jitter-critical'
-    | 'ui-fps-low'
-    | 'ui-frame-drop'
     | 'transport-drift-high'
     | 'transport-drift-critical'
     | 'monitor-latency-high'
     | 'hysteresis-hold'
     | 'cooldown-hold'
     | 'steady';
+
+export interface VisualPerformanceDecision {
+    mode: VisualPerformanceMode;
+    uiFpsP95: number;
+    frameDropRatio: number;
+    showBadge: boolean;
+    reasonCode: VisualPerformanceReasonCode;
+    uiFrameBudgetMs: number;
+    meterFrameBudgetMs: number;
+    maxActiveMeterTracks: number;
+    mixerMeterUpdateIntervalMs: number;
+    mixerMaxMeterTracks: number;
+    performerFrameIntervalMs: number;
+    simplifyPlaybackVisuals: boolean;
+    reduceAnimations: boolean;
+    freezePerformerDock: boolean;
+}
 
 export interface ReducedSessionHealth extends GlobalAudioPriorityDecision {
     snapshot: SessionHealthSnapshot;
@@ -282,8 +304,6 @@ export const reduceSessionHealth = (inputSnapshot: SessionHealthSnapshot): Reduc
     if (snapshot.launchErrorP95Ms > 2) reasons.push(`launch-p95-${snapshot.launchErrorP95Ms.toFixed(2)}ms`);
     if (snapshot.transportDriftP99Ms > 5) reasons.push(`transport-drift-p99-${snapshot.transportDriftP99Ms.toFixed(2)}ms`);
     if (snapshot.monitorLatencyP95Ms > 12) reasons.push(`monitor-latency-p95-${snapshot.monitorLatencyP95Ms.toFixed(2)}ms`);
-    if (snapshot.uiFpsP95 > 0 && snapshot.uiFpsP95 < 44) reasons.push(`ui-fps-p95-${snapshot.uiFpsP95.toFixed(1)}`);
-    if (snapshot.uiFrameDropRatio >= 0.08) reasons.push(`ui-frame-drop-${(snapshot.uiFrameDropRatio * 100).toFixed(1)}pct`);
 
     if (hasDropoutsSpike) {
         return buildPriorityDecision('critical', reasons, snapshot, 'audio-dropouts-spike');
@@ -309,11 +329,7 @@ export const reduceSessionHealth = (inputSnapshot: SessionHealthSnapshot): Reduc
         || snapshot.transportDriftP99Ms > 5
         || snapshot.monitorLatencyP95Ms > 12;
 
-    const hasUiGuarded =
-        (snapshot.uiFpsP95 > 0 && snapshot.uiFpsP95 < 44)
-        || snapshot.uiFrameDropRatio >= 0.08;
-
-    if (hasAudioGuarded || hasUiGuarded) {
+    if (hasAudioGuarded) {
         let reasonCode: AudioPriorityReasonCode = 'audio-cpu-high';
 
         if (snapshot.dropoutsDelta > 0) {
@@ -326,10 +342,6 @@ export const reduceSessionHealth = (inputSnapshot: SessionHealthSnapshot): Reduc
             reasonCode = 'transport-drift-high';
         } else if (snapshot.monitorLatencyP95Ms > 12) {
             reasonCode = 'monitor-latency-high';
-        } else if (snapshot.uiFrameDropRatio >= 0.08) {
-            reasonCode = 'ui-frame-drop';
-        } else if (snapshot.uiFpsP95 > 0 && snapshot.uiFpsP95 < 44) {
-            reasonCode = 'ui-fps-low';
         }
 
         return buildPriorityDecision('guarded', reasons, snapshot, reasonCode);
@@ -666,8 +678,8 @@ export const assessGlobalAudioPriority = (input: GlobalAudioPriorityInput): Glob
         dropoutsDelta: Math.max(0, safeNumber(input.recentDropoutDelta, 0)),
         underrunsDelta: Math.max(0, safeNumber(input.recentUnderrunDelta, 0)),
         launchErrorP95Ms: 0,
-        uiFpsP95: Math.max(0, safeNumber(input.uiFpsP95, 0)),
-        uiFrameDropRatio: Math.max(0, safeNumber(input.uiFrameDropRatio, 0)),
+        uiFpsP95: 60,
+        uiFrameDropRatio: 0,
         transportDriftP99Ms: 0,
         monitorLatencyP95Ms: 0
     });
@@ -679,7 +691,95 @@ export const assessGlobalAudioPriority = (input: GlobalAudioPriorityInput): Glob
         disableHeavyVisuals: reduced.disableHeavyVisuals,
         simplifyMeters: reduced.simplifyMeters,
         showBanner: reduced.showBanner,
-        reasons: [...reduced.reasons]
+        reasons: [...reduced.reasons],
+        reasonCode: reduced.reasonCode
+    };
+};
+
+export const assessVisualPerformance = (
+    snapshot: VisualPerformanceSnapshot
+): VisualPerformanceDecision => {
+    const uiFpsP95 = Math.max(0, safeNumber(snapshot.uiFpsP95, 60));
+    const frameDropRatio = Math.max(0, safeNumber(snapshot.frameDropRatio, 0));
+    const hasPlaybackActivity = Boolean(snapshot.hasPlaybackActivity);
+    const hasActiveViewportInteraction = Boolean(snapshot.hasActiveViewportInteraction);
+    const sampleWindowMs = Math.max(0, safeNumber(snapshot.sampleWindowMs, 0));
+    const worstBurstMs = Math.max(0, safeNumber(snapshot.worstBurstMs, 0));
+    const isWarm = sampleWindowMs >= 1500;
+    const activelyProfiling = hasPlaybackActivity || hasActiveViewportInteraction;
+
+    if (!activelyProfiling || !isWarm) {
+        return {
+            mode: 'normal',
+            uiFpsP95,
+            frameDropRatio,
+            showBadge: false,
+            reasonCode: activelyProfiling ? 'steady' : 'idle',
+            uiFrameBudgetMs: 16,
+            meterFrameBudgetMs: 48,
+            maxActiveMeterTracks: 24,
+            mixerMeterUpdateIntervalMs: 48,
+            mixerMaxMeterTracks: 40,
+            performerFrameIntervalMs: 66,
+            simplifyPlaybackVisuals: false,
+            reduceAnimations: false,
+            freezePerformerDock: false
+        };
+    }
+
+    if (uiFpsP95 < 48 || frameDropRatio >= 0.08 || worstBurstMs >= 48) {
+        return {
+            mode: 'degraded',
+            uiFpsP95,
+            frameDropRatio,
+            showBadge: true,
+            reasonCode: frameDropRatio >= 0.08 ? 'ui-frame-drop-degraded' : 'ui-fps-degraded',
+            uiFrameBudgetMs: 16,
+            meterFrameBudgetMs: 110,
+            maxActiveMeterTracks: 6,
+            mixerMeterUpdateIntervalMs: 120,
+            mixerMaxMeterTracks: 10,
+            performerFrameIntervalMs: 160,
+            simplifyPlaybackVisuals: hasPlaybackActivity,
+            reduceAnimations: true,
+            freezePerformerDock: hasPlaybackActivity
+        };
+    }
+
+    if (uiFpsP95 < 58 || frameDropRatio > 0.02 || worstBurstMs >= 32) {
+        return {
+            mode: 'guarded',
+            uiFpsP95,
+            frameDropRatio,
+            showBadge: true,
+            reasonCode: frameDropRatio > 0.02 ? 'ui-frame-drop-guarded' : 'ui-fps-guarded',
+            uiFrameBudgetMs: 16,
+            meterFrameBudgetMs: 84,
+            maxActiveMeterTracks: 10,
+            mixerMeterUpdateIntervalMs: 96,
+            mixerMaxMeterTracks: 16,
+            performerFrameIntervalMs: 132,
+            simplifyPlaybackVisuals: hasPlaybackActivity,
+            reduceAnimations: true,
+            freezePerformerDock: hasPlaybackActivity
+        };
+    }
+
+    return {
+        mode: 'normal',
+        uiFpsP95,
+        frameDropRatio,
+        showBadge: false,
+        reasonCode: 'steady',
+        uiFrameBudgetMs: 16,
+        meterFrameBudgetMs: 48,
+        maxActiveMeterTracks: 24,
+        mixerMeterUpdateIntervalMs: 48,
+        mixerMaxMeterTracks: 40,
+        performerFrameIntervalMs: 66,
+        simplifyPlaybackVisuals: false,
+        reduceAnimations: false,
+        freezePerformerDock: false
     };
 };
 

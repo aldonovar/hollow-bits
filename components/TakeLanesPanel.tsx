@@ -1,10 +1,11 @@
 import React, { useMemo } from 'react';
 import { Headphones, GitMerge } from 'lucide-react';
-import { RecordingTake, TakeLane, Track } from '../types';
+import { PunchRange, RecordingTake, TakeLane, Track } from '../types';
 
 interface TakeLanesPanelProps {
     track: Track | null;
     selectedClipId: string | null;
+    selectedTrackPunchRange?: PunchRange | null;
     onSelectTake: (trackId: string, takeId: string) => void;
     onToggleTakeMute: (trackId: string, takeId: string) => void;
     onToggleTakeSolo: (trackId: string, takeId: string) => void;
@@ -20,6 +21,7 @@ interface LaneWithTakes {
 const TakeLanesPanel: React.FC<TakeLanesPanelProps> = React.memo(({
     track,
     selectedClipId,
+    selectedTrackPunchRange = null,
     onSelectTake,
     onToggleTakeMute,
     onToggleTakeSolo,
@@ -92,6 +94,20 @@ const TakeLanesPanel: React.FC<TakeLanesPanelProps> = React.memo(({
             <div className="px-3 py-2 border-b border-daw-border bg-[#121522]/85">
                 <div className="text-[10px] uppercase tracking-[0.14em] font-black text-daw-violet">Take Lanes</div>
                 <div className="text-[11px] font-bold text-gray-200 truncate mt-1">{track.name}</div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                    <div className="rounded-[3px] border border-white/10 bg-[#171b27] px-2 py-1 text-[9px] font-mono text-gray-300">
+                        Takes <span className="text-white">{track.recordingTakes?.length || 0}</span>
+                    </div>
+                    <div className="rounded-[3px] border border-white/10 bg-[#171b27] px-2 py-1 text-[9px] font-mono text-gray-300">
+                        Lanes <span className="text-white">{laneRows.length}</span>
+                    </div>
+                    {selectedTrackPunchRange?.enabled && (
+                        <div className="rounded-[3px] border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-[9px] font-mono text-amber-200">
+                            Punch {selectedTrackPunchRange.inBar.toFixed(2)} → {selectedTrackPunchRange.outBar.toFixed(2)}
+                            <span className="ml-1 text-amber-100/80">Pre {selectedTrackPunchRange.preRollBars || 0} / Count {selectedTrackPunchRange.countInBars || 0}</span>
+                        </div>
+                    )}
+                </div>
             </div>
 
             <div className="flex-1 overflow-auto p-2 space-y-3">
@@ -124,7 +140,12 @@ const TakeLanesPanel: React.FC<TakeLanesPanelProps> = React.memo(({
                 {laneRows.map((laneRow) => (
                     <section key={laneRow.lane.id} className="rounded-[4px] border border-daw-border bg-[#131722]/78">
                         <div className="px-2 py-1.5 border-b border-daw-border text-[10px] uppercase tracking-wider font-bold text-gray-300">
-                            {laneRow.lane.name}
+                            <div className="flex items-center justify-between gap-2">
+                                <span>{laneRow.lane.name}</span>
+                                <span className="text-[9px] font-mono text-gray-500 normal-case tracking-normal">
+                                    {laneRow.takes.length} takes
+                                </span>
+                            </div>
                         </div>
 
                         <div className="p-2 space-y-1.5">

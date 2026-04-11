@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 
 interface AsciiPerformerDockProps {
     isPlaying: boolean;
@@ -323,6 +323,8 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({
     const isPlayingRef = useRef(isPlaying);
     const suspendAnimationRef = useRef(suspendAnimation);
     const frameIntervalMsRef = useRef(clamp(frameIntervalMs, 16, 250));
+    const [showFallbackImage, setShowFallbackImage] = useState(true);
+    const [loadFailed, setLoadFailed] = useState(false);
 
     useEffect(() => {
         isPlayingRef.current = isPlaying;
@@ -545,7 +547,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({
             return;
         }
 
-        if (suspendAnimationRef.current) {
+        if (suspendAnimationRef.current || !isPlayingRef.current) {
             renderStaticFrame();
             animFrameRef.current = 0;
             return;
@@ -612,8 +614,10 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({
             sceneClockMsRef.current = 0;
             lastTimestampRef.current = null;
             loadedRef.current = true;
+            setShowFallbackImage(false);
+            setLoadFailed(false);
 
-            if (suspendAnimationRef.current) {
+            if (suspendAnimationRef.current || !isPlayingRef.current) {
                 renderStaticFrame();
                 animFrameRef.current = 0;
                 return;
@@ -627,6 +631,8 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({
         void setup().catch(() => {
             if (cancelled) return;
             loadedRef.current = false;
+            setShowFallbackImage(true);
+            setLoadFailed(true);
             sourceCanvasRef.current = null;
             patchMapRef.current = new Map();
         });
@@ -649,7 +655,7 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({
     useEffect(() => {
         if (!loadedRef.current) return;
 
-        if (suspendAnimation) {
+        if (suspendAnimation || !isPlaying) {
             if (animFrameRef.current) {
                 cancelAnimationFrame(animFrameRef.current);
                 animFrameRef.current = 0;
@@ -666,15 +672,22 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({
 
     return (
         <aside
-            className={`performer-shell h-full aspect-square shrink-0 relative overflow-hidden transition-all duration-300 border-2 ${isPlaying ? 'border-purple-500/40 shadow-[0_0_10px_rgba(168,85,247,0.2)]' : 'border-white/20'} ${isPlaying ? 'ascii-dock-playing' : 'ascii-dock-idle'}`}
+            className={`performer-shell h-full w-full min-w-0 relative overflow-hidden transition-all duration-300 border-l border-white/10 ${isPlaying ? 'border-purple-500/35 shadow-[0_0_14px_rgba(168,85,247,0.16)]' : 'border-white/12'} ${isPlaying ? 'ascii-dock-playing' : 'ascii-dock-idle'}`}
         >
             <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_55%_20%,rgba(244,218,255,0.22),transparent_58%)]" />
 
             <div className="relative h-full w-full performer-stage flex items-center justify-center">
+                <img
+                    src={BASE_PERFORMER_IMAGE_SRC}
+                    alt="Pixel art performer fallback"
+                    className={`absolute inset-0 h-full w-full object-contain bg-[#090910] transition-opacity duration-300 ${showFallbackImage ? 'opacity-100' : 'opacity-0'}`}
+                    style={{ imageRendering: 'pixelated' }}
+                    draggable={false}
+                />
                 <canvas
                     ref={canvasRef}
                     aria-label="Pixel art performer"
-                    className={`pixel-art-canvas ${isPlaying ? 'pixel-art-live' : 'pixel-art-idle'}`}
+                    className={`pixel-art-canvas transition-opacity duration-300 ${isPlaying ? 'pixel-art-live' : 'pixel-art-idle'} ${loadFailed ? 'opacity-0' : 'opacity-100'}`}
                 />
             </div>
         </aside>

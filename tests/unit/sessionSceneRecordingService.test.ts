@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
     appendSceneRecordingEvent,
+    buildSceneRecordingIndex,
     buildSceneReplayPlan,
     createSceneRecordingEvent,
     deserializeSceneRecordingEvents,
     serializeSceneRecordingEvents,
+    summarizeSceneReplayPlan,
     summarizeSceneRecordingEvents
 } from '../../services/sessionSceneRecordingService';
 
@@ -72,6 +74,40 @@ describe('sessionSceneRecordingService', () => {
         expect(summary.uniqueTrackCount).toBe(2);
         expect(summary.uniqueClipCount).toBe(4);
         expect(summary.durationSec).toBeCloseTo(7, 6);
+    });
+
+    it('builds a scene recording index with per-scene counts and latest scene info', () => {
+        const events = [
+            createSceneRecordingEvent(1, 10, 1, [{ trackId: 't1', clipId: 'c1' }]),
+            createSceneRecordingEvent(3, 14, 1, [{ trackId: 't2', clipId: 'c2' }]),
+            createSceneRecordingEvent(3, 18, 1, [{ trackId: 't1', clipId: 'c3' }, { trackId: 't3', clipId: 'c4' }])
+        ];
+
+        const index = buildSceneRecordingIndex(events);
+        expect(index.eventCount).toBe(3);
+        expect(index.uniqueSceneCount).toBe(2);
+        expect(index.uniqueTrackCount).toBe(3);
+        expect(index.latestSceneIndex).toBe(3);
+        expect(index.latestLaunchAtSec).toBeCloseTo(18, 6);
+        expect(index.perSceneEventCount[1]).toBe(1);
+        expect(index.perSceneEventCount[3]).toBe(2);
+    });
+
+    it('summarizes replay plans for stage-safe Session workflows', () => {
+        const events = [
+            createSceneRecordingEvent(0, 4, 1, [{ trackId: 't1', clipId: 'c1' }]),
+            createSceneRecordingEvent(2, 7, 1, [{ trackId: 't1', clipId: 'c2' }, { trackId: 't2', clipId: 'c3' }])
+        ];
+
+        const replayPlan = buildSceneReplayPlan(events, 40);
+        const summary = summarizeSceneReplayPlan(replayPlan);
+
+        expect(summary.eventCount).toBe(2);
+        expect(summary.uniqueSceneCount).toBe(2);
+        expect(summary.uniqueTrackCount).toBe(2);
+        expect(summary.startReplayLaunchAtSec).toBeCloseTo(40, 6);
+        expect(summary.endReplayLaunchAtSec).toBeCloseTo(43, 6);
+        expect(summary.durationSec).toBeCloseTo(3, 6);
     });
 
     it('serializes and deserializes recording events with stable ordering', () => {

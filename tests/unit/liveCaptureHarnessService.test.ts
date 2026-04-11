@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LiveCaptureRunConfig } from '../../types';
 import {
+    buildTransportRuntimeReport,
     buildLiveCaptureRunConfig,
     buildLiveCaptureStressReport,
     createArtifactEnvelope
@@ -81,12 +82,17 @@ describe('liveCaptureHarnessService.buildLiveCaptureStressReport', () => {
 
         const report = buildLiveCaptureStressReport(config, launchReport, baselineCounters, finalCounters) as {
             scenario: { source: string };
+            telemetry: { ui: { fpsP95: number; frameDropRatio: number } };
             gates: { pass: boolean; mandatoryGateKeys: string[]; results: Record<string, { pass: boolean }> };
         };
 
         expect(report.scenario.source).toBe('live-capture');
         expect(report.gates.mandatoryGateKeys).toContain('launchErrorP95');
+        expect(report.gates.mandatoryGateKeys).toContain('visualFps');
         expect(report.gates.results.launchErrorP95.pass).toBe(true);
+        expect(report.gates.results.visualFps.pass).toBe(true);
+        expect(report.telemetry.ui.fpsP95).toBe(60);
+        expect(report.telemetry.ui.frameDropRatio).toBe(0);
         expect(report.gates.pass).toBe(true);
     });
 });
@@ -105,5 +111,66 @@ describe('liveCaptureHarnessService.createArtifactEnvelope', () => {
         expect(envelope.source).toBe('live-capture');
         expect(envelope.scenario.tracks).toBe(48);
         expect(envelope.type).toBe('session-launch');
+    });
+});
+
+describe('liveCaptureHarnessService.buildTransportRuntimeReport', () => {
+    it('marks the runtime smoke report as passing only when all checkpoints pass', () => {
+        const config = buildLiveCaptureRunConfig({ tracks: 48, scenes: 8 });
+        const report = buildTransportRuntimeReport(
+            config,
+            [
+                {
+                    name: 'play-starts-single-session',
+                    pass: true,
+                    expected: { isPlaying: true },
+                    actual: { isPlaying: true }
+                },
+                {
+                    name: 'pause-clears-active-session',
+                    pass: true,
+                    expected: { activePlaybackSessionId: 0 },
+                    actual: { activePlaybackSessionId: 0 }
+                }
+            ],
+            {
+                baselineDropoutCount: 2,
+                baselineUnderrunCount: 4,
+                finalDropoutCount: 2,
+                finalUnderrunCount: 4,
+                finalTransportDriftP99Ms: 1.75
+            }
+        ) as {
+            summary: {
+                pass: boolean;
+                checkpointCount: number;
+                failedCheckpointCount: number;
+                dropoutsDelta: number;
+                underrunsDelta: number;
+                driftP99Ms: number;
+            };
+            telemetry: {
+                audio: {
+                    driftP99Ms: number;
+                };
+            };
+            commandCounts: {
+                playCalls: number;
+                pauseCalls: number;
+                seekCalls: number;
+                stopCalls: number;
+            };
+        };
+
+        expect(report.summary.pass).toBe(true);
+        expect(report.summary.checkpointCount).toBe(2);
+        expect(report.summary.failedCheckpointCount).toBe(0);
+        expect(report.summary.dropoutsDelta).toBe(0);
+        expect(report.summary.underrunsDelta).toBe(0);
+        expect(report.summary.driftP99Ms).toBe(1.75);
+        expect(report.telemetry.audio.driftP99Ms).toBe(1.75);
+        expect(report.commandCounts.playCalls).toBe(3);
+        expect(report.commandCounts.pauseCalls).toBe(2);
+        expect(report.commandCounts.stopCalls).toBe(2);
     });
 });

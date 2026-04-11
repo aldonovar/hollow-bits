@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     assessGlobalAudioPriority,
     assessSessionOverload,
+    assessVisualPerformance,
     buildAudioPriorityStabilityReport,
     buildSessionLaunchReport,
     buildSessionTrackWindow,
@@ -102,7 +103,7 @@ describe('sessionPerformanceService.assessSessionOverload', () => {
 });
 
 describe('sessionPerformanceService.assessGlobalAudioPriority', () => {
-    it('returns guarded when ui fps degrades even without audio failures', () => {
+    it('stays normal when ui fps degrades without audio failures', () => {
         const decision = assessGlobalAudioPriority({
             engineStats: {
                 highLoadDetected: false,
@@ -117,12 +118,12 @@ describe('sessionPerformanceService.assessGlobalAudioPriority', () => {
             uiFrameDropRatio: 0.04
         });
 
-        expect(decision.mode).toBe('guarded');
-        expect(decision.reduceAnimations).toBe(true);
+        expect(decision.mode).toBe('normal');
+        expect(decision.reasonCode).toBe('steady');
         expect(decision.showBanner).toBe(false);
     });
 
-    it('returns critical when ui and scheduler are both overloaded', () => {
+    it('returns critical when scheduler counters are overloaded', () => {
         const decision = assessGlobalAudioPriority({
             engineStats: {
                 highLoadDetected: true,
@@ -143,6 +144,42 @@ describe('sessionPerformanceService.assessGlobalAudioPriority', () => {
         expect(decision.disableHeavyVisuals).toBe(true);
         expect(decision.uiUpdateDebounceMs).toBeGreaterThanOrEqual(72);
         expect(decision.showBanner).toBe(true);
+        expect(decision.reasonCode).toBe('audio-dropouts-spike');
+    });
+});
+
+describe('sessionPerformanceService.assessVisualPerformance', () => {
+    it('flags degraded visual performance during playback', () => {
+        const decision = assessVisualPerformance({
+            capturedAt: Date.now(),
+            uiFpsP95: 42,
+            frameDropRatio: 0.11,
+            hasPlaybackActivity: true,
+            worstBurstMs: 52,
+            sampleWindowMs: 5000,
+            hasActiveViewportInteraction: false
+        });
+
+        expect(decision.mode).toBe('degraded');
+        expect(decision.reasonCode).toBe('ui-frame-drop-degraded');
+        expect(decision.showBadge).toBe(true);
+        expect(decision.simplifyPlaybackVisuals).toBe(true);
+    });
+
+    it('stays normal and quiet while idle when metrics are healthy', () => {
+        const decision = assessVisualPerformance({
+            capturedAt: Date.now(),
+            uiFpsP95: 60,
+            frameDropRatio: 0.01,
+            hasPlaybackActivity: false,
+            worstBurstMs: 16.7,
+            sampleWindowMs: 5000,
+            hasActiveViewportInteraction: false
+        });
+
+        expect(decision.mode).toBe('normal');
+        expect(decision.showBadge).toBe(false);
+        expect(decision.reasonCode).toBe('idle');
     });
 });
 

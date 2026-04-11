@@ -14,26 +14,85 @@ interface TrackHeaderProps {
     onDelete: () => void;
 }
 
+const dbToMeterNormalized = (db: number): number => {
+    const minDb = -72;
+    const maxDb = 6;
+    const clamped = Math.min(maxDb, Math.max(minDb, db));
+    const normalized = (clamped - minDb) / (maxDb - minDb);
+    return Math.pow(normalized, 1.35);
+};
+
+const TrackMeterStrip: React.FC<{ trackId: string; isMuted: boolean }> = React.memo(({ trackId, isMuted }) => {
+    const meterSnapshot = useSyncExternalStore(
+        useCallback((listener) => trackHeaderMeterStore.subscribe(trackId, listener), [trackId]),
+        useCallback(() => trackHeaderMeterStore.getSnapshot(trackId), [trackId]),
+        () => trackHeaderMeterStore.getSnapshot(trackId)
+    );
+
+    const peakMeterLevel = isMuted ? 0 : dbToMeterNormalized(meterSnapshot.peakDb);
+    const rmsMeterLevel = isMuted ? 0 : Math.min(peakMeterLevel, dbToMeterNormalized(meterSnapshot.rmsDb));
+    const clipped = !isMuted && meterSnapshot.clipped;
+
+    const peakHeight = Math.min(100, peakMeterLevel * 100);
+    const rmsHeight = Math.min(100, rmsMeterLevel * 100);
+    const peakLineBottom = Math.max(0, Math.min(99, peakHeight));
+
+    return (
+        <div className="w-2.5 h-full bg-[#0a0a0a] border-l border-[#333] flex flex-col relative shrink-0">
+            <div className={`w-full h-px mb-[1px] transition-colors duration-100 ${clipped ? 'bg-red-500 shadow-[0_0_5px_red]' : 'bg-[#1a1a1a]'}`}></div>
+            <div className="flex-1 relative bg-[#050505] overflow-hidden">
+                <div
+                    className="absolute inset-x-0 bottom-0 h-full bg-meter-gradient opacity-85 will-change-transform"
+                    style={{ transform: `scaleY(${peakHeight / 100})`, transformOrigin: 'bottom' }}
+                ></div>
+                <div
+                    className="absolute inset-x-0 bottom-0 h-full bg-white/18 will-change-transform"
+                    style={{ transform: `scaleY(${rmsHeight / 100})`, transformOrigin: 'bottom' }}
+                ></div>
+                <div
+                    className="absolute left-0 right-0 h-[1px] bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.5)]"
+                    style={{ bottom: `${peakLineBottom}%` }}
+                ></div>
+            </div>
+        </div>
+    );
+});
+
+const arePunchRangesEqual = (left?: Track['punchRange'], right?: Track['punchRange']) => {
+    if (!left && !right) return true;
+    if (!left || !right) return false;
+    return left.enabled === right.enabled
+        && left.inBar === right.inBar
+        && left.outBar === right.outBar
+        && left.preRollBars === right.preRollBars
+        && left.countInBars === right.countInBars;
+};
+
+const areTrackHeaderPropsEqual = (previous: TrackHeaderProps, next: TrackHeaderProps) => {
+    const prevTrack = previous.track;
+    const nextTrack = next.track;
+
+    return previous.height === next.height
+        && previous.isSelected === next.isSelected
+        && prevTrack.id === nextTrack.id
+        && prevTrack.name === nextTrack.name
+        && prevTrack.color === nextTrack.color
+        && prevTrack.volume === nextTrack.volume
+        && prevTrack.pan === nextTrack.pan
+        && prevTrack.reverb === nextTrack.reverb
+        && prevTrack.monitor === nextTrack.monitor
+        && prevTrack.isMuted === nextTrack.isMuted
+        && prevTrack.isSoloed === nextTrack.isSoloed
+        && prevTrack.isArmed === nextTrack.isArmed
+        && arePunchRangesEqual(prevTrack.punchRange, nextTrack.punchRange);
+};
+
 const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isSelected, onSelect, onUpdate, onDelete }) => {
     const monitorModes: Track['monitor'][] = ['in', 'auto', 'off'];
     const monitorModeActiveClass: Record<Track['monitor'], string> = {
         in: 'bg-[#ff4fc3] text-[#190a13] border border-[#ff9be3] shadow-[0_0_8px_rgba(255,79,195,0.32)]',
         auto: 'bg-[#dc87ff] text-[#1b0a23] border border-[#f0bfff] shadow-[0_0_8px_rgba(220,135,255,0.3)]',
         off: 'bg-[#ff8ea9] text-[#200b14] border border-[#ffc6d5] shadow-[0_0_8px_rgba(255,142,169,0.28)]'
-    };
-
-    const meterSnapshot = useSyncExternalStore(
-        useCallback((listener) => trackHeaderMeterStore.subscribe(track.id, listener), [track.id]),
-        useCallback(() => trackHeaderMeterStore.getSnapshot(track.id), [track.id]),
-        () => trackHeaderMeterStore.getSnapshot(track.id)
-    );
-
-    const dbToMeterNormalized = (db: number): number => {
-        const minDb = -72;
-        const maxDb = 6;
-        const clamped = Math.min(maxDb, Math.max(minDb, db));
-        const normalized = (clamped - minDb) / (maxDb - minDb);
-        return Math.pow(normalized, 1.35);
     };
 
     const showKnobs = height >= 74;
@@ -50,14 +109,6 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
         countInBars: 0
     };
     const punchEnabled = Boolean(punchRange.enabled);
-
-    const peakMeterLevel = track.isMuted ? 0 : dbToMeterNormalized(meterSnapshot.peakDb);
-    const rmsMeterLevel = track.isMuted ? 0 : Math.min(peakMeterLevel, dbToMeterNormalized(meterSnapshot.rmsDb));
-    const clipped = !track.isMuted && meterSnapshot.clipped;
-
-    const peakHeight = Math.min(100, peakMeterLevel * 100);
-    const rmsHeight = Math.min(100, rmsMeterLevel * 100);
-    const peakLineBottom = Math.max(0, Math.min(99, peakHeight));
 
     return (
         <div
@@ -147,26 +198,9 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
                     </div>
                 </div>
             </div>
-
-            <div className="w-2.5 h-full bg-[#0a0a0a] border-l border-[#333] flex flex-col relative shrink-0">
-                <div className={`w-full h-px mb-[1px] transition-colors duration-100 ${clipped ? 'bg-red-500 shadow-[0_0_5px_red]' : 'bg-[#1a1a1a]'}`}></div>
-                <div className="flex-1 relative bg-[#050505] overflow-hidden">
-                    <div
-                        className="w-full absolute bottom-0 bg-meter-gradient opacity-85 transition-[height] duration-50 ease-out"
-                        style={{ height: `${peakHeight}%` }}
-                    ></div>
-                    <div
-                        className="w-full absolute bottom-0 bg-white/18 transition-[height] duration-50 ease-out"
-                        style={{ height: `${rmsHeight}%` }}
-                    ></div>
-                    <div
-                        className="absolute left-0 right-0 h-[1px] bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.5)] transition-[bottom] duration-50 ease-out"
-                        style={{ bottom: `${peakLineBottom}%` }}
-                    ></div>
-                </div>
-            </div>
+            <TrackMeterStrip trackId={track.id} isMuted={track.isMuted} />
         </div>
     );
-});
+}, areTrackHeaderPropsEqual);
 
 export default TrackHeader;

@@ -1,4 +1,14 @@
-import { AudioSettings, Clip, EngineBackendRoute, SessionHealthSnapshot, Track } from '../types';
+import {
+    AudioSettings,
+    AutomationRuntimeFrame,
+    Clip,
+    EngineBackendRoute,
+    MonitoringRouteSnapshot,
+    SessionHealthSnapshot,
+    Track,
+    TransportPlaybackSessionId,
+    TransportAuthoritySnapshot
+} from '../types';
 import {
     audioEngine,
     AudioRuntimeCounters,
@@ -28,11 +38,15 @@ export interface EngineAdapter {
     init: (settings?: AudioSettings) => Promise<void>;
     getDiagnostics: () => EngineDiagnostics;
     getAudioRuntimeCounters: () => AudioRuntimeCounters;
+    resetRuntimeTelemetry: () => void;
     getSessionHealthSnapshot: (overrides?: Partial<SessionHealthSnapshot>) => SessionHealthSnapshot;
     getRuntimeDiagnostics: () => {
         contextState: AudioContextState | 'closed';
         hasMasterGraph: boolean;
         activeSourceCount: number;
+        activePlaybackSessionId: TransportPlaybackSessionId;
+        transportCommandEpoch: number;
+        offsetTimeSec: number;
         trackNodeCount: number;
         masterVolumeDb: number;
         cueTrackId: string | null;
@@ -53,11 +67,13 @@ export interface EngineAdapter {
 
     getIsPlaying: () => boolean;
     getCurrentTime: () => number;
+    getTransportAuthoritySnapshot: () => TransportAuthoritySnapshot;
     ensurePlaybackReady: () => Promise<boolean>;
     play: (tracks: Track[], bpm: number, pitch: number, offsetTime: number) => void;
     pause: () => void;
     stop: (reset: boolean) => void;
     seek: (time: number, tracks: Track[], bpm: number) => void;
+    applyAutomationRuntimeFrame: (frame: AutomationRuntimeFrame) => void;
 
     recoverPlaybackGraph: (tracks: Track[]) => Promise<void>;
 
@@ -75,6 +91,9 @@ export interface EngineAdapter {
     stopRecording: (trackId: string) => Promise<EngineRecordingResult | null>;
     finalizeRecording: (trackId: string) => Promise<EngineRecordingResult | null>;
     getActiveRecordingTrackIds: () => string[];
+    getPendingFinalizeTrackIds: () => string[];
+    stopTrackMonitoring: (trackId: string) => void;
+    getMonitoringRouteSnapshots: () => MonitoringRouteSnapshot[];
 
     decodeAudioData: (arrayBuffer: ArrayBuffer) => Promise<AudioBuffer>;
     createNoiseBuffer: (seconds?: number) => AudioBuffer;
@@ -135,6 +154,10 @@ export const engineAdapter: EngineAdapter = {
 
     getAudioRuntimeCounters() {
         return audioEngine.getAudioRuntimeCounters();
+    },
+
+    resetRuntimeTelemetry() {
+        audioEngine.resetRuntimeTelemetry();
     },
 
     getSessionHealthSnapshot(overrides) {
@@ -222,6 +245,10 @@ export const engineAdapter: EngineAdapter = {
         return audioEngine.getCurrentTime();
     },
 
+    getTransportAuthoritySnapshot() {
+        return audioEngine.getTransportAuthoritySnapshot();
+    },
+
     ensurePlaybackReady() {
         return audioEngine.ensurePlaybackReady();
     },
@@ -240,6 +267,10 @@ export const engineAdapter: EngineAdapter = {
 
     seek(time, tracks, bpm) {
         audioEngine.seek(time, tracks, bpm);
+    },
+
+    applyAutomationRuntimeFrame(frame) {
+        audioEngine.applyAutomationRuntimeFrame(frame);
     },
 
     recoverPlaybackGraph(tracks) {
@@ -287,11 +318,23 @@ export const engineAdapter: EngineAdapter = {
     },
 
     finalizeRecording(trackId) {
-        return audioEngine.stopRecording(trackId);
+        return audioEngine.finalizeRecording(trackId);
     },
 
     getActiveRecordingTrackIds() {
         return audioEngine.getActiveRecordingTrackIds();
+    },
+
+    getPendingFinalizeTrackIds() {
+        return audioEngine.getPendingFinalizeTrackIds();
+    },
+
+    stopTrackMonitoring(trackId) {
+        audioEngine.stopTrackMonitoring(trackId);
+    },
+
+    getMonitoringRouteSnapshots() {
+        return audioEngine.getMonitoringRouteSnapshots();
     },
 
     decodeAudioData(arrayBuffer) {

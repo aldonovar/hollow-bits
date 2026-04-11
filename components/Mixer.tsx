@@ -3,6 +3,7 @@ import { Layers3, Plus, RotateCcw, X } from 'lucide-react';
 import { MicInputChannelMode, Track, TrackType } from '../types';
 import Knob from './Knob';
 import { audioEngine } from '../services/audioEngine';
+import { buildMixerAuditSnapshot, summarizeMixerAuditSnapshot } from '../services/mixerAuditService';
 
 interface MixerProps {
   tracks: Track[];
@@ -191,6 +192,9 @@ const Mixer: React.FC<MixerProps> = ({
     const standardTracks = tracks.filter((track) => track.type !== TrackType.RETURN && track.type !== TrackType.GROUP);
     return [...standardTracks, ...groupTracks, ...returnTracks];
   }, [tracks, groupTracks, returnTracks]);
+  const mixerAudit = useMemo(() => {
+    return buildMixerAuditSnapshot(tracks, cueState);
+  }, [cueState, tracks]);
   const trackIds = useMemo(() => tracks.map((track) => track.id), [tracks]);
   const effectiveMaxMeterTracks = useMemo(() => Math.max(1, Math.floor(maxMeterTracks)), [maxMeterTracks]);
   const activeMeterTrackIds = useMemo(() => {
@@ -346,9 +350,26 @@ const Mixer: React.FC<MixerProps> = ({
 
   return (
     <div className="h-full w-full bg-[#06080f] flex flex-col overflow-hidden">
-      <div className="h-9 shrink-0 px-3 border-b border-[#1b2233] bg-[#0d1220] flex items-center justify-between">
+      <div
+        className="h-9 shrink-0 px-3 border-b border-[#1b2233] bg-[#0d1220] flex items-center justify-between"
+        title={summarizeMixerAuditSnapshot(mixerAudit)}
+      >
         <div className="flex items-center gap-2">
           <div className="text-[10px] uppercase tracking-[0.16em] text-gray-400 font-bold">Pro Mixer</div>
+          <div className="hidden xl:flex items-center gap-1 ml-1">
+            <div className="h-6 px-2 rounded-sm border border-white/10 bg-white/[0.03] text-[8px] font-bold uppercase tracking-wider text-gray-300">
+              Grp {mixerAudit.groupTrackCount}
+            </div>
+            <div className="h-6 px-2 rounded-sm border border-white/10 bg-white/[0.03] text-[8px] font-bold uppercase tracking-wider text-gray-300">
+              Ret {mixerAudit.returnTrackCount}
+            </div>
+            <div className="h-6 px-2 rounded-sm border border-white/10 bg-white/[0.03] text-[8px] font-bold uppercase tracking-wider text-gray-300">
+              Send {mixerAudit.activeSendRouteCount}
+            </div>
+            <div className="h-6 px-2 rounded-sm border border-white/10 bg-white/[0.03] text-[8px] font-bold uppercase tracking-wider text-gray-300">
+              Auto {mixerAudit.automatedTrackCount}
+            </div>
+          </div>
           {onCreateGroup && (
             <button
               onClick={onCreateGroup}
@@ -441,7 +462,15 @@ const Mixer: React.FC<MixerProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2">
+          <div className="hidden lg:flex items-center gap-1">
+            <div className="h-6 px-2 rounded-sm border border-white/10 bg-white/[0.03] text-[8px] font-bold uppercase tracking-wider text-gray-400">
+              Write {mixerAudit.automationWriteReadyTrackCount}
+            </div>
+            <div className="h-6 px-2 rounded-sm border border-white/10 bg-white/[0.03] text-[8px] font-bold uppercase tracking-wider text-gray-400">
+              Safe {mixerAudit.soloSafeTrackCount}
+            </div>
+          </div>
           {cueState && (
             <div className="h-6 px-2 rounded-sm border border-amber-400/40 bg-amber-500/10 text-[8px] font-bold uppercase tracking-wider text-amber-200 flex items-center gap-1">
               Cue {cueState.mode.toUpperCase()}
@@ -463,6 +492,12 @@ const Mixer: React.FC<MixerProps> = ({
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: focusedTrack.color }}></div>
             <div className="text-[10px] font-bold text-white uppercase tracking-wider truncate max-w-[180px]">{focusedTrack.name}</div>
             <div className="text-[8px] text-gray-500 uppercase tracking-[0.14em]">Inspector</div>
+            <div className="hidden xl:flex items-center gap-2 text-[8px] text-gray-500 uppercase tracking-[0.14em]">
+              <span>Route {focusedTrack.groupId ? 'Group' : 'Master'}</span>
+              <span>Auto {(focusedTrack.automationMode || 'read').toUpperCase()}</span>
+              {focusedTrack.vcaGroupId && <span>VCA</span>}
+              {focusedTrack.soloSafe && <span>Safe</span>}
+            </div>
           </div>
 
           <div className="flex items-center gap-2">

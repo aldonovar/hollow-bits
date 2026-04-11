@@ -14,9 +14,12 @@ const DEFAULT_LIVE_CAPTURE_CONFIG = Object.freeze({
 });
 
 const BENCHMARK_ARTIFACT_PATHS = Object.freeze({
+    'transport-runtime': path.join('benchmarks', 'transport', 'latest-runtime.json'),
     'session-launch': path.join('benchmarks', 'session-launch', 'latest-report.json'),
     'stress-48x8': path.join('benchmarks', 'stress-48x8', 'latest-report.json'),
-    'audio-priority-transitions': path.join('benchmarks', 'audio-priority', 'latest-transitions.json')
+    'audio-priority-transitions': path.join('benchmarks', 'audio-priority', 'latest-transitions.json'),
+    'recording-reliability': path.join('benchmarks', 'recording-reliability', 'latest-report.json'),
+    'monitoring-runtime': path.join('benchmarks', 'monitoring-runtime', 'latest-report.json')
 });
 
 const parsePositiveNumber = (value, fallback) => {

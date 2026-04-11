@@ -1,5 +1,5 @@
 
-import React, { useRef, useEffect, useState, useMemo } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useMemo } from 'react';
 import { Track, TrackType, Clip, AutomationPoint, PunchRange } from '../types';
 import TrackHeader from './TrackHeader';
 import AutomationLane from './AutomationLane';
@@ -15,7 +15,13 @@ import {
     resolveCrossfadePreviewBars
 } from '../services/timelineCrossfadeService';
 import {
+    getTransportClockSnapshot,
+    subscribeTransportClock
+} from '../services/transportClockStore';
+import { barToSeconds, positionToBarTime } from '../services/transportStateService';
+import {
     buildCompLaneOverlayModel,
+    type CompLaneOverlayModel,
     type CompBoundaryBlendHandleModel
 } from '../services/compLaneOverlayService';
 import { COMP_CLIP_ID_PREFIX } from '../services/takeCompingService';
@@ -44,6 +50,7 @@ interface TrackLaneProps {
     visibleRect: { left: number, width: number };
     gridSize: number; // [NEW]
     snapToGrid: boolean;
+    simplifyPlaybackVisuals: boolean;
 }
 
 
@@ -54,6 +61,7 @@ const VISIBLE_RECT_WIDTH_QUANTUM = 16;
 const VISIBLE_RECT_TOP_QUANTUM = 12;
 const VISIBLE_RECT_HEIGHT_QUANTUM = 12;
 const TRACK_VIRTUALIZATION_OVERSCAN_PX = 480;
+const TRACK_VIRTUALIZATION_PLAYBACK_OVERSCAN_PX = 220;
 const MAX_ACTIVE_METER_TRACKS = 128;
 const WAVEFORM_CACHE_LIMIT = 320;
 const MIDI_DECORATION_CACHE_LIMIT = 640;
@@ -80,11 +88,10 @@ interface TrackLayoutRow {
     }[];
 }
 
-interface CachedWaveformShape {
-    pathData: string;
-    crestPath: string;
-    troughPath: string;
-    centerY: number;
+interface CachedWaveformBitmap {
+    canvas: HTMLCanvasElement;
+    widthBucket: number;
+    heightBucket: number;
 }
 
 interface MidiDecorationBar {
@@ -93,9 +100,71 @@ interface MidiDecorationBar {
     widthPercent: number;
 }
 
+type ClipRenderMode = 'full' | 'lite-playback';
+
+interface WaveformBitmapCanvasProps {
+    bitmap: CachedWaveformBitmap;
+    width: number;
+    height: number;
+    className?: string;
+}
+
+const WaveformBitmapCanvas: React.FC<WaveformBitmapCanvasProps> = React.memo(({
+    bitmap,
+    width,
+    height,
+    className
+}) => {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+
+    useLayoutEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const dpr = typeof window !== 'undefined' ? Math.max(1, Math.min(2, window.devicePixelRatio || 1)) : 1;
+        const displayWidth = Math.max(1, Math.round(width));
+        const displayHeight = Math.max(1, Math.round(height));
+        const renderWidth = Math.max(1, Math.round(displayWidth * dpr));
+        const renderHeight = Math.max(1, Math.round(displayHeight * dpr));
+
+        if (canvas.width !== renderWidth || canvas.height !== renderHeight) {
+            canvas.width = renderWidth;
+            canvas.height = renderHeight;
+        }
+
+        const ctx = canvas.getContext('2d', { alpha: true });
+        if (!ctx) return;
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, displayWidth, displayHeight);
+        ctx.drawImage(bitmap.canvas, 0, 0, displayWidth, displayHeight);
+    }, [bitmap, width, height]);
+
+    return (
+        <canvas
+            ref={canvasRef}
+            className={className}
+            style={{ width: `${Math.max(1, width)}px`, height: `${Math.max(1, height)}px` }}
+        />
+    );
+}, (prev, next) => (
+    prev.bitmap === next.bitmap
+    && Math.abs(prev.width - next.width) < 0.5
+    && Math.abs(prev.height - next.height) < 0.5
+    && prev.className === next.className
+));
+
 const seededRatio = (seed: number): number => {
     const value = Math.sin(seed * 12.9898) * 43758.5453;
     return value - Math.floor(value);
+};
+
+const EMPTY_COMP_OVERLAY_MODEL: CompLaneOverlayModel = {
+    laneId: null,
+    laneName: null,
+    isActiveLane: false,
+    visibleSegments: [],
+    boundaryHandles: []
 };
 
 type ClipDragAction = {
@@ -149,14 +218,15 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     onExternalDrop,
     visibleRect,
     gridSize, // [NEW]
-    snapToGrid
+    snapToGrid,
+    simplifyPlaybackVisuals
 }) => {
     // Local State for Smart Tool Dragging
     const [dragAction, setDragAction] = useState<DragAction | null>(null);
     const dragPreviewRef = useRef<Partial<Clip> | null>(null);
     const crossfadePreviewRef = useRef<number | null>(null);
     const compBoundaryFadePreviewRef = useRef<number | null>(null);
-    const waveformCacheRef = useRef<Map<string, CachedWaveformShape>>(new Map());
+    const waveformBitmapCacheRef = useRef<Map<string, CachedWaveformBitmap>>(new Map());
     const midiDecorationCacheRef = useRef<Map<string, MidiDecorationBar[]>>(new Map());
 
     // --- SMART TOOL LOGIC (TRIM & FADE) ---
@@ -345,108 +415,115 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
 
     // Smart Zoom Thresholds
     const showWaveforms = zoom > 15;
+    const shouldSimplifyVisuals = simplifyPlaybackVisuals;
+    const clipRenderMode: ClipRenderMode = shouldSimplifyVisuals ? 'lite-playback' : 'full';
+    const audioWaveformRenderMode: ClipRenderMode = 'full';
     const showDetailGrid = zoom > 50;
     const showBeatGrid = zoom > 20;
 
-    const getWaveformPath = (clip: Clip, width: number, height: number) => {
+    const getWaveformBitmap = (clip: Clip, width: number, height: number, renderMode: ClipRenderMode): CachedWaveformBitmap | null => {
         const buffer = clip.buffer;
-        if (!buffer) return null;
-
-        const widthBucket = Math.max(64, Math.round(width / 24) * 24);
-        const heightBucket = Math.max(24, Math.round(height / 6) * 6);
-        const zoomBucket = zoom < 35 ? 1 : zoom < 90 ? 2 : 3;
-        const cacheKey = `${clip.id}:${buffer.length}:${buffer.sampleRate}:${widthBucket}:${heightBucket}:${zoomBucket}`;
-
-        let cached = waveformCacheRef.current.get(cacheKey);
-
-        if (!cached) {
-            // LOD Optimization: increase density for clearer transients/highs-lows.
-            const quality = zoom < 35 ? 1.0 : zoom < 90 ? 1.4 : 1.9;
-            const maxSteps = Math.max(1200, Math.floor(6000 * quality));
-            const steps = Math.min(Math.max(64, Math.ceil(widthBucket * quality)), maxSteps);
-
-            const envelope = audioEngine.getWaveformEnvelopeData(buffer, steps);
-            const pointCount = Math.min(envelope.max.length, envelope.min.length);
-            const centerY = heightBucket / 2;
-            const amp = heightBucket * 0.92;
-
-            if (pointCount === 0) {
-                return null;
-            }
-
-            let pathData = `M 0 ${centerY}`;
-            let crestPath = `M 0 ${centerY}`;
-            let troughPath = `M 0 ${centerY}`;
-
-            for (let i = 0; i < pointCount; i++) {
-                const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
-                const yMax = centerY - (envelope.max[i] * (amp / 2));
-                pathData += ` L ${x} ${yMax}`;
-                crestPath += ` L ${x} ${yMax}`;
-            }
-
-            for (let i = pointCount - 1; i >= 0; i--) {
-                const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
-                const yMin = centerY - (envelope.min[i] * (amp / 2));
-                pathData += ` L ${x} ${yMin}`;
-                troughPath += ` L ${x} ${yMin}`;
-            }
-
-            pathData += ' Z';
-
-            cached = {
-                pathData,
-                crestPath,
-                troughPath,
-                centerY
-            };
-
-            waveformCacheRef.current.set(cacheKey, cached);
-
-            if (waveformCacheRef.current.size > WAVEFORM_CACHE_LIMIT) {
-                const oldestKey = waveformCacheRef.current.keys().next().value;
-                if (oldestKey) {
-                    waveformCacheRef.current.delete(oldestKey);
-                }
-            }
+        if (!buffer || typeof document === 'undefined') {
+            return null;
         }
 
-        const scaleX = Math.max(0.0001, width / Math.max(1, widthBucket));
-        const scaleY = Math.max(0.0001, height / Math.max(1, heightBucket));
+        const dpr = typeof window !== 'undefined' ? Math.max(1, Math.min(2, window.devicePixelRatio || 1)) : 1;
+        const widthBucket = renderMode === 'full'
+            ? Math.max(192, Math.round(width / 16) * 16)
+            : Math.max(128, Math.round(width / 24) * 24);
+        const heightBucket = renderMode === 'full'
+            ? Math.max(40, Math.round(height / 4) * 4)
+            : Math.max(32, Math.round(height / 6) * 6);
+        const cacheKey = `bmp:${clip.id}:${buffer.length}:${buffer.sampleRate}:${widthBucket}:${heightBucket}:${renderMode}:${dpr}`;
+        const cached = waveformBitmapCacheRef.current.get(cacheKey);
+        if (cached) {
+            return cached;
+        }
 
-        // LOD Optimization: increase density for clearer transients/highs-lows.
-        return (
-            <g transform={`scale(${scaleX}, ${scaleY})`}>
-                <line x1="0" y1={cached.centerY} x2={widthBucket} y2={cached.centerY} stroke={track.color} strokeOpacity="0.3" strokeWidth="1" />
-                <path
-                    d={cached.pathData}
-                    fill={track.color}
-                    fillOpacity="0.72"
-                    stroke={track.color}
-                    strokeWidth="0.9"
-                    vectorEffect="non-scaling-stroke"
-                    shapeRendering="geometricPrecision"
-                />
-                <path
-                    d={cached.crestPath}
-                    fill="none"
-                    stroke={track.color}
-                    strokeOpacity="0.85"
-                    strokeWidth="0.85"
-                    vectorEffect="non-scaling-stroke"
-                    shapeRendering="geometricPrecision"
-                />
-                <path
-                    d={cached.troughPath}
-                    fill="none"
-                    stroke={track.color}
-                    strokeOpacity="0.78"
-                    strokeWidth="0.85"
-                    vectorEffect="non-scaling-stroke"
-                    shapeRendering="geometricPrecision"
-                />
-            </g>
-        );
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(widthBucket * dpr));
+        canvas.height = Math.max(1, Math.round(heightBucket * dpr));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            return null;
+        }
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const centerY = heightBucket / 2;
+        const amp = heightBucket * (renderMode === 'full' ? 0.47 : 0.44);
+        const sampleSteps = renderMode === 'full'
+            ? Math.min(2600, Math.max(240, Math.ceil(widthBucket * (zoom < 35 ? 1.45 : zoom < 90 ? 1.9 : 2.35))))
+            : Math.min(960, Math.max(128, Math.ceil(widthBucket * 0.8)));
+        const envelope = audioEngine.getWaveformEnvelopeData(buffer, sampleSteps);
+        const pointCount = Math.min(envelope.max.length, envelope.min.length);
+        if (pointCount === 0) {
+            return null;
+        }
+
+        ctx.clearRect(0, 0, widthBucket, heightBucket);
+        ctx.strokeStyle = `${track.color}66`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, centerY);
+        ctx.lineTo(widthBucket, centerY);
+        ctx.stroke();
+
+        ctx.fillStyle = renderMode === 'full' ? `${track.color}7A` : `${track.color}4A`;
+        ctx.strokeStyle = renderMode === 'full' ? `${track.color}F0` : `${track.color}D8`;
+        ctx.lineWidth = renderMode === 'full' ? 1.25 : 1.05;
+        ctx.beginPath();
+        ctx.moveTo(0, centerY);
+        for (let i = 0; i < pointCount; i += 1) {
+            const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
+            const y = centerY - (envelope.max[i] * amp);
+            ctx.lineTo(x, y);
+        }
+        for (let i = pointCount - 1; i >= 0; i -= 1) {
+            const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
+            const y = centerY - (envelope.min[i] * amp);
+            ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        if (renderMode === 'full') {
+            ctx.strokeStyle = `${track.color}F4`;
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            for (let i = 0; i < pointCount; i += 1) {
+                const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
+                const y = centerY - (envelope.max[i] * amp);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            ctx.strokeStyle = `${track.color}D0`;
+            ctx.beginPath();
+            for (let i = 0; i < pointCount; i += 1) {
+                const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
+                const y = centerY - (envelope.min[i] * amp);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        const nextBitmap = {
+            canvas,
+            widthBucket,
+            heightBucket
+        };
+        waveformBitmapCacheRef.current.set(cacheKey, nextBitmap);
+        if (waveformBitmapCacheRef.current.size > Math.floor(WAVEFORM_CACHE_LIMIT / 2)) {
+            const oldestKey = waveformBitmapCacheRef.current.keys().next().value;
+            if (oldestKey) {
+                waveformBitmapCacheRef.current.delete(oldestKey);
+            }
+        }
+        return nextBitmap;
     };
 
     const getMidiDecorationBars = (clip: Clip): MidiDecorationBar[] => {
@@ -558,6 +635,10 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     }, [zoom, totalWidth, showBeatGrid, showDetailGrid, gridSize]);
 
     const compOverlayModel = useMemo(() => {
+        if (shouldSimplifyVisuals) {
+            return EMPTY_COMP_OVERLAY_MODEL;
+        }
+
         return buildCompLaneOverlayModel({
             track,
             zoom,
@@ -565,12 +646,16 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
             viewportWidthPx: visibleRect.width,
             viewportPaddingPx: 300
         });
-    }, [track, zoom, visibleRect.left, visibleRect.width]);
+    }, [shouldSimplifyVisuals, track, zoom, visibleRect.left, visibleRect.width]);
 
-    const visibleCompSegments = compOverlayModel.visibleSegments;
-    const compBoundaryHandles = compOverlayModel.boundaryHandles;
+    const visibleCompSegments = shouldSimplifyVisuals ? [] : compOverlayModel.visibleSegments;
+    const compBoundaryHandles = shouldSimplifyVisuals ? [] : compOverlayModel.boundaryHandles;
 
     const crossfades = useMemo(() => {
+        if (shouldSimplifyVisuals) {
+            return [];
+        }
+
         const fades: Array<{
             id: string;
             left: number;
@@ -619,11 +704,13 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
             }
         }
         return fades;
-    }, [track.clips, zoom]);
+    }, [shouldSimplifyVisuals, track.clips, zoom]);
 
     // VIRTUALIZATION FILTER
     const visibleClips = useMemo(() => {
-        const bufferPx = 500; // Render extra pixels to prevent flickering
+        const bufferPx = shouldSimplifyVisuals
+            ? Math.max(120, Math.min(200, Math.round(visibleRect.width * 0.14)))
+            : Math.max(320, Math.min(560, Math.round(visibleRect.width * 0.34))); // Render extra pixels to prevent flickering
         const startPx = Math.max(0, visibleRect.left - bufferPx);
         const endPx = visibleRect.left + visibleRect.width + bufferPx;
 
@@ -644,7 +731,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         >
             {/* Sticky Track Header - High Z-index to cover scrolling content */}
             <div
-                className="shrink-0 sticky left-0 z-[100] bg-[#121212] border-r border-daw-border shadow-[4px_0_15px_-4px_rgba(0,0,0,0.8)]"
+                className={`shrink-0 sticky left-0 z-[100] bg-[#121212] border-r border-daw-border ${shouldSimplifyVisuals ? '' : 'shadow-[4px_0_15px_-4px_rgba(0,0,0,0.8)]'}`}
                 style={{ width: HEADER_WIDTH }}
             >
                 <TrackHeader
@@ -706,15 +793,15 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 {/* CLIPS (VIRTUALIZED) */}
                 {visibleClips.map(clip => {
                     const widthPx = clip.length * 4 * zoom;
-                    const showClipName = widthPx > 30; // LOD: Hide text if too small
-                    const showHandles = widthPx > 50; // Only show handles if clip is wide enough
+                    const showClipName = clipRenderMode === 'full' && widthPx > 30;
+                    const showHandles = !shouldSimplifyVisuals && widthPx > 50;
                     const EDGE_WIDTH = 8; // Trim handle hit zone width
                     const isCompDerivedClip = clip.id.startsWith(COMP_CLIP_ID_PREFIX) || clip.name.startsWith('[COMP]');
 
                     return (
                         <div
                             key={clip.id}
-                            className="absolute top-0 bottom-0 overflow-visible cursor-grab active:cursor-grabbing transition-shadow z-20 group/clip hover:shadow-lg rounded-[2px]"
+                            className={`absolute top-0 bottom-0 overflow-visible cursor-grab active:cursor-grabbing z-20 group/clip rounded-[2px] ${shouldSimplifyVisuals ? '' : 'transition-shadow hover:shadow-lg'}`}
                             onMouseDown={(e) => {
                                 // Don't start drag if clicking on handles
                                 const target = e.target as HTMLElement;
@@ -735,11 +822,15 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                 left: `${(clip.start - 1) * 4 * zoom}px`,
                                 width: `${widthPx}px`,
                                 background: isCompDerivedClip
-                                    ? `linear-gradient(120deg, ${track.color}3A 0%, rgba(13, 14, 22, 0.92) 75%)`
+                                    ? (shouldSimplifyVisuals ? `linear-gradient(120deg, ${track.color}10 0%, rgba(10, 11, 16, 0.82) 78%)` : `linear-gradient(120deg, ${track.color}3A 0%, rgba(13, 14, 22, 0.92) 75%)`)
                                     : (showWaveforms ? 'rgba(255, 255, 255, 0.04)' : `${track.color}20`),
                                 borderLeft: `2px solid ${isCompDerivedClip ? '#a855f7' : track.color}`,
                                 borderRight: `1px solid ${isCompDerivedClip ? '#a855f780' : `${track.color}40`}`,
-                                boxShadow: isCompDerivedClip ? 'inset 0 0 0 1px rgba(168,85,247,0.38)' : undefined
+                                boxShadow: shouldSimplifyVisuals
+                                    ? undefined
+                                    : (isCompDerivedClip ? 'inset 0 0 0 1px rgba(168,85,247,0.38)' : undefined),
+                                contain: 'layout paint style',
+                                contentVisibility: 'auto'
                             }}
                         >
                             {/* === LEFT TRIM HANDLE === */}
@@ -862,20 +953,23 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
 
                             {/* Waveform / MIDI Viz - Conditional Rendering based on Zoom */}
                             {showWaveforms && (
-                                <div className="absolute inset-0 flex items-center justify-center pointer-events-none top-2">
+                                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                                     {track.type === TrackType.AUDIO && clip.buffer ? (
-                                        <div className="w-full h-full opacity-90">
-                                            <svg
-                                                width="100%"
-                                                height="100%"
-                                                preserveAspectRatio="none"
-                                                className="w-full h-full overflow-visible"
-                                            >
-                                                {getWaveformPath(clip, clip.length * 4 * zoom, trackHeight)}
-                                            </svg>
+                                        <div className="w-full h-full opacity-95">
+                                            {(() => {
+                                                const waveformBitmap = getWaveformBitmap(clip, clip.length * 4 * zoom, trackHeight, audioWaveformRenderMode);
+                                                return waveformBitmap ? (
+                                                    <WaveformBitmapCanvas
+                                                        bitmap={waveformBitmap}
+                                                        width={clip.length * 4 * zoom}
+                                                        height={trackHeight}
+                                                        className="w-full h-full block"
+                                                    />
+                                                ) : null;
+                                            })()}
                                         </div>
                                     ) : track.type === TrackType.MIDI ? (
-                                        <div className="w-full h-full relative opacity-80">
+                                        <div className={`w-full h-full relative ${clipRenderMode === 'lite-playback' ? 'opacity-60' : 'opacity-80'}`}>
                                             {getMidiDecorationBars(clip).map((bar, i) => (
                                                 <div
                                                     key={i}
@@ -893,7 +987,9 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                                 </div>
                             )}
 
-                            <div className="absolute inset-0 border border-transparent group-hover/clip:border-white/10 transition-colors pointer-events-none"></div>
+                            {!shouldSimplifyVisuals && (
+                                <div className="absolute inset-0 border border-transparent group-hover/clip:border-white/10 transition-colors pointer-events-none"></div>
+                            )}
                         </div>
                     );
                 })}
@@ -963,7 +1059,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 )}
 
                 {/* AUTOMATIC CROSSFADE OVERLAYS */}
-                {crossfades.map(xfade => (
+                {!shouldSimplifyVisuals && crossfades.map(xfade => (
                     <div
                         key={xfade.id}
                         className="absolute top-0 bottom-0 z-30 pointer-events-none"
@@ -1029,7 +1125,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         prev.visibleRect.left === next.visibleRect.left &&
         prev.visibleRect.width === next.visibleRect.width &&
         prev.gridSize === next.gridSize &&
-        prev.snapToGrid === next.snapToGrid
+        prev.snapToGrid === next.snapToGrid &&
+        prev.simplifyPlaybackVisuals === next.simplifyPlaybackVisuals
     );
 });
 
@@ -1068,6 +1165,7 @@ interface TimelineProps {
     uiFrameBudgetMs?: number;
     meterFrameBudgetMs?: number;
     maxActiveMeterTracks?: number;
+    simplifyPlaybackVisuals?: boolean;
 }
 
 const Timeline: React.FC<TimelineProps> = React.memo(({
@@ -1092,7 +1190,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     onDuplicateClip,
     onPromoteToComp,
     onAddTrack,
-    onTimeUpdate, // [NEW] Sync transport with playhead
+    onTimeUpdate: _onTimeUpdate, // intentionally unused; transport authority now owns clock sync
     gridSize,
     snapToGrid,
     selectedTrackId,
@@ -1101,7 +1199,8 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     containerRef,
     uiFrameBudgetMs = 16,
     meterFrameBudgetMs = 0,
-    maxActiveMeterTracks = MAX_ACTIVE_METER_TRACKS
+    maxActiveMeterTracks = MAX_ACTIVE_METER_TRACKS,
+    simplifyPlaybackVisuals = false
 }) => {
     const totalBeats = bars * 4;
     const totalGridWidth = totalBeats * zoom;
@@ -1109,6 +1208,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
 
     const cursorRef = useRef<HTMLDivElement>(null);
     const playheadRef = useRef<HTMLDivElement>(null);
+    const commitCursorRef = useRef<((currentSeconds: number, forcedPosition?: { bar: number; beat: number; sixteenth: number }) => void) | null>(null);
 
     // [NEW] Virtualization State
     const [visibleRect, setVisibleRect] = useState<TimelineViewportRect>(() => ({
@@ -1200,14 +1300,15 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     const totalTimelineHeight = totalTracksHeight + trackHeight;
 
     const visibleTrackRows = useMemo(() => {
-        const start = Math.max(0, visibleRect.top - TRACK_VIRTUALIZATION_OVERSCAN_PX);
-        const end = visibleRect.top + visibleRect.height + TRACK_VIRTUALIZATION_OVERSCAN_PX;
+        const overscanPx = simplifyPlaybackVisuals ? TRACK_VIRTUALIZATION_PLAYBACK_OVERSCAN_PX : TRACK_VIRTUALIZATION_OVERSCAN_PX;
+        const start = Math.max(0, visibleRect.top - overscanPx);
+        const end = visibleRect.top + visibleRect.height + overscanPx;
 
         return trackRows.filter((row) => {
             const rowBottom = row.top + row.totalHeight;
             return rowBottom > start && row.top < end;
         });
-    }, [trackRows, visibleRect.top, visibleRect.height]);
+    }, [simplifyPlaybackVisuals, trackRows, visibleRect.top, visibleRect.height]);
 
     const trackTopById = useMemo(() => {
         const index = new Map<string, number>();
@@ -1257,8 +1358,8 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
 
         const updateMeters = (timestamp: number) => {
             const trackLoad = activeMeterTrackIds.length;
-            const playingFps = trackLoad > 96 ? 12 : trackLoad > 48 ? 18 : 24;
-            const idleFps = trackLoad > 96 ? 5 : 8;
+            const playingFps = trackLoad > 32 ? 14 : trackLoad > 16 ? 18 : 24;
+            const idleFps = 8;
             const baseFrameDelta = audioEngine.getIsPlaying() ? (1000 / playingFps) : (1000 / idleFps);
             const minFrameDelta = Math.max(baseFrameDelta, effectiveMeterFrameBudgetMs);
             if ((timestamp - lastFrameTime) >= minFrameDelta) {
@@ -1343,58 +1444,79 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     useEffect(() => {
         let animationFrameId: number;
         let lastFrameTime = 0;
-        let lastBar = 0, lastBeat = 0, lastSixteenth = 0; // Throttle state updates
+
+        const commitCursor = (currentSeconds: number) => {
+            const secondsPerBeat = 60 / bpm;
+            const totalBeatsElapsed = currentSeconds / secondsPerBeat;
+            const px = totalBeatsElapsed * zoom;
+
+            if (cursorRef.current) {
+                cursorRef.current.style.transform = `translate3d(${px}px, 0, 0)`;
+            }
+            if (playheadRef.current) {
+                playheadRef.current.style.transform = `translate3d(${px}px, 0, 0)`;
+            }
+        };
+        commitCursorRef.current = commitCursor;
 
         const updateCursor = (timestamp: number) => {
             const baseFrameDelta = isPlaying ? (1000 / 60) : (1000 / 10);
-            const minFrameDelta = Math.max(baseFrameDelta, Math.max(8, uiFrameBudgetMs));
+            const minFrameDelta = isPlaying ? baseFrameDelta : Math.max(baseFrameDelta, Math.max(8, uiFrameBudgetMs));
             if (timestamp - lastFrameTime < minFrameDelta) {
                 animationFrameId = requestAnimationFrame(updateCursor);
                 return;
             }
             lastFrameTime = timestamp;
 
-            const currentSeconds = audioEngine.getCurrentTime();
-            const secondsPerBeat = 60 / bpm;
-            const totalBeatsElapsed = currentSeconds / secondsPerBeat;
-            const px = totalBeatsElapsed * zoom;
-
-            // Update visual playhead elements (DOM direct manipulation for performance)
-            if (cursorRef.current) {
-                cursorRef.current.style.transform = `translate3d(${px}px, 0, 0)`;
-            }
-            if (playheadRef.current) {
-                // Both use same px value - marginLeft handles the -5 offset for centering
-                playheadRef.current.style.transform = `translate3d(${px}px, 0, 0)`;
-            }
-
-            // Calculate transport position from SAME time value (ensures sync)
-            const bar = Math.floor(totalBeatsElapsed / 4) + 1;
-            const beat = Math.floor(totalBeatsElapsed % 4) + 1;
-            const sixteenth = Math.floor((totalBeatsElapsed % 1) * 4) + 1;
-
-            // Only call callback if changed (throttle React re-renders)
-            if (onTimeUpdate && (bar !== lastBar || beat !== lastBeat || sixteenth !== lastSixteenth)) {
-                lastBar = bar;
-                lastBeat = beat;
-                lastSixteenth = sixteenth;
-                onTimeUpdate(bar, beat, sixteenth);
-            }
+            commitCursor(audioEngine.getCurrentTime());
 
             animationFrameId = requestAnimationFrame(updateCursor);
         };
-
-        animationFrameId = requestAnimationFrame(updateCursor);
 
         // Close context menu on click elsewhere
         const closeMenu = () => setContextMenu(null);
         window.addEventListener('click', closeMenu);
 
+        if (isPlaying) {
+            commitCursor(audioEngine.getCurrentTime());
+        } else {
+            const clockSnapshot = getTransportClockSnapshot();
+            const idleBarTime = positionToBarTime(clockSnapshot);
+            commitCursor(barToSeconds(idleBarTime, bpm));
+        }
+
+        if (isPlaying) {
+            animationFrameId = requestAnimationFrame(updateCursor);
+        }
+
         return () => {
-            cancelAnimationFrame(animationFrameId);
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+            commitCursorRef.current = null;
             window.removeEventListener('click', closeMenu);
         };
-    }, [bpm, isPlaying, onTimeUpdate, uiFrameBudgetMs, zoom]);
+    }, [
+        bpm,
+        isPlaying,
+        uiFrameBudgetMs,
+        zoom
+    ]);
+
+    useEffect(() => {
+        if (isPlaying) {
+            return;
+        }
+
+        const syncIdleCursor = () => {
+            const clockSnapshot = getTransportClockSnapshot();
+            const idleBarTime = positionToBarTime(clockSnapshot);
+            commitCursorRef.current?.(barToSeconds(idleBarTime, bpm));
+        };
+
+        syncIdleCursor();
+        return subscribeTransportClock(syncIdleCursor);
+    }, [bpm, isPlaying]);
 
     // Global Drag Events with Ghost Preview
     useEffect(() => {
@@ -1667,14 +1789,14 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
                     className="absolute top-0 w-[10px] h-[10px] will-change-transform pointer-events-none z-40"
                     style={{ left: 0, marginLeft: HEADER_WIDTH - 5 }}
                 >
-                    <svg width="10" height="10" viewBox="0 0 10 10" className="drop-shadow-sm">
+                    <svg width="10" height="10" viewBox="0 0 10 10">
                         <path d="M0 0 L10 0 L5 8 Z" fill="white" />
                     </svg>
                 </div>
 
                 <div
                     ref={cursorRef}
-                    className="absolute top-0 bottom-0 w-[1px] bg-white z-30 pointer-events-none will-change-transform shadow-[0_0_4px_rgba(255,255,255,0.5)]"
+                    className="absolute top-0 bottom-0 w-[1px] bg-white/95 z-30 pointer-events-none will-change-transform"
                     style={{ left: 0, marginLeft: HEADER_WIDTH, height: '100%' }}
                 >
                     {/* Playhead line */}
@@ -1711,6 +1833,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
                                     visibleRect={horizontalVisibleRect}
                                     gridSize={gridSize}
                                     snapToGrid={snapToGrid}
+                                    simplifyPlaybackVisuals={simplifyPlaybackVisuals}
                                 />
 
                                 {row.automationRows.map((automationRow) => {
@@ -1863,8 +1986,10 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
                             Acciones de Clip
                         </div>
                         <button
+                            disabled={contextMenu.clip.id.startsWith(COMP_CLIP_ID_PREFIX)}
                             onClick={() => { onConsolidate(contextMenu.track, [contextMenu.clip]); setContextMenu(null); }}
-                            className="w-full text-left px-3 py-1.5 hover:bg-[#222] text-xs text-gray-200 flex items-center gap-2 group"
+                            className="w-full text-left px-3 py-1.5 hover:bg-[#222] disabled:hover:bg-transparent text-xs text-gray-200 disabled:text-gray-500 flex items-center gap-2 group disabled:cursor-not-allowed"
+                            title={contextMenu.clip.id.startsWith(COMP_CLIP_ID_PREFIX) ? 'Consolida la toma fuente desde el editor para materializar el comp.' : undefined}
                         >
                             <FileAudio size={12} className="text-gray-500 group-hover:text-white" />
                             Consolidar (Bounce)
@@ -1874,13 +1999,15 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
                         {contextMenu.track.type === TrackType.AUDIO && (
                             <>
                                 <button
+                                    disabled={contextMenu.clip.id.startsWith(COMP_CLIP_ID_PREFIX)}
                                     onClick={() => { onReverse(contextMenu.track, contextMenu.clip); setContextMenu(null); }}
-                                    className="w-full text-left px-3 py-1.5 hover:bg-[#222] text-xs text-gray-200 flex items-center gap-2 group"
+                                    className="w-full text-left px-3 py-1.5 hover:bg-[#222] disabled:hover:bg-transparent text-xs text-gray-200 disabled:text-gray-500 flex items-center gap-2 group disabled:cursor-not-allowed"
+                                    title={contextMenu.clip.id.startsWith(COMP_CLIP_ID_PREFIX) ? 'El reverse directo se aplica sobre clips fuente, no sobre clips comp derivados.' : undefined}
                                 >
                                     <ArrowRightLeft size={12} className="text-daw-cyan group-hover:text-white" />
                                     Invertir Audio
                                 </button>
-                                {onPromoteToComp && (
+                                {onPromoteToComp && !contextMenu.clip.id.startsWith(COMP_CLIP_ID_PREFIX) && (
                                     <button
                                         onClick={() => { onPromoteToComp(contextMenu.track, contextMenu.clip); setContextMenu(null); }}
                                         className="w-full text-left px-3 py-1.5 hover:bg-[#222] text-xs text-gray-200 flex items-center gap-2 group"

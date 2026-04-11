@@ -1,25 +1,25 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clock3, Play, Square } from 'lucide-react';
-import { Clip, SessionHealthSnapshot, Track, TrackType } from '../types';
+import { Clip, Track, TrackType } from '../types';
 import { engineAdapter } from '../services/engineAdapter';
-import type { EngineDiagnostics } from '../services/engineAdapter';
 import type { SessionLaunchTelemetryEvent } from '../services/engineAdapter';
 import { BrowserDragPayload, readBrowserDragPayload } from '../services/browserDragService';
 import {
-    assessSessionOverload,
     buildSessionLaunchReport,
     buildSessionTrackWindow,
-    reduceSessionHealth,
     summarizeSessionLaunchTelemetry,
+    type SessionOverloadDecision,
     type SessionLaunchReport,
     type SessionLaunchTelemetrySample
 } from '../services/sessionPerformanceService';
 import {
     appendSceneRecordingEvent,
+    buildSceneRecordingIndex,
     buildSceneReplayPlan,
     createSceneRecordingEvent,
     deserializeSceneRecordingEvents,
     serializeSceneRecordingEvents,
+    summarizeSceneReplayPlan,
     summarizeSceneRecordingEvents,
     type SceneRecordingEvent,
     type SceneTrackClipRef
@@ -28,15 +28,7 @@ import {
 interface SessionViewProps {
     tracks: Track[];
     bpm: number;
-    sessionHealthSnapshot?: SessionHealthSnapshot | null;
-    engineStats?: Pick<
-        EngineDiagnostics,
-        'highLoadDetected'
-        | 'schedulerCpuLoadP95Percent'
-        | 'schedulerOverrunRatio'
-        | 'schedulerDropoutCount'
-        | 'schedulerUnderrunCount'
-    > | null;
+    overloadDecision: SessionOverloadDecision;
     onExternalDrop?: (trackId: string, sceneIndex: number, payload: BrowserDragPayload) => void;
     onClipSelect?: (trackId: string, clipId: string) => void;
 }
@@ -63,6 +55,7 @@ const TRACK_COLUMN_GAP_PX = 8;
 const TRACK_WINDOW_OVERSCAN = 3;
 const SESSION_SCENE_RECORDING_STORAGE_KEY = 'hollowbits.session.scene-recording.v1';
 const SESSION_LAUNCH_TELEMETRY_STORAGE_KEY = 'hollowbits.session-launch.telemetry.v1';
+const SESSION_LIVE_WORKFLOW_STORAGE_KEY = 'hollowbits.session.live-workflow.v1';
 
 const QUANTIZE_OPTIONS = [
     { value: 0.25, label: '1/4 Bar' },
@@ -104,11 +97,19 @@ const sanitizeLaunchTelemetrySamples = (candidate: unknown): SessionLaunchTeleme
         .slice(-1200);
 };
 
+const sanitizeLaunchQuantizeBars = (candidate: unknown): number => {
+    const value = Number(candidate);
+    const allowed = new Set(QUANTIZE_OPTIONS.map((option) => option.value));
+    if (!Number.isFinite(value) || !allowed.has(value)) {
+        return 1;
+    }
+    return value;
+};
+
 const SessionView: React.FC<SessionViewProps> = ({
     tracks,
     bpm,
-    sessionHealthSnapshot,
-    engineStats,
+    overloadDecision,
     onExternalDrop,
     onClipSelect
 }) => {
@@ -123,10 +124,6 @@ const SessionView: React.FC<SessionViewProps> = ({
     const pendingTimersRef = useRef<number[]>([]);
     const replayTimersRef = useRef<number[]>([]);
     const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-    const overloadBaselineRef = useRef<{
-        dropoutCount: number;
-        underrunCount: number;
-    } | null>(null);
 
     const sessionTracks = useMemo(
         () => tracks.filter((track) => track.type === TrackType.AUDIO || track.type === TrackType.MIDI),
@@ -134,65 +131,16 @@ const SessionView: React.FC<SessionViewProps> = ({
     );
 
     useEffect(() => {
-        if (overloadBaselineRef.current) return;
-        overloadBaselineRef.current = {
-            dropoutCount: Math.max(0, Number(engineStats?.schedulerDropoutCount || 0)),
-            underrunCount: Math.max(0, Number(engineStats?.schedulerUnderrunCount || 0))
-        };
-    }, [engineStats?.schedulerDropoutCount, engineStats?.schedulerUnderrunCount]);
-
-    const recentDropoutDelta = useMemo(() => {
-        const baseline = overloadBaselineRef.current;
-        if (!baseline) return 0;
-        const currentDropouts = Math.max(0, Number(engineStats?.schedulerDropoutCount || 0));
-        return Math.max(0, currentDropouts - baseline.dropoutCount);
-    }, [engineStats?.schedulerDropoutCount]);
-
-    const recentUnderrunDelta = useMemo(() => {
-        const baseline = overloadBaselineRef.current;
-        if (!baseline) return 0;
-        const currentUnderruns = Math.max(0, Number(engineStats?.schedulerUnderrunCount || 0));
-        return Math.max(0, currentUnderruns - baseline.underrunCount);
-    }, [engineStats?.schedulerUnderrunCount]);
-
-    const overloadDecision = useMemo(() => {
-        return assessSessionOverload({
-            engineStats: engineStats || null,
-            sessionTrackCount: sessionTracks.length,
-            sceneCount: SCENES,
-            recentDropoutDelta,
-            recentUnderrunDelta
-        });
-    }, [
-        engineStats,
-        recentDropoutDelta,
-        recentUnderrunDelta,
-        sessionTracks.length
-    ]);
-
-    const hasRealtimeAudioActivity = useMemo(() => {
-        if (engineAdapter.getIsPlaying()) {
-            return true;
+        try {
+            const rawSessionWorkflow = localStorage.getItem(SESSION_LIVE_WORKFLOW_STORAGE_KEY);
+            if (rawSessionWorkflow) {
+                const parsed = JSON.parse(rawSessionWorkflow) as { launchQuantizeBars?: unknown };
+                setLaunchQuantizeBars(sanitizeLaunchQuantizeBars(parsed?.launchQuantizeBars));
+            }
+        } catch {
+            // Non-blocking restore path.
         }
 
-        return sessionTracks.some((track) => {
-            if (track.type !== TrackType.AUDIO) {
-                return false;
-            }
-
-            if (track.monitor === 'in') {
-                return true;
-            }
-
-            if (track.monitor === 'auto' && track.isArmed) {
-                return true;
-            }
-
-            return Boolean(track.micSettings?.monitoringEnabled);
-        });
-    }, [sessionTracks]);
-
-    useEffect(() => {
         try {
             const rawSceneRecording = localStorage.getItem(SESSION_SCENE_RECORDING_STORAGE_KEY);
             if (rawSceneRecording) {
@@ -219,6 +167,16 @@ const SessionView: React.FC<SessionViewProps> = ({
             // Non-blocking restore path.
         }
     }, []);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(SESSION_LIVE_WORKFLOW_STORAGE_KEY, JSON.stringify({
+                launchQuantizeBars
+            }));
+        } catch {
+            // Non-blocking persistence path.
+        }
+    }, [launchQuantizeBars]);
 
     useEffect(() => {
         return () => {
@@ -571,6 +529,49 @@ const SessionView: React.FC<SessionViewProps> = ({
         replayTimersRef.current = [];
     }, []);
 
+    const runSceneReplayPlan = useCallback((replayPlan: ReturnType<typeof buildSceneReplayPlan>) => {
+        if (replayPlan.length === 0 || isSceneReplayRunning) return;
+
+        clearReplayTimers();
+        const now = engineAdapter.getContext().currentTime;
+        setIsSceneReplayRunning(true);
+
+        replayPlan.forEach((event, index) => {
+            const delayMs = Math.max(0, Math.round((event.replayLaunchAtSec - now) * 1000));
+            const timerId = window.setTimeout(() => {
+                const entries = event.entries.flatMap((entry) => {
+                    const track = sessionTracks.find((candidate) => candidate.id === entry.trackId);
+                    if (!track || track.type !== TrackType.AUDIO) return [];
+
+                    const slotClip = sessionSlotsByTrack[track.id]?.[event.sceneIndex]?.clip || null;
+                    const clip = slotClip?.id === entry.clipId
+                        ? slotClip
+                        : track.clips.find((candidate) => candidate.id === entry.clipId);
+
+                    if (!clip || !clip.buffer) return [];
+                    return [{ track, clip }];
+                });
+
+                queueSceneLaunchBatch(entries, event.replayLaunchAtSec, event.sceneIndex);
+
+                if (index === replayPlan.length - 1) {
+                    const settleTimer = window.setTimeout(() => {
+                        setIsSceneReplayRunning(false);
+                    }, 160);
+                    replayTimersRef.current.push(settleTimer);
+                }
+            }, delayMs);
+
+            replayTimersRef.current.push(timerId);
+        });
+    }, [
+        clearReplayTimers,
+        isSceneReplayRunning,
+        queueSceneLaunchBatch,
+        sessionSlotsByTrack,
+        sessionTracks
+    ]);
+
     const buildSceneTrackClipRefs = useCallback((entries: Array<{ track: Track; clip: Clip }>): SceneTrackClipRef[] => {
         return entries.map(({ track, clip }) => ({
             trackId: track.id,
@@ -677,52 +678,23 @@ const SessionView: React.FC<SessionViewProps> = ({
 
     const handleReplaySceneRecording = useCallback(() => {
         if (sceneRecordingEvents.length === 0 || isSceneReplayRunning) return;
-
-        clearReplayTimers();
         const replayStartLaunchAtSec = computeLaunchAt();
         const replayPlan = buildSceneReplayPlan(sceneRecordingEvents, replayStartLaunchAtSec);
-        if (replayPlan.length === 0) return;
-
-        const now = engineAdapter.getContext().currentTime;
-        setIsSceneReplayRunning(true);
-
-        replayPlan.forEach((event, index) => {
-            const delayMs = Math.max(0, Math.round((event.replayLaunchAtSec - now) * 1000));
-            const timerId = window.setTimeout(() => {
-                const entries = event.entries.flatMap((entry) => {
-                    const track = sessionTracks.find((candidate) => candidate.id === entry.trackId);
-                    if (!track || track.type !== TrackType.AUDIO) return [];
-
-                    const slotClip = sessionSlotsByTrack[track.id]?.[event.sceneIndex]?.clip || null;
-                    const clip = slotClip?.id === entry.clipId
-                        ? slotClip
-                        : track.clips.find((candidate) => candidate.id === entry.clipId);
-
-                    if (!clip || !clip.buffer) return [];
-                    return [{ track, clip }];
-                });
-
-                queueSceneLaunchBatch(entries, event.replayLaunchAtSec, event.sceneIndex);
-
-                if (index === replayPlan.length - 1) {
-                    const settleTimer = window.setTimeout(() => {
-                        setIsSceneReplayRunning(false);
-                    }, 160);
-                    replayTimersRef.current.push(settleTimer);
-                }
-            }, delayMs);
-
-            replayTimersRef.current.push(timerId);
-        });
+        runSceneReplayPlan(replayPlan);
     }, [
-        clearReplayTimers,
         computeLaunchAt,
         isSceneReplayRunning,
-        queueSceneLaunchBatch,
         sceneRecordingEvents,
-        sessionSlotsByTrack,
-        sessionTracks
+        runSceneReplayPlan
     ]);
+
+    const handleReplayLastScene = useCallback(() => {
+        if (sceneRecordingEvents.length === 0 || isSceneReplayRunning) return;
+
+        const latestEvent = sceneRecordingEvents[sceneRecordingEvents.length - 1];
+        const replayPlan = buildSceneReplayPlan([latestEvent], computeLaunchAt());
+        runSceneReplayPlan(replayPlan);
+    }, [computeLaunchAt, isSceneReplayRunning, runSceneReplayPlan, sceneRecordingEvents]);
 
     const stopAllSessionClips = useCallback(() => {
         const launchAt = computeLaunchAt();
@@ -757,46 +729,51 @@ const SessionView: React.FC<SessionViewProps> = ({
         onExternalDrop(trackId, sceneIndex, payload);
     }, [onExternalDrop]);
 
-    const derivedSessionHealthSnapshot = useMemo<SessionHealthSnapshot>(() => {
-        if (sessionHealthSnapshot) {
-            return sessionHealthSnapshot;
+    const usePulseAnimation = overloadDecision.animationLevel === 'full';
+    const showSlotFooter = overloadDecision.mode !== 'critical';
+    const sceneRecordingSummary = useMemo(() => summarizeSceneRecordingEvents(sceneRecordingEvents), [sceneRecordingEvents]);
+    const sceneRecordingIndex = useMemo(() => buildSceneRecordingIndex(sceneRecordingEvents), [sceneRecordingEvents]);
+    const sceneReplaySummary = useMemo(() => {
+        if (sceneRecordingEvents.length === 0) return summarizeSceneReplayPlan([]);
+        return summarizeSceneReplayPlan(buildSceneReplayPlan(sceneRecordingEvents, 0));
+    }, [sceneRecordingEvents]);
+    const stageSafeSummary = useMemo(() => {
+        if (overloadDecision.mode === 'critical') {
+            return {
+                label: 'STAGE SAFE CRITICAL',
+                detail: 'animation minimal + virtualizacion estricta',
+                toneClass: 'border-red-400/35 bg-red-500/10 text-red-200'
+            };
+        }
+
+        if (overloadDecision.mode === 'guarded') {
+            return {
+                label: 'STAGE SAFE GUARDED',
+                detail: 'launch estable + viewport reducido',
+                toneClass: 'border-amber-400/35 bg-amber-500/10 text-amber-200'
+            };
         }
 
         return {
-            capturedAt: Date.now(),
-            profile: 'stage-safe',
-            hasRealtimeAudio: hasRealtimeAudioActivity,
-            cpuAudioP95Percent: Math.max(0, Number(engineStats?.schedulerCpuLoadP95Percent || 0)),
-            dropoutsDelta: recentDropoutDelta,
-            underrunsDelta: recentUnderrunDelta,
-            launchErrorP95Ms: launchTelemetrySummary.p95LaunchErrorMs,
-            uiFpsP95: 60,
-            uiFrameDropRatio: 0,
-            transportDriftP99Ms: 0,
-            monitorLatencyP95Ms: 0
+            label: 'STAGE SAFE READY',
+            detail: 'launch cuantizado + replay listo',
+            toneClass: 'border-emerald-400/35 bg-emerald-500/10 text-emerald-200'
         };
-    }, [
-        engineStats?.schedulerCpuLoadP95Percent,
-        hasRealtimeAudioActivity,
-        launchTelemetrySummary.p95LaunchErrorMs,
-        recentDropoutDelta,
-        recentUnderrunDelta,
-        sessionHealthSnapshot
-    ]);
-
-    const priorityDecision = useMemo(() => (
-        reduceSessionHealth(derivedSessionHealthSnapshot)
-    ), [derivedSessionHealthSnapshot]);
-
-    const usePulseAnimation = overloadDecision.animationLevel === 'full';
-    const showSlotFooter = overloadDecision.mode !== 'critical';
-    const showOverloadBanner = priorityDecision.mode === 'critical' && derivedSessionHealthSnapshot.hasRealtimeAudio;
-    const sceneRecordingSummary = useMemo(() => summarizeSceneRecordingEvents(sceneRecordingEvents), [sceneRecordingEvents]);
+    }, [overloadDecision.mode]);
 
     return (
         <div ref={scrollContainerRef} className="flex-1 bg-[#111218] overflow-x-auto overflow-y-hidden relative p-4">
             <div className="mb-2 min-h-[24px] flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
+                    <div className={`px-2.5 py-1 rounded-sm border text-[9px] uppercase tracking-wider font-bold ${stageSafeSummary.toneClass}`}>
+                        {stageSafeSummary.label}
+                    </div>
+                    <div className="px-2.5 py-1 rounded-sm border border-white/15 bg-[#101420]/88 text-[9px] uppercase tracking-wider font-bold text-gray-200 flex items-center gap-2">
+                        <span>{stageSafeSummary.detail}</span>
+                        <span className="text-gray-500">
+                            {sceneRecordingIndex.uniqueSceneCount} SCN / {sceneRecordingIndex.uniqueTrackCount} TRK
+                        </span>
+                    </div>
                     {launchTelemetrySummary.sampleCount > 0 && (
                         <div className="px-2.5 py-1 rounded-sm border border-white/15 bg-[#101420]/88 text-[9px] uppercase tracking-wider font-bold text-gray-200 flex items-center gap-2">
                             <span>Launch Gate</span>
@@ -808,15 +785,7 @@ const SessionView: React.FC<SessionViewProps> = ({
                         </div>
                     )}
                 </div>
-                <div className="flex items-center gap-2 ml-auto">
-                    {showOverloadBanner && (
-                        <div className="px-2.5 py-1 rounded-sm border border-daw-ruby/45 bg-[#1a1115]/88 text-[9px] uppercase tracking-wider font-bold text-daw-ruby flex items-center gap-2">
-                            <span>Audio Priority</span>
-                            <span className={priorityDecision.mode === 'critical' ? 'text-red-300' : 'text-amber-300'}>{priorityDecision.mode.toUpperCase()}</span>
-                            <span className="text-gray-400">{sessionTracks.length}T x {SCENES}S</span>
-                        </div>
-                    )}
-                </div>
+                <div className="flex items-center gap-2 ml-auto"></div>
             </div>
 
             <div className="flex gap-2 min-h-full">
@@ -868,6 +837,14 @@ const SessionView: React.FC<SessionViewProps> = ({
                             {isSceneReplayRunning ? 'RUN' : 'REPLAY'}
                         </button>
                         <button
+                            onClick={handleReplayLastScene}
+                            disabled={sceneRecordingEvents.length === 0 || isSceneReplayRunning}
+                            className={`h-6 rounded-sm border text-[8px] font-bold tracking-wider ${sceneRecordingEvents.length > 0 && !isSceneReplayRunning ? 'border-sky-400/60 bg-sky-500/12 text-sky-200 hover:bg-sky-500/20' : 'border-white/10 bg-[#161a29] text-gray-500 cursor-not-allowed'}`}
+                            title="Replay Last Recorded Scene"
+                        >
+                            LAST
+                        </button>
+                        <button
                             onClick={clearSceneRecording}
                             disabled={sceneRecordingEvents.length === 0 && !isSceneReplayRunning}
                             className={`h-6 rounded-sm border text-[8px] font-bold tracking-wider ${sceneRecordingEvents.length > 0 || isSceneReplayRunning ? 'border-amber-400/60 bg-amber-500/12 text-amber-200 hover:bg-amber-500/20' : 'border-white/10 bg-[#161a29] text-gray-500 cursor-not-allowed'}`}
@@ -907,10 +884,13 @@ const SessionView: React.FC<SessionViewProps> = ({
                     <div className="text-[8px] text-gray-600 uppercase tracking-wider text-center">
                         {sceneRecordingSummary.uniqueSceneCount} SCN | {sceneRecordingSummary.uniqueTrackCount} TRK | {sceneRecordingSummary.durationSec.toFixed(2)}s
                     </div>
+                    <div className="text-[8px] text-gray-600 uppercase tracking-wider text-center">
+                        Replay {sceneReplaySummary.eventCount} EVT | {sceneReplaySummary.uniqueSceneCount} SCN | {sceneReplaySummary.durationSec.toFixed(2)}s
+                    </div>
 
                     <div className="pt-[6px] flex flex-col gap-2">
                         {Array.from({ length: SCENES }).map((_, index) => (
-                            <div key={`scene-launch-${index}`} className="h-24 flex items-center justify-center">
+                            <div key={`scene-launch-${index}`} className="h-24 flex flex-col items-center justify-center gap-1">
                                 <button
                                     onClick={() => handleSceneLaunch(index)}
                                     className="w-7 h-7 rounded-full bg-[#1e2130] border border-white/10 hover:border-daw-violet/40 hover:bg-daw-violet/15 transition-colors flex items-center justify-center"
@@ -918,6 +898,9 @@ const SessionView: React.FC<SessionViewProps> = ({
                                 >
                                     <Play size={10} className="text-gray-300 ml-[1px]" fill="currentColor" />
                                 </button>
+                                <span className={`text-[8px] font-mono uppercase tracking-wider ${sceneRecordingIndex.perSceneEventCount[index] ? 'text-daw-cyan' : 'text-gray-600'}`}>
+                                    {sceneRecordingIndex.perSceneEventCount[index] ? `${sceneRecordingIndex.perSceneEventCount[index]} rec` : '---'}
+                                </span>
                             </div>
                         ))}
                     </div>

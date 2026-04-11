@@ -1,93 +1,158 @@
 # HOLLOW BITS - QUALITY AND RELEASE GATES
 
-## 1) Engineering Gates (Always Required)
-- Type safety gate: `npm run typecheck`
-- Unit reliability gate: `npm run test:unit`
-- Production build gate: `npm run build`
-- Desktop smoke gate: app launch + import + play + pause + record + export basic path
-- CI workflow gate: `.github/workflows/quality-gates.yml` (blocking on PR)
+## 1) Always-required engineering gates
+- `npm run typecheck`
+- `npm run test:unit`
+- `npm run transport:gate`
+- `npm run build`
+- `npm run quality:live-strict`
+- `npm run release:readiness`
 
-No release candidate if any gate fails.
+No release candidate if any mandatory gate fails.
 
-## 2) Test Strategy
+## 2) Public 1.0 release contract
+- Release target: `2026-09-18`
+- Product type: `Public 1.0`
+- Platforms:
+  - `Windows 11 x64 GA`
+  - `Linux Preview` focused on `Wayland / Hyprland` with `PipeWire / JACK / ALSA`
+- Plugin formats:
+  - `VST3`
+  - `CLAP`
+- Differentiators:
+  - `Live reliability`
+  - `Recording + Recovery`
+
+## 3) Technical release gates
+- Session launch:
+  - `launch error p95 <= 2ms`
+  - source must be `live-capture`
+  - target session must be at least `48 tracks / 8 scenes`
+- Transport:
+  - `drift p99 <= 5ms`
+  - no duplicate playback sessions
+  - no residual audio after `pause / stop / seek`
+  - `transport:gate` in PASS
+  - `transport runtime smoke` in PASS via `benchmarks/transport/latest-runtime.json`
+- Recording:
+  - `1000` cycles
+  - `0` take loss
+  - finalize path survives partial failure
+- Editing:
+  - `block5:gate` in PASS
+  - take/comp/punch regression matrix green
+  - comped project roundtrip survives `save / open / recover`
+- Session flagship:
+  - `block6:gate` in PASS
+  - launch gate must remain `live-capture` with `48x8`
+  - scene replay / recording regression matrix green
+  - stage-safe Session workflow remains operational under the strict live scenario
+- Mixer / routing / automation:
+  - `block7:gate` in PASS
+  - groups / returns / sends pre-post / cue `PFL/AFL` stay stable
+  - routing cycles stay repaired on project open
+  - automation read / touch / latch / write remain outside the React hot path
+- Monitoring:
+  - `monitor latency p95 <= 12ms` at `48k / 128`
+- Live stress:
+  - `90 min` without critical failure
+  - session switching stable
+- Renderer:
+  - `p95 >= 58fps` in the baseline playback scenario
+  - waveform remains visible during playback
+- Audio health:
+  - `audio-priority:gate` must remain green
+  - technical incidents remain audit-ready, but never surface as intrusive UX in normal mode
+  - diagnostics are hidden by default and only exposed through explicit debug visibility
+
+## 4) Test strategy by subsystem
 
 ### Unit tests
-- Transport and timeline math.
-- Loop state machine transitions.
-- BPM/pitch conversion invariants.
-- Project migration and schema validation.
+- Transport state transitions and authority snapshots
+- Recording journal and finalize path
+- Session launch / scene recording logic
+- Project integrity and recovery
+- Performance reducers and runtime gates
+- Release readiness report logic
 
 ### Integration tests
-- Playback command sequence: play/pause/resume/seek/stop.
-- Recording lifecycle: arm/start/stop/finalize clip.
-- Clip edit actions: consolidate/reverse/quantize/split/duplicate.
+- `Play / Pause / Stop / Seek / Loop`
+- `transport command contract`
+- `Record / Stop / Finalize / Recover`
+- `Take / Comp / Punch / Reopen`
+- `Session launch / replay / stress 48x8`
+- `Mixer / routing / automation / cue monitor`
+- `Session replay / replay-last / stage-safe visibility`
+- `Save / Open / Autosave / Recover`
+- `Export master / stems`
 
-### Golden audio regression
-- Fixture projects rendered offline.
-- Compare deterministic metrics:
-  - duration
-  - peak level
-  - rms level
-  - timing alignment
+### Competitive benchmark protocol
+- Measure Ableton Live and Logic Pro by behavior, not implementation:
+  - launch timing
+  - transport correctness
+  - recovery after interruption
+  - plugin isolation expectations
+  - workflow latency for common tasks
 
-## 3) Performance Gates
-- Long-run playback stress (target session) without critical audio failure.
-- UI stress while playback active (edits + scrolling + panel toggles) without transport desync.
-- Export stress with multi-track project in acceptable time budget.
-- Audio reliability matrix gate (SR x Buffer): 40 casos ejecutados desde Audio Setup con reporte PASS/WARN/FAIL y restauracion de settings.
-- Audio scheduler benchmark gate (A/B interval vs worklet clock): escenarios medium/high/extreme con reporte de drift p95/p99, loop p99, event-loop lag p95 y winner por escenario.
-- Performance gate rules (worklet):
-  - fail cases == 0
-  - drift p95 <= 36ms
-  - drift p99 <= 95ms
-  - event-loop lag p95 <= 32ms
-  - scheduler loop p99 <= 34ms
-  - worklet win-rate >= 60% en pares A/B
+## 5) Desktop smoke matrix
 
-## 4) Windows Desktop Compatibility Matrix
-- Windows 11 (target), standard user account, normal audio device stack.
-- Test matrix per release:
-  - cold start
-  - open existing project
-  - import wav/aiff/mp3/flac
-  - playback/loop/pause-resume correctness
-  - recording arm and finalize
-  - save/open roundtrip
-  - export master + stems
+### Windows GA
+- cold start
+- open project
+- import wav / aiff / mp3 / flac
+- play / pause / stop / seek / loop
+- record / finalize
+- save / open roundtrip
+- export master + stems
+- plugin scan / load / fault handling
 
-## 5) Reliability and Recovery Gates
-- Autosave checkpoint created on schedule and key mutations.
-- Crash restore available after abnormal termination.
-- Project integrity check on open (missing assets, schema mismatch).
+### Linux Preview
+- launch on supported distro/windowing stack
+- open project
+- playback and seek
+- audio device detection
+- import / export baseline
+- plugin scan baseline under supported preview matrix
 
-## 6) Security and Hardening Gates
-- No API secrets in renderer bundle.
-- IPC bridge exposes minimum required commands only.
-- Input validation for file operations and project parsing.
+Linux Preview is functional but explicitly narrower than Windows GA.
 
-## 7) Matrix Execution Protocol (SR x Buffer)
-- Abrir: `Configuracion > Audio > Matriz de confiabilidad SR x Buffer`.
-- Ejecutar `Run Matrix` (40 combinaciones).
-- Revisar reporte:
-  - PASS: contexto activo + render no silencioso + timing dentro de tolerancia.
-  - WARN: fallback/mismatch o deriva no critica.
-  - FAIL: contexto no running, graph invalido o render silencioso.
-- Confirmar que la restauracion final del motor no haya fallado.
+## 6) Release readiness report
+- Script:
+  - `npm run release:readiness`
+- Output:
+  - `benchmarks/release-readiness/latest-report.json`
+- Inputs:
+  - `benchmarks/transport/latest-gate.json`
+  - `benchmarks/session-launch/latest-gate.json`
+  - `benchmarks/stress-48x8/latest-report.json`
+  - `benchmarks/recording-reliability/latest-gate.json`
+  - `benchmarks/block5-editing/latest-gate.json`
+  - `benchmarks/block6-session/latest-gate.json`
+  - `benchmarks/block7-mixer/latest-gate.json`
+  - `benchmarks/audio-priority/latest-gate.json`
+  - `docs/data/hollow-bits-1.0-program-status.json`
+- Purpose:
+  - aggregate hard technical gates
+  - expose remaining blocking program blocks
+  - make "Public 1.0 readiness" explicit and auditable
 
-## 8) Release Checklist (Desktop)
-- All gates green.
-- Regression notes reviewed.
-- Known issues triaged by severity.
-- Rollback plan documented.
+## 6.1) Program governance inputs
+- Roadmap source:
+  - `docs/MASTER_ROADMAP_DAW.md`
+- Competitive benchmark source:
+  - `docs/HOLLOW_BITS_1_0_COMPETITIVE_MATRIX.md`
+- Governance source:
+  - `docs/HOLLOW_BITS_1_0_PROGRAM_GOVERNANCE.md`
+- Priority backlog source:
+  - `docs/data/hollow-bits-1.0-priority-backlog.json`
+- Program status source:
+  - `docs/data/hollow-bits-1.0-program-status.json`
 
-## 9) Benchmark Protocol (A/B Scheduler)
-- Abrir: `Configuracion > Audio > Benchmark extremo A/B scheduler`.
-- Ejecutar `Run Benchmark`.
-- Verificar:
-  - `Performance Gate` en PASS (o justificar WARN).
-  - Comparativas A/B por escenario con winner consistente.
-  - Sin `restoreFailed` al finalizar.
-- Exportar JSON del benchmark y adjuntarlo en PR/release notes para trazabilidad.
-- Ruta recomendada para CI: `benchmarks/audio-performance/latest-report.json`.
-- Validar gate localmente: `npm run perf:gate -- --report benchmarks/audio-performance/latest-report.json`.
-- En CI, el workflow `Quality Gates` ejecuta el gate automaticamente cuando detecta ese archivo y publica `latest-gate.json` como artifact.
+## 7) Release checklist
+- all mandatory gates green
+- release readiness report generated
+- no visible technical error banners in normal UX
+- known issues triaged
+- rollback plan documented
+- Windows GA matrix complete
+- Linux Preview matrix and limitations published

@@ -5,7 +5,6 @@ import { PunchRange, TransportState } from '../types';
 import { MidiDevice } from '../services/MidiService';
 import { audioEngine } from '../services/audioEngine';
 import { platformService } from '../services/platformService';
-import { positionToBarTime } from '../services/transportStateService';
 import {
     getTransportClockSnapshot,
     subscribeTransportClock
@@ -193,6 +192,30 @@ const PunchField: React.FC<PunchFieldProps> = ({
     );
 };
 
+const TransportPositionReadout: React.FC<{ fallbackPosition: Pick<TransportState, 'currentBar' | 'currentBeat' | 'currentSixteenth'> }> = React.memo(({
+    fallbackPosition
+}) => {
+    const transportClock = useSyncExternalStore(
+        subscribeTransportClock,
+        getTransportClockSnapshot,
+        getTransportClockSnapshot
+    );
+
+    const currentBar = transportClock.currentBar || fallbackPosition.currentBar;
+    const currentBeat = transportClock.currentBeat || fallbackPosition.currentBeat;
+    const currentSixteenth = transportClock.currentSixteenth || fallbackPosition.currentSixteenth;
+
+    return (
+        <span className="font-mono font-bold text-sm text-daw-violet">
+            {currentBar}
+            <span className="text-gray-600">.</span>
+            {currentBeat}
+            <span className="text-gray-600">.</span>
+            {currentSixteenth}
+        </span>
+    );
+});
+
 // --- MAIN TRANSPORT COMPONENT ---
 
 interface TransportProps {
@@ -235,6 +258,11 @@ const Transport: React.FC<TransportProps> = React.memo(({
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const frequencyDataRef = useRef<Uint8Array | null>(null);
+    const visualizerCanvasMetricsRef = useRef<{ width: number; height: number; dpr: number }>({
+        width: 0,
+        height: 0,
+        dpr: 1
+    });
     const windowActionLockRef = useRef(false);
     const breathResetTimerRef = useRef<number | null>(null);
     const [cpuLoad, setCpuLoad] = useState(0);
@@ -243,12 +271,6 @@ const Transport: React.FC<TransportProps> = React.memo(({
     const [logoBreathing, setLogoBreathing] = useState(false);
     const [showPunchPanel, setShowPunchPanel] = useState(false);
     const punchPanelRef = useRef<HTMLDivElement>(null);
-    const transportClock = useSyncExternalStore(
-        subscribeTransportClock,
-        getTransportClockSnapshot,
-        getTransportClockSnapshot
-    );
-
     const triggerLogoBreath = useCallback((durationMs: number) => {
         setLogoBreathing(true);
         if (breathResetTimerRef.current) {
@@ -260,10 +282,12 @@ const Transport: React.FC<TransportProps> = React.memo(({
         }, durationMs);
     }, []);
 
+    const transportVisualActive = transport.isPlaying || transport.isRecording;
+
     useEffect(() => {
         let lastTime = performance.now();
-        const smoothingFactor = 0.9;
-        const interval = transport.isPlaying ? 120 : 420;
+        const smoothingFactor = 0.92;
+        const interval = transportVisualActive ? 750 : 1400;
 
         const timer = window.setInterval(() => {
             const now = performance.now();
@@ -272,12 +296,15 @@ const Transport: React.FC<TransportProps> = React.memo(({
             const expected = interval;
             const excess = Math.max(0, delta - expected);
             const instantLoad = Math.min(100, (excess / Math.max(1, expected)) * 100);
-            const baseAudioLoad = transport.isPlaying ? (8 + Math.random() * 4.5) : 0.8;
-            setCpuLoad((prev) => (prev * smoothingFactor) + ((instantLoad + baseAudioLoad) * (1 - smoothingFactor)));
+            const baseAudioLoad = transportVisualActive ? 9.5 : 0.4;
+            setCpuLoad((prev) => {
+                const next = (prev * smoothingFactor) + ((instantLoad + baseAudioLoad) * (1 - smoothingFactor));
+                return Math.abs(next - prev) < 0.35 ? prev : next;
+            });
         }, interval);
 
         return () => window.clearInterval(timer);
-    }, [transport.isPlaying]);
+    }, [transportVisualActive]);
 
     useEffect(() => {
         let animationFrame: number;
@@ -288,17 +315,26 @@ const Transport: React.FC<TransportProps> = React.memo(({
         const ctx = canvas.getContext('2d', { alpha: false });
         if (!ctx) return;
 
-        const render = (time: number) => {
-            const targetFps = transport.isPlaying ? 60 : 16;
-            const minFrameDelta = 1000 / targetFps;
-            if (time - lastFrameTime < minFrameDelta) {
-                animationFrame = requestAnimationFrame(render);
-                return;
-            }
-            lastFrameTime = time;
+        const ensureCanvasResolution = () => {
+            const cssWidth = Math.max(1, Math.round(canvas.clientWidth || 1));
+            const cssHeight = Math.max(1, Math.round(canvas.clientHeight || 1));
+            const dpr = typeof window !== 'undefined' ? Math.max(1, Math.min(2, window.devicePixelRatio || 1)) : 1;
+            const nextWidth = Math.max(1, Math.round(cssWidth * dpr));
+            const nextHeight = Math.max(1, Math.round(cssHeight * dpr));
+            const metrics = visualizerCanvasMetricsRef.current;
 
-            const width = canvas.width;
-            const height = canvas.height;
+            if (metrics.width !== nextWidth || metrics.height !== nextHeight || metrics.dpr !== dpr) {
+                canvas.width = nextWidth;
+                canvas.height = nextHeight;
+                visualizerCanvasMetricsRef.current = { width: nextWidth, height: nextHeight, dpr };
+            }
+
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            return { width: cssWidth, height: cssHeight };
+        };
+
+        const drawFrame = (active: boolean) => {
+            const { width, height } = ensureCanvasResolution();
             const data = audioEngine.getFrequencyDataInto(frequencyDataRef.current || undefined);
             if (frequencyDataRef.current !== data) {
                 frequencyDataRef.current = data;
@@ -307,7 +343,6 @@ const Transport: React.FC<TransportProps> = React.memo(({
             ctx.fillStyle = '#0a0a0a';
             ctx.fillRect(0, 0, width, height);
 
-            // Grid lines
             ctx.fillStyle = 'rgba(168, 85, 247, 0.03)';
             for (let i = 0; i < width; i += 4) ctx.fillRect(i, 0, 1, height);
 
@@ -319,36 +354,62 @@ const Transport: React.FC<TransportProps> = React.memo(({
             ctx.fillStyle = gradient;
 
             ctx.beginPath();
-            const visibleBins = transport.isPlaying ? data.length * 0.5 : data.length * 0.35;
+            const visibleBins = Math.max(1, Math.floor(active ? data.length * 0.72 : data.length * 0.36));
             const sliceWidth = width * 1.0 / Math.max(1, visibleBins);
             let x = 0;
             ctx.moveTo(0, height);
             for (let i = 0; i < visibleBins; i++) {
                 const raw = data[i] ?? 0;
-                const intensity = transport.isPlaying ? raw : raw * 0.52;
+                const intensity = active ? raw : raw * 0.24;
                 const y = height - ((intensity / 255.0) * height);
                 ctx.lineTo(x, y);
                 x += sliceWidth;
             }
             ctx.lineTo(width, height); ctx.lineTo(0, height); ctx.fill();
+
+            ctx.strokeStyle = active ? 'rgba(244, 63, 94, 0.88)' : 'rgba(168, 85, 247, 0.68)';
+            ctx.lineWidth = active ? 1.15 : 0.9;
+            ctx.beginPath();
+            x = 0;
+            for (let i = 0; i < visibleBins; i++) {
+                const raw = data[i] ?? 0;
+                const intensity = active ? raw : raw * 0.24;
+                const y = height - ((intensity / 255.0) * height);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+                x += sliceWidth;
+            }
+            ctx.stroke();
+        };
+
+        const render = (time: number) => {
+            const targetFps = transportVisualActive ? 45 : 12;
+            const minFrameDelta = 1000 / targetFps;
+            if (time - lastFrameTime < minFrameDelta) {
+                animationFrame = requestAnimationFrame(render);
+                return;
+            }
+            lastFrameTime = time;
+            drawFrame(transportVisualActive);
             animationFrame = requestAnimationFrame(render);
         };
 
+        drawFrame(transportVisualActive);
         animationFrame = requestAnimationFrame(render);
         return () => cancelAnimationFrame(animationFrame);
-    }, [transport.isPlaying]);
+    }, [transportVisualActive]);
 
     const handleGlobalReset = () => { setBpm(124); setMasterTranspose(0); };
     const buttonClass = "w-9 h-7 flex items-center justify-center rounded-[2px] border border-transparent transition-all";
     const inactiveClass = "bg-[#2d2d2d] text-gray-400 hover:bg-[#3d3d3d] hover:text-gray-200";
     const engineIsPlaying = audioEngine.getIsPlaying();
     const hasResumeOffset = audioEngine.getCurrentTime() > 0.0001;
-    const transportDisplayPosition = {
-        currentBar: transportClock.currentBar || transport.currentBar,
-        currentBeat: transportClock.currentBeat || transport.currentBeat,
-        currentSixteenth: transportClock.currentSixteenth || transport.currentSixteenth
+    const fallbackPosition = {
+        currentBar: transport.currentBar,
+        currentBeat: transport.currentBeat,
+        currentSixteenth: transport.currentSixteenth
     };
-    const isPaused = !transport.isPlaying && !engineIsPlaying && (positionToBarTime(transportDisplayPosition) > 1.0001 || hasResumeOffset);
+    const isPaused = !transport.isPlaying && !engineIsPlaying && hasResumeOffset;
     const isLoopEnabled = transport.loopMode !== 'off';
     const loopBadge = transport.loopMode === 'once' ? '1' : transport.loopMode === 'infinite' ? '∞' : '';
     const loopTitle = transport.loopMode === 'off'
@@ -466,10 +527,8 @@ const Transport: React.FC<TransportProps> = React.memo(({
 
     useEffect(() => {
         if (!transport.isPlaying) return;
-        if (transportDisplayPosition.currentBeat !== 1 || transportDisplayPosition.currentSixteenth !== 1) return;
-
-        triggerLogoBreath(1040);
-    }, [transport.isPlaying, transportDisplayPosition.currentBar, transportDisplayPosition.currentBeat, transportDisplayPosition.currentSixteenth, triggerLogoBreath]);
+        triggerLogoBreath(760);
+    }, [transport.isPlaying, triggerLogoBreath]);
 
     useEffect(() => () => {
         if (breathResetTimerRef.current) {
@@ -587,13 +646,7 @@ const Transport: React.FC<TransportProps> = React.memo(({
                     <div className="flex flex-col relative group">
                         <span className="absolute -top-2 left-1 text-[8px] font-bold text-gray-500 bg-daw-bg px-1 z-10">POSICIÓN</span>
                         <div className="h-8 px-3 bg-[#1a1a1a] border border-daw-border rounded-[2px] flex items-center justify-center min-w-[80px]">
-                            <span className="font-mono font-bold text-sm text-daw-violet">
-                                {transportDisplayPosition.currentBar}
-                                <span className="text-gray-600">.</span>
-                                {transportDisplayPosition.currentBeat}
-                                <span className="text-gray-600">.</span>
-                                {transportDisplayPosition.currentSixteenth}
-                            </span>
+                            <TransportPositionReadout fallbackPosition={fallbackPosition} />
                         </div>
                     </div>
                 </div>
@@ -628,7 +681,7 @@ const Transport: React.FC<TransportProps> = React.memo(({
                     <button
                         onClick={onPause}
                         className={`${buttonClass} ${isPaused ? 'bg-yellow-600 text-white shadow-[0_0_10px_rgba(202,138,4,0.5)]' : inactiveClass}`}
-                        title={isPaused ? "Reanudar" : "Pausar"}
+                        title="Pausar"
                     >
                         <Pause size={12} fill="currentColor" />
                     </button>

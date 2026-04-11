@@ -15,7 +15,7 @@ export const FluidPanel: React.FC<FluidPanelProps> = ({
     children,
     className = "",
     direction = 'left',
-    delayUnmount = 360,
+    delayUnmount = 260,
     keepMounted = false
 }) => {
     const [isRendered, setIsRendered] = useState(isOpen || keepMounted);
@@ -41,16 +41,16 @@ export const FluidPanel: React.FC<FluidPanelProps> = ({
     if (!isRendered) return null;
 
     // Base Transition Classes
-    const baseTransition = "transition-[transform,opacity,filter] duration-[420ms] ease-[cubic-bezier(0.22,0.84,0.26,1)] will-change-transform";
+    const baseTransition = "transition-[transform,opacity,filter] duration-[260ms] ease-[cubic-bezier(0.2,0.9,0.2,1)] will-change-transform";
 
     // Transform Logic based on Direction
     const getTransformClass = () => {
         if (!isVisible) {
             switch (direction) {
-                case 'left': return '-translate-x-6 opacity-0 blur-[1px] scale-[0.985]';
-                case 'right': return 'translate-x-6 opacity-0 blur-[1px] scale-[0.985]';
-                case 'up': return 'translate-y-5 opacity-0 blur-[1px] scale-[0.985]';
-                case 'fade': return 'opacity-0 scale-[0.985] blur-[1px]';
+                case 'left': return '-translate-x-3 opacity-0 blur-[1px] scale-[0.99]';
+                case 'right': return 'translate-x-3 opacity-0 blur-[1px] scale-[0.99]';
+                case 'up': return 'translate-y-3 opacity-0 blur-[1px] scale-[0.99]';
+                case 'fade': return 'opacity-0 scale-[0.99] blur-[1px]';
             }
         }
         return 'translate-x-0 translate-y-0 opacity-100 blur-none scale-100';

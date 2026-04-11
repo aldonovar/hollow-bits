@@ -7,7 +7,7 @@ import Mixer from './components/Mixer';
 import Editor, { type EditorTransportView } from './components/Editor';
 import Browser from './components/Browser';
 import TakeLanesPanel from './components/TakeLanesPanel';
-import type { ApplyScanPayload } from './components/NoteScannerPanel';
+import type { PianoScoreMidiCommitPayload } from './components/PianoScoreWorkspace';
 import AppLogo from './components/AppLogo';
 import SessionView from './components/SessionView';
 import Modal from './components/Modal';
@@ -15,7 +15,7 @@ import { FluidPanel } from './components/FluidPanel';
 import AsciiPerformerDock from './components/AsciiPerformerDock';
 import CollabPanel, { CollabActivityEntry } from './components/CollabPanel';
 import { INITIAL_TRACKS, getTrackColorByPosition } from './constants';
-import { LoopMode, Note, SessionHealthSnapshot, StudioPerformanceProfile, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry, PunchRange } from './types';
+import { LoopMode, Note, SessionHealthSnapshot, StudioPerformanceProfile, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry, PunchRange, TransportAuthoritySnapshot, MonitoringRouteMode, RecordingCommitResult, RecordingJournalEntry, AutomationRuntimeFrame, AudioIncidentWindow, DiagnosticsVisibilityMode, VisualPerformanceSnapshot, AudioClipEditorViewState, ScoreWorkspaceState } from './types';
 import { engineAdapter, type EngineDiagnostics } from './services/engineAdapter';
 import { midiService, MidiDevice } from './services/MidiService';
 import { platformService } from './services/platformService';
@@ -30,7 +30,6 @@ import {
     AUTOMATION_TARGETS,
     denormalizeTrackParam,
     getLaneByParam,
-    getTrackParamValue,
     normalizeTrackParam,
     sampleAutomationLaneAtBar,
     writeAutomationPoint
@@ -50,6 +49,26 @@ import {
     stopRecoverySession
 } from './services/projectRecoveryService';
 import {
+    type ProjectIntegrityReport,
+    repairProjectData,
+    summarizeProjectIntegrityReport
+} from './services/projectIntegrityService';
+import {
+    appendRecordingJournalPhase,
+    createRecordingJournalEntry,
+    getRecordingJournalAttentionEntries,
+    loadRecordingJournalEntries,
+    loadRecordingJournalRecoveryAcknowledgedAt,
+    markRecordingJournalCommitted,
+    markRecordingJournalFailed,
+    pruneRecordingJournalEntries,
+    recoverRecordingJournalEntries,
+    saveRecordingJournalRecoveryAcknowledgedAt,
+    saveRecordingJournalEntries,
+    summarizeRecordingJournalAttentionEntries,
+    summarizeRecordingJournalEntries
+} from './services/recordingJournalService';
+import {
     barTimeToPosition,
     barToSeconds,
     getLoopEndAction,
@@ -62,19 +81,28 @@ import {
     commitRecordingTakeBatch
 } from './services/recordingTakeService';
 import {
+    assessSessionOverload,
+    assessVisualPerformance,
     buildAudioPriorityStabilityReport,
     createAudioPriorityController,
-    type GlobalAudioPriorityDecision
+    type SessionOverloadDecision,
+    type GlobalAudioPriorityDecision,
+    type VisualPerformanceDecision
 } from './services/sessionPerformanceService';
+import {
+    loadDiagnosticsVisibilityMode,
+    saveDiagnosticsVisibilityMode,
+    toggleDiagnosticsVisibilityMode
+} from './services/diagnosticsVisibilityService';
 import {
     createArtifactEnvelope,
     runLiveCaptureHarness
 } from './services/liveCaptureHarnessService';
 import {
-    applyCompClipEdits,
-    isCompDerivedClipId,
+    applyTrackClipEdits,
     normalizePunchRange,
     promoteTakeToComp,
+    resolveTrackClipEditingContext,
     resolvePunchRecordingPlan,
     shouldFinalizePunchRecording,
     splitTakeForClip,
@@ -99,13 +127,30 @@ import {
 } from './services/transportClockStore';
 
 const AISidebar = React.lazy(() => import('./components/AISidebar'));
-const NoteScannerPanel = React.lazy(() => import('./components/NoteScannerPanel'));
+const PianoScoreWorkspace = React.lazy(() => import('./components/PianoScoreWorkspace'));
 const ExportModal = React.lazy(() => import('./components/ExportModal'));
 
 const TRACK_COLOR_GRADIENT_TARGET = 48;
 const PERFORMANCE_PROFILE: StudioPerformanceProfile = 'stage-safe';
 const SESSION_LAUNCH_LATEST_REPORT_STORAGE_KEY = 'hollowbits.session-launch.latest-report.v1';
 const AUDIO_PRIORITY_TRANSITIONS_STORAGE_KEY = 'hollowbits.audio-priority.transitions.v1';
+const AUDIO_INCIDENT_RESET_COOLDOWN_MS = 3000;
+const VISUAL_PERFORMANCE_WARMUP_MS = 1000;
+const VISUAL_PERFORMANCE_WINDOW_MS = 5000;
+const createAudioIncidentWindow = (
+    dropoutCount = 0,
+    underrunCount = 0,
+    active = false,
+    now = Date.now()
+): AudioIncidentWindow => ({
+    active,
+    windowStartedAt: now,
+    baselineDropoutCount: Math.max(0, Math.floor(dropoutCount)),
+    baselineUnderrunCount: Math.max(0, Math.floor(underrunCount)),
+    lastCounterChangeAt: null,
+    dropoutsDeltaWindow: 0,
+    underrunsDeltaWindow: 0
+});
 
 // --- ATOMIC COMPONENTS (Extracted for Performance) ---
 
@@ -196,6 +241,8 @@ interface MixSnapshot {
 }
 
 interface RecordingSessionMeta {
+    journalId: string;
+    monitorMode: MonitoringRouteMode;
     recordingStartBar: number;
     latencyCompensationBars: number;
     sourceTrimOffsetBars?: number;
@@ -285,6 +332,7 @@ const App: React.FC = () => {
 
     const [selectedTrackId, setSelectedTrackId] = useState<string | null>(INITIAL_TRACKS[0]?.id || null);
     const [selectedClipId, setSelectedClipId] = useState<string | null>(INITIAL_TRACKS[0]?.clips[0]?.id || null);
+    const [scoreWorkspaces, setScoreWorkspaces] = useState<ScoreWorkspaceState[]>([]);
     const [midiDevices, setMidiDevices] = useState<MidiDevice[]>([]);
 
     // Views
@@ -307,15 +355,68 @@ const App: React.FC = () => {
     // Menus & Modals
     const [showFileMenu, setShowFileMenu] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
-    const [activeModal, setActiveModal] = useState<'settings' | 'help' | 'collab' | 'new-project-confirm' | 'recovery' | null>(null);
+    const [activeModal, setActiveModal] = useState<'settings' | 'help' | 'collab' | 'new-project-confirm' | 'recovery' | 'recording-recovery' | 'monitoring-routes' | null>(null);
     const [showExportModal, setShowExportModal] = useState(false);
     const [recoverySnapshot, setRecoverySnapshot] = useState<ProjectAutosaveSnapshot | null>(null);
     const [lastAutosaveAt, setLastAutosaveAt] = useState<number | null>(null);
     const [lastAutosaveReason, setLastAutosaveReason] = useState<string>('initial-snapshot');
+    const [projectIntegrityReport, setProjectIntegrityReport] = useState<ProjectIntegrityReport | null>(null);
+    const [recordingJournalEntries, setRecordingJournalEntries] = useState<RecordingJournalEntry[]>(() => loadRecordingJournalEntries());
+    const [recordingRecoveryAcknowledgedAt, setRecordingRecoveryAcknowledgedAt] = useState<number>(() => loadRecordingJournalRecoveryAcknowledgedAt());
 
     const showBrowser = activeToolPanel === 'browser';
     const showAI = activeToolPanel === 'ai';
     const showNoteScanner = activeToolPanel === 'scanner';
+    const recordingJournalSummary = useMemo(
+        () => summarizeRecordingJournalEntries(recordingJournalEntries),
+        [recordingJournalEntries]
+    );
+    const recordingRecoveryAttentionEntries = useMemo(
+        () => getRecordingJournalAttentionEntries(recordingJournalEntries, recordingRecoveryAcknowledgedAt),
+        [recordingJournalEntries, recordingRecoveryAcknowledgedAt]
+    );
+    const recordingRecoveryAttentionSummary = useMemo(
+        () => summarizeRecordingJournalAttentionEntries(recordingJournalEntries, recordingRecoveryAcknowledgedAt),
+        [recordingJournalEntries, recordingRecoveryAcknowledgedAt]
+    );
+
+    const rememberProjectIntegrityReport = useCallback((report: ProjectIntegrityReport | null) => {
+        setProjectIntegrityReport((previous) => {
+            if (!previous && !report) return previous;
+            if (!previous || !report) return report;
+            const sameSummary =
+                previous.source === report.source
+                && previous.issueCount === report.issueCount
+                && previous.errorCount === report.errorCount
+                && previous.warningCount === report.warningCount
+                && previous.repaired === report.repaired;
+
+            return sameSummary ? previous : report;
+        });
+    }, []);
+
+    useEffect(() => {
+        recordingJournalEntriesRef.current = recordingJournalEntries;
+        saveRecordingJournalEntries(recordingJournalEntries);
+    }, [recordingJournalEntries]);
+    useEffect(() => {
+        saveRecordingJournalRecoveryAcknowledgedAt(recordingRecoveryAcknowledgedAt);
+    }, [recordingRecoveryAcknowledgedAt]);
+
+    const updateRecordingJournal = useCallback((
+        updater: (entries: RecordingJournalEntry[]) => RecordingJournalEntry[]
+    ) => {
+        setRecordingJournalEntries((previous) => {
+            const next = pruneRecordingJournalEntries(updater(previous));
+            recordingJournalEntriesRef.current = next;
+            return next;
+        });
+    }, []);
+    const acknowledgeRecordingRecoveryNotice = useCallback(() => {
+        const nextAcknowledgedAt = recordingRecoveryAttentionSummary.latestUpdatedAt ?? Date.now();
+        setRecordingRecoveryAcknowledgedAt(nextAcknowledgedAt);
+        setActiveModal((current) => current === 'recording-recovery' ? null : current);
+    }, [recordingRecoveryAttentionSummary.latestUpdatedAt]);
 
     useEffect(() => {
         if (showAI) {
@@ -364,10 +465,17 @@ const App: React.FC = () => {
     const [uiFrameTelemetry, setUiFrameTelemetry] = useState<{
         fpsP95: number;
         frameDropRatio: number;
+        worstBurstMs: number;
+        sampleWindowMs: number;
+        hasActiveViewportInteraction: boolean;
     }>({
         fpsP95: 60,
-        frameDropRatio: 0
+        frameDropRatio: 0,
+        worstBurstMs: 16.67,
+        sampleWindowMs: 0,
+        hasActiveViewportInteraction: false
     });
+    const uiFrameTelemetryRef = useRef(uiFrameTelemetry);
     const [sessionLaunchP95Ms, setSessionLaunchP95Ms] = useState(0);
     const [sessionHealthSnapshot, setSessionHealthSnapshot] = useState<SessionHealthSnapshot>(() => (
         engineAdapter.getSessionHealthSnapshot({
@@ -384,12 +492,37 @@ const App: React.FC = () => {
         disableHeavyVisuals: false,
         simplifyMeters: false,
         showBanner: false,
-        reasons: ['initial']
+        reasons: ['initial'],
+        reasonCode: 'steady'
     });
-    const engineOverloadBaselineRef = useRef<{
-        dropoutCount: number;
-        underrunCount: number;
-    } | null>(null);
+    const [audioIncidentWindow, setAudioIncidentWindow] = useState<AudioIncidentWindow>(() => createAudioIncidentWindow());
+    const [diagnosticsVisibilityMode, setDiagnosticsVisibilityMode] = useState<DiagnosticsVisibilityMode>(() => (
+        loadDiagnosticsVisibilityMode()
+    ));
+    const visualInteractionRef = useRef({ lastAt: 0 });
+    const visualTelemetryWarmupUntilRef = useRef(performance.now() + VISUAL_PERFORMANCE_WARMUP_MS);
+
+    useEffect(() => {
+        saveDiagnosticsVisibilityMode(diagnosticsVisibilityMode);
+    }, [diagnosticsVisibilityMode]);
+
+    useEffect(() => {
+        uiFrameTelemetryRef.current = uiFrameTelemetry;
+    }, [uiFrameTelemetry]);
+
+    useEffect(() => {
+        const handleDiagnosticsShortcut = (event: KeyboardEvent) => {
+            if (!event.ctrlKey || !event.altKey || event.code !== 'KeyD') {
+                return;
+            }
+
+            event.preventDefault();
+            setDiagnosticsVisibilityMode((previous) => toggleDiagnosticsVisibilityMode(previous));
+        };
+
+        window.addEventListener('keydown', handleDiagnosticsShortcut);
+        return () => window.removeEventListener('keydown', handleDiagnosticsShortcut);
+    }, []);
 
     // Refs
     const fileMenuRef = useRef<HTMLDivElement>(null);
@@ -411,6 +544,7 @@ const App: React.FC = () => {
         lastAudibleAt: Date.now(),
         recovering: false
     });
+    const recordingJournalEntriesRef = useRef<RecordingJournalEntry[]>(recordingJournalEntries);
     const latestTracksRef = useRef<Track[]>(tracks);
     const trackSyncQueuedRef = useRef(false);
     const trackSyncFrameRef = useRef<number | null>(null);
@@ -424,7 +558,7 @@ const App: React.FC = () => {
         criticalEscalationStreak: 1,
         deescalationStreak: 4,
         idleDeescalationStreak: 2,
-        deescalationCooldownMs: 10000,
+        deescalationCooldownMs: AUDIO_INCIDENT_RESET_COOLDOWN_MS,
         maxTransitionsPer20sIdle: 1
     }));
 
@@ -432,6 +566,15 @@ const App: React.FC = () => {
     const isPlayingRef = useRef(false);
     const transportCommandTokenRef = useRef(0);
     const pauseResumeArmedRef = useRef(false);
+
+    const resetAudioIncidentWindow = useCallback((active: boolean, at = Date.now()) => {
+        setAudioIncidentWindow(createAudioIncidentWindow(
+            Math.max(0, Number(engineStats.schedulerDropoutCount || 0)),
+            Math.max(0, Number(engineStats.schedulerUnderrunCount || 0)),
+            active,
+            at
+        ));
+    }, [engineStats.schedulerDropoutCount, engineStats.schedulerUnderrunCount]);
 
     const [transport, setTransport] = useState<TransportState>({
         isPlaying: false,
@@ -544,38 +687,7 @@ const App: React.FC = () => {
     const updateClipById = useCallback((trackId: string, clipId: string, updates: Partial<Clip>, options?: TrackMutationOptions) => {
         applyTrackMutation((prevTracks) => prevTracks.map((track) => {
             if (track.id !== trackId) return track;
-
-            if (isCompDerivedClipId(clipId)) {
-                return applyCompClipEdits(track, clipId, updates);
-            }
-
-            let clipChanged = false;
-            const nextClips = track.clips.map((clip) => {
-                if (clip.id !== clipId) return clip;
-                clipChanged = true;
-                return { ...clip, ...updates };
-            });
-
-            let sessionClipChanged = false;
-            const nextSessionClips = track.sessionClips.map((slot) => {
-                if (!slot.clip || slot.clip.id !== clipId) return slot;
-                sessionClipChanged = true;
-                return {
-                    ...slot,
-                    clip: { ...slot.clip, ...updates }
-                };
-            });
-
-            if (!clipChanged && !sessionClipChanged) {
-                return track;
-            }
-
-            const updatedTrack = {
-                ...track,
-                clips: nextClips,
-                sessionClips: nextSessionClips
-            };
-            return syncTakeMetadataForClip(updatedTrack, clipId);
+            return applyTrackClipEdits(track, clipId, updates);
         }), options);
     }, [applyTrackMutation]);
 
@@ -654,35 +766,66 @@ const App: React.FC = () => {
     }, [audioSettings.bufferSize, audioSettings.latencyHint, engineStats.activeSampleRate]);
 
     useEffect(() => {
-        if (engineOverloadBaselineRef.current) return;
-        engineOverloadBaselineRef.current = {
-            dropoutCount: Math.max(0, Number(engineStats.schedulerDropoutCount || 0)),
-            underrunCount: Math.max(0, Number(engineStats.schedulerUnderrunCount || 0))
+        const markVisualInteraction = () => {
+            visualInteractionRef.current.lastAt = performance.now();
         };
-    }, [engineStats.schedulerDropoutCount, engineStats.schedulerUnderrunCount]);
+
+        const timelineElement = timelineContainerRef.current;
+        window.addEventListener('wheel', markVisualInteraction, { passive: true });
+        window.addEventListener('pointerdown', markVisualInteraction, { passive: true });
+        window.addEventListener('keydown', markVisualInteraction);
+        timelineElement?.addEventListener('scroll', markVisualInteraction, { passive: true });
+
+        return () => {
+            window.removeEventListener('wheel', markVisualInteraction);
+            window.removeEventListener('pointerdown', markVisualInteraction);
+            window.removeEventListener('keydown', markVisualInteraction);
+            timelineElement?.removeEventListener('scroll', markVisualInteraction);
+        };
+    }, []);
+
+    useEffect(() => {
+        visualTelemetryWarmupUntilRef.current = performance.now() + VISUAL_PERFORMANCE_WARMUP_MS;
+    }, [transport.isPlaying, transport.isRecording]);
 
     useEffect(() => {
         let rafId = 0;
         let lastFrame = performance.now();
-        let sampleFrames = 0;
-        let droppedFrames = 0;
-        const frameIntervalsMs: number[] = [];
-        let sampleWindowStart = performance.now();
+        let lastCommit = lastFrame;
         let active = true;
+        const frameSamples: Array<{ at: number; delta: number }> = [];
 
-        const commitTelemetry = (fpsP95: number, frameDropRatio: number) => {
+        const commitTelemetry = (
+            fpsP95: number,
+            frameDropRatio: number,
+            worstBurstMs: number,
+            sampleWindowMs: number,
+            hasActiveViewportInteraction: boolean
+        ) => {
             setUiFrameTelemetry((prev) => {
                 if (
                     Math.abs(prev.fpsP95 - fpsP95) < 0.5
                     && Math.abs(prev.frameDropRatio - frameDropRatio) < 0.005
+                    && Math.abs(prev.worstBurstMs - worstBurstMs) < 1
+                    && Math.abs(prev.sampleWindowMs - sampleWindowMs) < 100
+                    && prev.hasActiveViewportInteraction === hasActiveViewportInteraction
                 ) {
                     return prev;
                 }
                 return {
                     fpsP95,
-                    frameDropRatio
+                    frameDropRatio,
+                    worstBurstMs,
+                    sampleWindowMs,
+                    hasActiveViewportInteraction
                 };
             });
+        };
+
+        const pruneSamples = (now: number) => {
+            while (frameSamples.length > 0 && (now - frameSamples[0].at) > VISUAL_PERFORMANCE_WINDOW_MS) {
+                frameSamples.shift();
+            }
         };
 
         const tick = (timestamp: number) => {
@@ -691,29 +834,34 @@ const App: React.FC = () => {
             const delta = Math.max(0, timestamp - lastFrame);
             lastFrame = timestamp;
 
-            if (delta > 0) {
-                frameIntervalsMs.push(delta);
-                if (frameIntervalsMs.length > 320) {
-                    frameIntervalsMs.shift();
-                }
-                sampleFrames += 1;
-                if (delta > 24) {
-                    droppedFrames += 1;
-                }
+            const hasPlaybackActivity = transport.isPlaying || transport.isRecording;
+            const hasActiveViewportInteraction = (timestamp - visualInteractionRef.current.lastAt) <= 900;
+            const shouldSample = hasPlaybackActivity || hasActiveViewportInteraction;
+
+            if (shouldSample && timestamp >= visualTelemetryWarmupUntilRef.current && delta > 0) {
+                frameSamples.push({ at: timestamp, delta });
+                pruneSamples(timestamp);
+            } else if (!shouldSample) {
+                frameSamples.length = 0;
             }
 
-            const elapsed = timestamp - sampleWindowStart;
-            if (elapsed >= 1600) {
-                const sorted = [...frameIntervalsMs].sort((left, right) => left - right);
-                const p95Index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * 0.95)));
-                const p95Delta = sorted.length > 0 ? sorted[p95Index] : 16.6667;
-                const fpsP95 = Math.max(1, 1000 / Math.max(1, p95Delta));
-                const frameDropRatio = sampleFrames > 0 ? droppedFrames / sampleFrames : 0;
-                commitTelemetry(fpsP95, frameDropRatio);
-                sampleWindowStart = timestamp;
-                sampleFrames = 0;
-                droppedFrames = 0;
-                frameIntervalsMs.length = 0;
+            if ((timestamp - lastCommit) >= 500) {
+                pruneSamples(timestamp);
+                lastCommit = timestamp;
+
+                if (frameSamples.length === 0) {
+                    commitTelemetry(60, 0, 16.67, 0, hasActiveViewportInteraction);
+                } else {
+                    const deltas = frameSamples.map((sample) => sample.delta).sort((left, right) => left - right);
+                    const p95Index = Math.min(deltas.length - 1, Math.max(0, Math.round((deltas.length - 1) * 0.95)));
+                    const p95Delta = deltas[p95Index] || 16.6667;
+                    const fpsP95 = Math.max(1, 1000 / Math.max(1, p95Delta));
+                    const dropThreshold = 22;
+                    const frameDropRatio = frameSamples.filter((sample) => sample.delta > dropThreshold).length / Math.max(1, frameSamples.length);
+                    const worstBurstMs = frameSamples.reduce((max, sample) => Math.max(max, sample.delta), 0);
+                    const sampleWindowMs = Math.max(0, timestamp - frameSamples[0].at);
+                    commitTelemetry(fpsP95, frameDropRatio, worstBurstMs, sampleWindowMs, hasActiveViewportInteraction);
+                }
             }
 
             rafId = requestAnimationFrame(tick);
@@ -724,7 +872,7 @@ const App: React.FC = () => {
             active = false;
             if (rafId) cancelAnimationFrame(rafId);
         };
-    }, []);
+    }, [transport.isPlaying, transport.isRecording]);
 
     useEffect(() => {
         const readLaunchP95FromStorage = () => {
@@ -802,6 +950,20 @@ const App: React.FC = () => {
                                 'running',
                                 progress as unknown as Record<string, unknown>
                             );
+                        },
+                        getVisualPerformanceSnapshot: (): VisualPerformanceSnapshot => {
+                            const telemetry = uiFrameTelemetryRef.current;
+                            return {
+                                capturedAt: Date.now(),
+                                uiFpsP95: telemetry.fpsP95,
+                                frameDropRatio: telemetry.frameDropRatio,
+                                worstBurstMs: telemetry.worstBurstMs,
+                                sampleWindowMs: telemetry.sampleWindowMs,
+                                hasActiveViewportInteraction: telemetry.hasActiveViewportInteraction,
+                                hasPlaybackActivity:
+                                    engineAdapter.getIsPlaying()
+                                    || engineAdapter.getActiveRecordingTrackIds().length > 0
+                            };
                         }
                     });
 
@@ -812,10 +974,48 @@ const App: React.FC = () => {
                     };
                     const stressGate = (result.stressReport.gates as { pass?: boolean }) || {};
                     const transitionsPayload = result.audioPriorityTransitionsReport as {
-                        stability?: { pass?: boolean; maxTransitionsInWindow?: number };
+                        stability?: { pass?: boolean; passes?: boolean; maxTransitionsInWindow?: number };
                     };
                     const transitionsStability = transitionsPayload.stability || {};
+                    const audioPriorityGatePass = Boolean(
+                        transitionsStability.passes ?? transitionsStability.pass
+                    );
+                    const recordingReliabilitySummary = (result.recordingReliabilityReport.summary as {
+                        gatePass?: boolean;
+                        attemptedCycles?: number;
+                        committedCycles?: number;
+                        takeLossCount?: number;
+                    }) || {};
+                    const monitoringRuntimeSummary = (result.monitoringRuntimeReport.summary as {
+                        pass?: boolean;
+                        activeRouteCount?: number;
+                        enabledRouteCount?: number;
+                        monitorLatencyP95Ms?: number;
+                        maxEffectiveMonitorLatencyMs?: number;
+                    }) || {};
+                    const transportRuntimeSummary = (result.transportRuntimeReport.summary as {
+                        pass?: boolean;
+                        checkpointCount?: number;
+                        failedCheckpointCount?: number;
+                        dropoutsDelta?: number;
+                        underrunsDelta?: number;
+                    }) || {};
 
+                    await benchmarkApi.publishBenchmarkArtifact?.(
+                        'transport-runtime',
+                        createArtifactEnvelope(
+                            'transport-runtime',
+                            result.config,
+                            {
+                                gatePass: Boolean(transportRuntimeSummary.pass),
+                                checkpointCount: Number(transportRuntimeSummary.checkpointCount || 0),
+                                failedCheckpointCount: Number(transportRuntimeSummary.failedCheckpointCount || 0),
+                                dropoutsDelta: Number(transportRuntimeSummary.dropoutsDelta || 0),
+                                underrunsDelta: Number(transportRuntimeSummary.underrunsDelta || 0)
+                            },
+                            result.transportRuntimeReport as Record<string, unknown>
+                        )
+                    );
                     await benchmarkApi.publishBenchmarkArtifact?.(
                         'session-launch',
                         createArtifactEnvelope(
@@ -833,7 +1033,10 @@ const App: React.FC = () => {
                             {
                                 gatePass: Boolean(stressGate.pass),
                                 durationMinutes: result.config.durationMinutes,
-                                recordingCycles: result.config.recordingCycles
+                                recordingCycles: result.config.recordingCycles,
+                                visualFpsP95: Number(
+                                    ((result.stressReport.telemetry as { ui?: { fpsP95?: number } })?.ui?.fpsP95 || 0)
+                                )
                             },
                             result.stressReport
                         )
@@ -844,18 +1047,53 @@ const App: React.FC = () => {
                             'audio-priority-transitions',
                             result.config,
                             {
-                                gatePass: Boolean(transitionsStability.pass),
+                                gatePass: audioPriorityGatePass,
                                 maxTransitionsInWindow: Number(transitionsStability.maxTransitionsInWindow || 0)
                             },
                             result.audioPriorityTransitionsReport as Record<string, unknown>
                         )
                     );
+                    await benchmarkApi.publishBenchmarkArtifact?.(
+                        'recording-reliability',
+                        createArtifactEnvelope(
+                            'recording-reliability',
+                            result.config,
+                            {
+                                gatePass: Boolean(recordingReliabilitySummary.gatePass),
+                                attemptedCycles: Number(recordingReliabilitySummary.attemptedCycles || 0),
+                                committedCycles: Number(recordingReliabilitySummary.committedCycles || 0),
+                                takeLossCount: Number(recordingReliabilitySummary.takeLossCount || 0)
+                            },
+                            result.recordingReliabilityReport as Record<string, unknown>
+                        )
+                    );
+                    await benchmarkApi.publishBenchmarkArtifact?.(
+                        'monitoring-runtime',
+                        createArtifactEnvelope(
+                            'monitoring-runtime',
+                            result.config,
+                            {
+                                gatePass: Boolean(monitoringRuntimeSummary.pass),
+                                activeRouteCount: Number(monitoringRuntimeSummary.activeRouteCount || 0),
+                                enabledRouteCount: Number(monitoringRuntimeSummary.enabledRouteCount || 0),
+                                monitorLatencyP95Ms: Number(monitoringRuntimeSummary.monitorLatencyP95Ms || 0),
+                                maxEffectiveMonitorLatencyMs: Number(monitoringRuntimeSummary.maxEffectiveMonitorLatencyMs || 0)
+                            },
+                            result.monitoringRuntimeReport as Record<string, unknown>
+                        )
+                    );
 
                     await benchmarkApi.publishBenchmarkStatus?.('success', {
+                        transportRuntimePass: Boolean(transportRuntimeSummary.pass),
                         launchP95Ms: launchSummary.p95LaunchErrorMs,
                         launchSamples: launchSummary.sampleCount,
                         stressPass: Boolean(stressGate.pass),
-                        audioPriorityPass: Boolean(transitionsStability.pass)
+                        visualFpsP95: Number(
+                            ((result.stressReport.telemetry as { ui?: { fpsP95?: number } })?.ui?.fpsP95 || 0)
+                        ),
+                        audioPriorityPass: audioPriorityGatePass,
+                        recordingReliabilityPass: Boolean(recordingReliabilitySummary.gatePass),
+                        monitoringRuntimePass: Boolean(monitoringRuntimeSummary.pass)
                     });
                 } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
@@ -1036,7 +1274,8 @@ const App: React.FC = () => {
 
         const checkLoopAndEnd = () => {
             if (transport.isPlaying) {
-                const currentProjectTime = engineAdapter.getCurrentTime();
+                const transportSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+                const currentProjectTime = transportSnapshot.currentTimeSec;
 
                 // Check for Loop / End of Song
                 const endBar = getProjectEndBar();
@@ -1048,6 +1287,14 @@ const App: React.FC = () => {
                         if (loopAction.action === 'restart') {
                             loopOnceRemainingRef.current = loopAction.nextOnceRemaining;
                             engineAdapter.seek(0, tracks, transport.bpm);
+                            const restartSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+                            setTransportClockSnapshot({
+                                currentBar: 1,
+                                currentBeat: 1,
+                                currentSixteenth: 1,
+                                isPlaying: true,
+                                updatedAt: restartSnapshot.capturedAt
+                            });
                             setTransport((prev: TransportState) => ({
                                 ...prev,
                                 currentBar: 1,
@@ -1060,6 +1307,14 @@ const App: React.FC = () => {
 
                         loopOnceRemainingRef.current = loopAction.nextOnceRemaining;
                         engineAdapter.stop(true);
+                        const stopSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+                        setTransportClockSnapshot({
+                            currentBar: 1,
+                            currentBeat: 1,
+                            currentSixteenth: 1,
+                            isPlaying: false,
+                            updatedAt: stopSnapshot.capturedAt
+                        });
                         isPlayingRef.current = false;
                         pauseResumeArmedRef.current = false;
                         setTransport((prev: TransportState) => ({
@@ -1125,6 +1380,58 @@ const App: React.FC = () => {
         engineAdapter.setMasterPitch(transport.masterTranspose);
     }, [transport.masterTranspose]);
 
+    const publishTransportClockFromAuthority = useCallback((
+        snapshot: TransportAuthoritySnapshot,
+        overrides?: Partial<Pick<TransportState, 'currentBar' | 'currentBeat' | 'currentSixteenth' | 'isPlaying'>>
+    ) => {
+        setTransportClockSnapshot({
+            currentBar: overrides?.currentBar ?? snapshot.currentBar,
+            currentBeat: overrides?.currentBeat ?? snapshot.currentBeat,
+            currentSixteenth: overrides?.currentSixteenth ?? snapshot.currentSixteenth,
+            isPlaying: overrides?.isPlaying ?? snapshot.isPlaying,
+            updatedAt: snapshot.capturedAt
+        });
+    }, []);
+
+    const syncTransportStateFromAuthority = useCallback((
+        snapshot: TransportAuthoritySnapshot,
+        overrides?: Partial<Pick<TransportState, 'currentBar' | 'currentBeat' | 'currentSixteenth' | 'isPlaying' | 'isRecording' | 'loopMode'>> & {
+            commitPositionToState?: boolean;
+        }
+    ) => {
+        const nextBar = overrides?.currentBar ?? snapshot.currentBar;
+        const nextBeat = overrides?.currentBeat ?? snapshot.currentBeat;
+        const nextSixteenth = overrides?.currentSixteenth ?? snapshot.currentSixteenth;
+        const nextIsPlaying = overrides?.isPlaying ?? snapshot.isPlaying;
+        const shouldCommitPositionToState = overrides?.commitPositionToState ?? (
+            !nextIsPlaying
+            || typeof overrides?.currentBar === 'number'
+            || typeof overrides?.currentBeat === 'number'
+            || typeof overrides?.currentSixteenth === 'number'
+        );
+
+        publishTransportClockFromAuthority(snapshot, {
+            currentBar: nextBar,
+            currentBeat: nextBeat,
+            currentSixteenth: nextSixteenth,
+            isPlaying: nextIsPlaying
+        });
+
+        setTransport((prev: TransportState) => ({
+            ...prev,
+            ...(shouldCommitPositionToState
+                ? {
+                    currentBar: nextBar,
+                    currentBeat: nextBeat,
+                    currentSixteenth: nextSixteenth
+                }
+                : {}),
+            isPlaying: nextIsPlaying,
+            ...(typeof overrides?.isRecording === 'boolean' ? { isRecording: overrides.isRecording } : {}),
+            ...(overrides?.loopMode ? { loopMode: overrides.loopMode } : {})
+        }));
+    }, [publishTransportClockFromAuthority]);
+
     const beginTransportCommand = useCallback((): number => {
         transportCommandTokenRef.current += 1;
         return transportCommandTokenRef.current;
@@ -1133,6 +1440,48 @@ const App: React.FC = () => {
     const isTransportCommandCurrent = useCallback((token: number): boolean => {
         return transportCommandTokenRef.current === token;
     }, []);
+
+    useEffect(() => {
+        const shouldSyncFromEngine = (
+            transport.isPlaying
+            || transport.isRecording
+            || isPlayingRef.current
+            || engineAdapter.getIsPlaying()
+            || engineAdapter.getActiveRecordingTrackIds().length > 0
+        );
+
+        if (!shouldSyncFromEngine) {
+            return;
+        }
+
+        let animationFrame = 0;
+        let lastFrameTime = 0;
+
+        const syncClock = (timestamp: number) => {
+            const shouldRunRealtime = transport.isPlaying || transport.isRecording || engineAdapter.getActiveRecordingTrackIds().length > 0;
+            const minFrameDelta = shouldRunRealtime ? (1000 / 60) : (1000 / 12);
+            if ((timestamp - lastFrameTime) < minFrameDelta) {
+                animationFrame = requestAnimationFrame(syncClock);
+                return;
+            }
+            lastFrameTime = timestamp;
+            const authoritySnapshot = engineAdapter.getTransportAuthoritySnapshot();
+            publishTransportClockFromAuthority(authoritySnapshot);
+
+            const keepRunning = (
+                authoritySnapshot.isPlaying
+                || transport.isRecording
+                || engineAdapter.getActiveRecordingTrackIds().length > 0
+            );
+
+            if (keepRunning) {
+                animationFrame = requestAnimationFrame(syncClock);
+            }
+        };
+
+        animationFrame = requestAnimationFrame(syncClock);
+        return () => cancelAnimationFrame(animationFrame);
+    }, [publishTransportClockFromAuthority, transport.isPlaying, transport.isRecording]);
 
     const getTransportCursorBar = useCallback(() => {
         return positionToBarTime(getTransportClockSnapshot());
@@ -1187,32 +1536,186 @@ const App: React.FC = () => {
             return false;
         }
 
-        setTransport((prev: TransportState) => ({
-            ...prev,
+        const authoritySnapshot = engineAdapter.getTransportAuthoritySnapshot();
+        syncTransportStateFromAuthority(authoritySnapshot, {
             isPlaying: true,
             currentBar: playbackStartPosition.currentBar,
             currentBeat: playbackStartPosition.currentBeat,
             currentSixteenth: playbackStartPosition.currentSixteenth
-        }));
+        });
 
         return true;
-    }, [getProjectEndBar, getTransportCursorBar, isTransportCommandCurrent, transport.bpm, transport.loopMode]);
+    }, [getProjectEndBar, getTransportCursorBar, isTransportCommandCurrent, syncTransportStateFromAuthority, transport.bpm, transport.loopMode]);
 
 
     // --- TRANSPORT HANDLERS ---
 
     const handlePlay = useCallback(async () => {
-        if (isPlayingRef.current || engineAdapter.getIsPlaying()) {
+        const authoritySnapshot = engineAdapter.getTransportAuthoritySnapshot();
+        if (isPlayingRef.current || engineAdapter.getIsPlaying() || authoritySnapshot.isPlaying) {
             pauseResumeArmedRef.current = false;
+            syncTransportStateFromAuthority(authoritySnapshot, {
+                isPlaying: true
+            });
             return;
         }
         const commandToken = beginTransportCommand();
+        resetAudioIncidentWindow(true);
+        visualTelemetryWarmupUntilRef.current = performance.now() + VISUAL_PERFORMANCE_WARMUP_MS;
         await playFromTransportCursor(commandToken);
-    }, [beginTransportCommand, playFromTransportCursor]);
+    }, [beginTransportCommand, playFromTransportCursor, resetAudioIncidentWindow, syncTransportStateFromAuthority]);
 
     const hasActiveRecordingSessions = useCallback((): boolean => {
         return transport.isRecording || engineAdapter.getActiveRecordingTrackIds().length > 0;
     }, [transport.isRecording]);
+
+    const appendRecordingJournalForTrack = useCallback((
+        journalId: string | undefined,
+        phase: Parameters<typeof appendRecordingJournalPhase>[2],
+        options?: Parameters<typeof appendRecordingJournalPhase>[3]
+    ) => {
+        if (!journalId) return;
+        updateRecordingJournal((entries) => appendRecordingJournalPhase(entries, journalId, phase, options));
+    }, [updateRecordingJournal]);
+
+    const failRecordingJournalForTrack = useCallback((
+        journalId: string | undefined,
+        message: string,
+        options?: { at?: number; barTime?: number; contextTimeSec?: number; details?: Record<string, string | number | boolean | null> }
+    ) => {
+        if (!journalId) return;
+        updateRecordingJournal((entries) => markRecordingJournalFailed(entries, journalId, message, options));
+    }, [updateRecordingJournal]);
+
+    const commitRecordingJournalForTrack = useCallback((result: RecordingCommitResult) => {
+        updateRecordingJournal((entries) => markRecordingJournalCommitted(entries, result));
+    }, [updateRecordingJournal]);
+
+    const clearRecordingRuntimeForTracks = useCallback((trackIds: Iterable<string>) => {
+        const targetTrackIds = new Set(trackIds);
+        if (targetTrackIds.size === 0) return;
+
+        applyTrackMutation((prevTracks) => {
+            let changed = false;
+            const nextTracks = prevTracks.map((track) => {
+                if (!targetTrackIds.has(track.id) || track.type !== TrackType.AUDIO) {
+                    return track;
+                }
+
+                const nextMicSettings = {
+                    profile: track.micSettings?.profile || 'studio-voice',
+                    inputGain: typeof track.micSettings?.inputGain === 'number' ? track.micSettings.inputGain : 1,
+                    monitoringEnabled: false,
+                    monitoringReverb: false,
+                    monitoringEcho: false,
+                    monitorInputMode: track.micSettings?.monitorInputMode || 'mono',
+                    monitorLatencyCompensationMs: typeof track.micSettings?.monitorLatencyCompensationMs === 'number'
+                        ? track.micSettings.monitorLatencyCompensationMs
+                        : 0
+                };
+
+                const needsUpdate =
+                    track.isArmed
+                    || track.monitor !== 'auto'
+                    || (track.micSettings?.monitoringEnabled ?? false)
+                    || (track.micSettings?.monitoringReverb ?? false)
+                    || (track.micSettings?.monitoringEcho ?? false);
+
+                if (!needsUpdate) {
+                    return track;
+                }
+
+                changed = true;
+                return {
+                    ...track,
+                    isArmed: false,
+                    monitor: 'auto' as const,
+                    micSettings: nextMicSettings
+                };
+            });
+
+            return changed ? nextTracks : prevTracks;
+        }, { recolor: false });
+    }, [applyTrackMutation]);
+    const disableTrackMonitoring = useCallback((trackId: string) => {
+        engineAdapter.stopTrackMonitoring(trackId);
+        applyTrackMutation((prevTracks) => {
+            let changed = false;
+            const nextTracks = prevTracks.map((track) => {
+                if (track.id !== trackId || track.type !== TrackType.AUDIO) {
+                    return track;
+                }
+
+                const nextMicSettings = {
+                    profile: track.micSettings?.profile || 'studio-voice',
+                    inputGain: track.micSettings?.inputGain ?? 1,
+                    monitoringEnabled: false,
+                    monitoringReverb: false,
+                    monitoringEcho: false,
+                    monitorInputMode: track.micSettings?.monitorInputMode || 'mono',
+                    monitorLatencyCompensationMs: typeof track.micSettings?.monitorLatencyCompensationMs === 'number'
+                        ? track.micSettings.monitorLatencyCompensationMs
+                        : 0
+                };
+
+                if (!track.micSettings?.monitoringEnabled && track.monitor === 'off') {
+                    return track;
+                }
+
+                changed = true;
+                return {
+                    ...track,
+                    monitor: 'off' as const,
+                    micSettings: nextMicSettings
+                };
+            });
+
+            return changed ? nextTracks : prevTracks;
+        }, { recolor: false });
+    }, [applyTrackMutation]);
+    const disableAllMonitoring = useCallback(() => {
+        const activeRoutes = engineAdapter.getMonitoringRouteSnapshots().filter((route) => route.active || route.monitoringEnabled);
+        if (activeRoutes.length === 0) return;
+
+        activeRoutes.forEach((route) => {
+            engineAdapter.stopTrackMonitoring(route.trackId);
+        });
+
+        const activeTrackIds = new Set(activeRoutes.map((route) => route.trackId));
+        applyTrackMutation((prevTracks) => {
+            let changed = false;
+            const nextTracks = prevTracks.map((track) => {
+                if (!activeTrackIds.has(track.id) || track.type !== TrackType.AUDIO) {
+                    return track;
+                }
+
+                const nextMicSettings = {
+                    profile: track.micSettings?.profile || 'studio-voice',
+                    inputGain: track.micSettings?.inputGain ?? 1,
+                    monitoringEnabled: false,
+                    monitoringReverb: false,
+                    monitoringEcho: false,
+                    monitorInputMode: track.micSettings?.monitorInputMode || 'mono',
+                    monitorLatencyCompensationMs: typeof track.micSettings?.monitorLatencyCompensationMs === 'number'
+                        ? track.micSettings.monitorLatencyCompensationMs
+                        : 0
+                };
+
+                if (!track.micSettings?.monitoringEnabled && track.monitor === 'off') {
+                    return track;
+                }
+
+                changed = true;
+                return {
+                    ...track,
+                    monitor: 'off' as const,
+                    micSettings: nextMicSettings
+                };
+            });
+
+            return changed ? nextTracks : prevTracks;
+        }, { recolor: false });
+    }, [applyTrackMutation]);
 
     const finalizeActiveRecordings = useCallback(async () => {
         if (finalizeRecordingsPromiseRef.current) {
@@ -1222,29 +1725,97 @@ const App: React.FC = () => {
 
         const finalizeTask = (async () => {
             const activeRecordingTrackIds = engineAdapter.getActiveRecordingTrackIds();
-            if (activeRecordingTrackIds.length === 0) {
+            const pendingFinalizeTrackIds = engineAdapter.getPendingFinalizeTrackIds();
+            const trackIdsToFinalize = Array.from(new Set([
+                ...activeRecordingTrackIds,
+                ...pendingFinalizeTrackIds,
+                ...recordingSessionMetaRef.current.keys()
+            ]));
+            if (trackIdsToFinalize.length === 0) {
                 recordingSessionMetaRef.current.clear();
                 setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
                 return;
             }
 
             const trackById = new Map(latestTracksRef.current.map((track) => [track.id, track]));
-            const recordingCommits: ReturnType<typeof buildRecordingTakeCommit>[] = [];
+            const recordingCommitPayloads: Array<{
+                commit: ReturnType<typeof buildRecordingTakeCommit>;
+                journalId: string;
+                sourceId: string;
+                latencyCompensationBars: number;
+                monitorMode: MonitoringRouteMode;
+            }> = [];
             const finalizeErrors: string[] = [];
             const secondsPerBar = getSecondsPerBar(transport.bpm);
 
             for (const trackId of activeRecordingTrackIds) {
+                const sessionMeta = recordingSessionMetaRef.current.get(trackId);
+                const stopSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+                appendRecordingJournalForTrack(sessionMeta?.journalId, 'stop-requested', {
+                    at: Date.now(),
+                    barTime: stopSnapshot.currentBarTime,
+                    contextTimeSec: stopSnapshot.currentTimeSec
+                });
+                engineAdapter.stopTrackMonitoring(trackId);
+                const stopResult = await engineAdapter.stopRecording(trackId);
+
+                if (!stopResult) {
+                    failRecordingJournalForTrack(
+                        sessionMeta?.journalId,
+                        `stop-null:${trackId}`,
+                        {
+                            at: Date.now(),
+                            barTime: stopSnapshot.currentBarTime,
+                            contextTimeSec: stopSnapshot.currentTimeSec
+                        }
+                    );
+                    finalizeErrors.push(`No se pudo detener la grabacion en ${trackId}.`);
+                    continue;
+                }
+
+                appendRecordingJournalForTrack(sessionMeta?.journalId, 'stopped', {
+                    at: Date.now(),
+                    barTime: Math.max(1, 1 + (stopResult.stoppedAtContextTime / secondsPerBar)),
+                    contextTimeSec: stopResult.stoppedAtContextTime,
+                    details: {
+                        estimatedLatencyMs: Number(stopResult.estimatedLatencyMs.toFixed(3))
+                    }
+                });
+            }
+
+            for (const trackId of trackIdsToFinalize) {
                 const track = trackById.get(trackId);
                 const sessionMeta = recordingSessionMetaRef.current.get(trackId);
                 const result = await engineAdapter.finalizeRecording(trackId);
                 recordingSessionMetaRef.current.delete(trackId);
 
                 if (!result) {
+                    failRecordingJournalForTrack(
+                        sessionMeta?.journalId,
+                        `finalize-null:${trackId}`,
+                        {
+                            at: Date.now()
+                        }
+                    );
                     finalizeErrors.push(`No se obtuvo audio final para track ${trackId}.`);
                     continue;
                 }
 
+                appendRecordingJournalForTrack(sessionMeta?.journalId, 'finalized', {
+                    at: Date.now(),
+                    barTime: Math.max(1, 1 + (result.stoppedAtContextTime / secondsPerBar)),
+                    contextTimeSec: result.stoppedAtContextTime,
+                    details: {
+                        estimatedLatencyMs: Number(result.estimatedLatencyMs.toFixed(3))
+                    }
+                });
+
                 if (!track) {
+                    failRecordingJournalForTrack(
+                        sessionMeta?.journalId,
+                        `missing-track:${trackId}`,
+                        { at: Date.now() }
+                    );
                     finalizeErrors.push(`La pista ${trackId} ya no existe; se descarta la toma finalizada.`);
                     continue;
                 }
@@ -1253,71 +1824,57 @@ const App: React.FC = () => {
                     const hash = await assetDb.saveFile(result.blob);
                     const fallbackStartBar = Math.max(1, 1 + (result.startedAtContextTime / secondsPerBar));
                     const fallbackCompensationBars = Math.max(0, (result.estimatedLatencyMs / 1000) / secondsPerBar);
-
-                    recordingCommits.push(buildRecordingTakeCommit({
+                    const latencyCompensationBars = sessionMeta?.latencyCompensationBars ?? fallbackCompensationBars;
+                    const monitorMode = sessionMeta?.monitorMode ?? (track.micSettings?.monitorInputMode || 'mono');
+                    const commit = buildRecordingTakeCommit({
                         track,
                         sourceId: hash,
                         buffer: result.buffer,
                         bpm: transport.bpm,
                         recordingStartBar: sessionMeta?.recordingStartBar ?? fallbackStartBar,
-                        latencyCompensationBars: sessionMeta?.latencyCompensationBars ?? fallbackCompensationBars,
+                        latencyCompensationBars,
                         sourceTrimOffsetBars: sessionMeta?.sourceTrimOffsetBars ?? 0,
                         recordedAt: Date.now(),
                         idFactory: buildRuntimeId
-                    }));
+                    });
+
+                    recordingCommitPayloads.push({
+                        commit,
+                        journalId: sessionMeta?.journalId || '',
+                        sourceId: hash,
+                        latencyCompensationBars,
+                        monitorMode
+                    });
                 } catch (error) {
                     console.error(`No se pudo persistir la toma grabada en ${track.name}.`, error);
+                    failRecordingJournalForTrack(
+                        sessionMeta?.journalId,
+                        `persist-failed:${track.name}`,
+                        { at: Date.now() }
+                    );
                     finalizeErrors.push(`Fallo al persistir toma en ${track.name}.`);
                 }
             }
 
+            const recordingCommits = recordingCommitPayloads.map((payload) => payload.commit);
             if (recordingCommits.length > 0) {
                 applyTrackMutation((prevTracks) => commitRecordingTakeBatch(prevTracks, recordingCommits), { recolor: false });
+                recordingCommitPayloads.forEach((payload) => {
+                    if (!payload.journalId) return;
+                    commitRecordingJournalForTrack({
+                        journalId: payload.journalId,
+                        trackId: payload.commit.trackId,
+                        clipId: payload.commit.clip.id,
+                        takeId: payload.commit.take.id,
+                        sourceId: payload.sourceId,
+                        committedAt: Date.now(),
+                        latencyCompensationBars: payload.latencyCompensationBars,
+                        monitorMode: payload.monitorMode
+                    });
+                });
             }
 
-            // Always stop monitor loopback and disarm tracks that were recording.
-            const finalizedTrackIds = new Set(activeRecordingTrackIds);
-            applyTrackMutation((prevTracks) => {
-                let changed = false;
-                const nextTracks = prevTracks.map((track) => {
-                    if (!finalizedTrackIds.has(track.id) || track.type !== TrackType.AUDIO) {
-                        return track;
-                    }
-
-                    const nextMicSettings = {
-                        profile: track.micSettings?.profile || 'studio-voice',
-                        inputGain: typeof track.micSettings?.inputGain === 'number' ? track.micSettings.inputGain : 1,
-                        monitoringEnabled: false,
-                        monitoringReverb: false,
-                        monitoringEcho: false,
-                        monitorInputMode: track.micSettings?.monitorInputMode || 'mono',
-                        monitorLatencyCompensationMs: typeof track.micSettings?.monitorLatencyCompensationMs === 'number'
-                            ? track.micSettings.monitorLatencyCompensationMs
-                            : 0
-                    };
-
-                    const needsUpdate =
-                        track.isArmed
-                        || track.monitor !== 'auto'
-                        || (track.micSettings?.monitoringEnabled ?? false)
-                        || (track.micSettings?.monitoringReverb ?? false)
-                        || (track.micSettings?.monitoringEcho ?? false);
-
-                    if (!needsUpdate) {
-                        return track;
-                    }
-
-                    changed = true;
-                    return {
-                        ...track,
-                        isArmed: false,
-                        monitor: 'auto' as const,
-                        micSettings: nextMicSettings
-                    };
-                });
-
-                return changed ? nextTracks : prevTracks;
-            }, { recolor: false });
+            clearRecordingRuntimeForTracks(trackIdsToFinalize);
 
             if (finalizeErrors.length > 0) {
                 console.warn('[Recording] Finalize completed with issues:', finalizeErrors);
@@ -1334,7 +1891,7 @@ const App: React.FC = () => {
                 finalizeRecordingsPromiseRef.current = null;
             }
         }
-    }, [applyTrackMutation, transport.bpm]);
+    }, [appendRecordingJournalForTrack, applyTrackMutation, clearRecordingRuntimeForTracks, commitRecordingJournalForTrack, failRecordingJournalForTrack, transport.bpm]);
 
     useEffect(() => {
         finalizeActiveRecordingsRef.current = finalizeActiveRecordings;
@@ -1357,45 +1914,31 @@ const App: React.FC = () => {
                 return;
             }
 
-            const pauseTime = Math.max(0, engineAdapter.getCurrentTime());
-            const pauseBarTime = Math.max(1, 1 + (pauseTime / getSecondsPerBar(transport.bpm)));
-            const pausePosition = barTimeToPosition(pauseBarTime);
             engineAdapter.pause();
-            setTransport((prev: TransportState) => ({
-                ...prev,
+            const pauseSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+            syncTransportStateFromAuthority(pauseSnapshot, {
                 isPlaying: false,
-                isRecording: false,
-                currentBar: pausePosition.currentBar,
-                currentBeat: pausePosition.currentBeat,
-                currentSixteenth: pausePosition.currentSixteenth
-            }));
+                isRecording: false
+            });
             isPlayingRef.current = false;
             pauseResumeArmedRef.current = true;
+            resetAudioIncidentWindow(false);
             return;
         }
 
-        const canResumeFromPause = pauseResumeArmedRef.current && engineAdapter.getCurrentTime() > 0.0001;
-        if (canResumeFromPause) {
-            await playFromTransportCursor(commandToken);
+        const idleSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+        if (!isTransportCommandCurrent(commandToken)) {
             return;
         }
 
-        const fallbackPauseTime = Math.max(0, engineAdapter.getCurrentTime());
-        const fallbackPauseBarTime = Math.max(1, 1 + (fallbackPauseTime / getSecondsPerBar(transport.bpm)));
-        const fallbackPausePosition = barTimeToPosition(fallbackPauseBarTime);
-
-        engineAdapter.pause();
         isPlayingRef.current = false;
-        pauseResumeArmedRef.current = fallbackPauseTime > 0.0001;
-        setTransport((prev: TransportState) => ({
-            ...prev,
+        pauseResumeArmedRef.current = idleSnapshot.currentTimeSec > 0.0001;
+        resetAudioIncidentWindow(false);
+        syncTransportStateFromAuthority(idleSnapshot, {
             isPlaying: false,
-            isRecording: false,
-            currentBar: fallbackPausePosition.currentBar,
-            currentBeat: fallbackPausePosition.currentBeat,
-            currentSixteenth: fallbackPausePosition.currentSixteenth
-        }));
-    }, [beginTransportCommand, transport.isPlaying, transport.bpm, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent, playFromTransportCursor]);
+            isRecording: false
+        });
+    }, [beginTransportCommand, transport.isPlaying, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent, resetAudioIncidentWindow, syncTransportStateFromAuthority]);
 
     const handleStop = useCallback(async () => {
         const commandToken = beginTransportCommand();
@@ -1409,21 +1952,23 @@ const App: React.FC = () => {
         }
 
         engineAdapter.stop(true); // True resets offset to 0
+        const stopSnapshot = engineAdapter.getTransportAuthoritySnapshot();
         loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
-        setTransport((prev: TransportState) => ({
-            ...prev,
+        syncTransportStateFromAuthority(stopSnapshot, {
             isPlaying: false,
             isRecording: false,
             currentBar: 1,
             currentBeat: 1,
             currentSixteenth: 1
-        }));
+        });
         isPlayingRef.current = false;
         pauseResumeArmedRef.current = false;
-    }, [beginTransportCommand, transport.loopMode, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent]);
+        resetAudioIncidentWindow(false);
+    }, [beginTransportCommand, transport.loopMode, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent, resetAudioIncidentWindow, syncTransportStateFromAuthority]);
 
     const handleSkipStart = useCallback(async () => {
         const commandToken = beginTransportCommand();
+        const isTransportRunning = isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying;
 
         if (hasActiveRecordingSessions()) {
             await finalizeActiveRecordings();
@@ -1433,18 +1978,40 @@ const App: React.FC = () => {
             return;
         }
 
-        engineAdapter.seek(0, latestTracksRef.current, transport.bpm);
-        const engineIsPlaying = engineAdapter.getIsPlaying() || isPlayingRef.current;
+        visualTelemetryWarmupUntilRef.current = performance.now() + VISUAL_PERFORMANCE_WARMUP_MS;
         loopOnceRemainingRef.current = transport.loopMode === 'once' ? 1 : 0;
-        setTransport((prev: TransportState) => ({
-            ...prev,
-            isPlaying: engineIsPlaying,
+
+        if (isTransportRunning) {
+            // Rewind while playing must fully clear the active session so a following
+            // Play creates exactly one fresh playback instance.
+            engineAdapter.stop(true);
+            const stopSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+            isPlayingRef.current = false;
+            pauseResumeArmedRef.current = false;
+            syncTransportStateFromAuthority(stopSnapshot, {
+                isPlaying: false,
+                isRecording: false,
+                currentBar: 1,
+                currentBeat: 1,
+                currentSixteenth: 1
+            });
+            resetAudioIncidentWindow(false);
+            return;
+        }
+
+        engineAdapter.seek(0, latestTracksRef.current, transport.bpm);
+        const seekSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+        isPlayingRef.current = false;
+        pauseResumeArmedRef.current = false;
+        syncTransportStateFromAuthority(seekSnapshot, {
+            isPlaying: false,
             isRecording: false,
             currentBar: 1,
             currentBeat: 1,
             currentSixteenth: 1
-        }));
-    }, [beginTransportCommand, transport.bpm, transport.loopMode, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent]);
+        });
+        resetAudioIncidentWindow(false);
+    }, [beginTransportCommand, transport.bpm, transport.isPlaying, transport.loopMode, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent, resetAudioIncidentWindow, syncTransportStateFromAuthority]);
 
     const handleSkipEnd = useCallback(async () => {
         const commandToken = beginTransportCommand();
@@ -1460,7 +2027,6 @@ const App: React.FC = () => {
 
         const targetBarTime = Math.max(1, endBar);
         const targetTime = barToSeconds(targetBarTime, transport.bpm);
-        const targetPosition = barTimeToPosition(targetBarTime);
 
         if (isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying) {
             engineAdapter.pause();
@@ -1472,20 +2038,19 @@ const App: React.FC = () => {
             return;
         }
 
+        visualTelemetryWarmupUntilRef.current = performance.now() + VISUAL_PERFORMANCE_WARMUP_MS;
         engineAdapter.seek(targetTime, latestTracksRef.current, transport.bpm);
         if (transport.loopMode === 'once') {
             loopOnceRemainingRef.current = 0;
         }
 
-        setTransport((prev: TransportState) => ({
-            ...prev,
+        const endSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+        syncTransportStateFromAuthority(endSnapshot, {
             isPlaying: false,
-            isRecording: false,
-            currentBar: targetPosition.currentBar,
-            currentBeat: targetPosition.currentBeat,
-            currentSixteenth: targetPosition.currentSixteenth
-        }));
-    }, [beginTransportCommand, transport.bpm, getProjectEndBar, transport.loopMode, transport.isPlaying, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent]);
+            isRecording: false
+        });
+        resetAudioIncidentWindow(false);
+    }, [beginTransportCommand, transport.bpm, getProjectEndBar, transport.loopMode, transport.isPlaying, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent, resetAudioIncidentWindow, syncTransportStateFromAuthority]);
 
     const handleSeekToBar = useCallback(async (bar: number) => {
         const commandToken = beginTransportCommand();
@@ -1499,23 +2064,42 @@ const App: React.FC = () => {
             return;
         }
 
+        visualTelemetryWarmupUntilRef.current = performance.now() + VISUAL_PERFORMANCE_WARMUP_MS;
         engineAdapter.seek(barToSeconds(safeBar, transport.bpm), latestTracksRef.current, transport.bpm);
-        const engineIsPlaying = engineAdapter.getIsPlaying() || isPlayingRef.current;
+        const seekSnapshot = engineAdapter.getTransportAuthoritySnapshot();
 
         if (safeBar <= 1.0001 && transport.loopMode === 'once') {
             loopOnceRemainingRef.current = 1;
         }
 
-        const position = barTimeToPosition(safeBar);
-        setTransport((prev: TransportState) => ({
-            ...prev,
-            isPlaying: engineIsPlaying,
-            isRecording: false,
-            currentBar: position.currentBar,
-            currentBeat: position.currentBeat,
-            currentSixteenth: position.currentSixteenth
-        }));
-    }, [beginTransportCommand, finalizeActiveRecordings, hasActiveRecordingSessions, transport.bpm, transport.loopMode, isTransportCommandCurrent]);
+        syncTransportStateFromAuthority(seekSnapshot, {
+            isPlaying: seekSnapshot.isPlaying || isPlayingRef.current,
+            isRecording: false
+        });
+        resetAudioIncidentWindow(seekSnapshot.isPlaying || isPlayingRef.current);
+    }, [beginTransportCommand, finalizeActiveRecordings, hasActiveRecordingSessions, transport.bpm, transport.loopMode, isTransportCommandCurrent, resetAudioIncidentWindow, syncTransportStateFromAuthority]);
+
+    const handleSeekToBarTime = useCallback(async (barTime: number) => {
+        const commandToken = beginTransportCommand();
+        const safeBarTime = Math.max(1, Number.isFinite(barTime) ? barTime : 1);
+
+        if (hasActiveRecordingSessions()) {
+            await finalizeActiveRecordings();
+        }
+
+        if (!isTransportCommandCurrent(commandToken)) {
+            return;
+        }
+
+        visualTelemetryWarmupUntilRef.current = performance.now() + VISUAL_PERFORMANCE_WARMUP_MS;
+        engineAdapter.seek(barToSeconds(safeBarTime, transport.bpm), latestTracksRef.current, transport.bpm);
+        const seekSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+        syncTransportStateFromAuthority(seekSnapshot, {
+            isPlaying: seekSnapshot.isPlaying || isPlayingRef.current,
+            isRecording: false
+        });
+        resetAudioIncidentWindow(seekSnapshot.isPlaying || isPlayingRef.current);
+    }, [beginTransportCommand, finalizeActiveRecordings, hasActiveRecordingSessions, isTransportCommandCurrent, resetAudioIncidentWindow, syncTransportStateFromAuthority, transport.bpm]);
 
     const handleLoopToggle = useCallback(() => {
         setTransport((prev: TransportState) => {
@@ -2034,7 +2618,7 @@ const App: React.FC = () => {
         }), { recolor: false });
     }, [applyTrackMutation, transport.gridSize]);
 
-    const buildScannedMidiClip = useCallback((notes: Note[], clipName: string, color: string): Clip => {
+    const buildScannedMidiClip = useCallback((notes: Note[], clipName: string, color: string, startBarOverride?: number): Clip => {
         const maxEnd16th = notes.reduce((maxEnd, note) => {
             return Math.max(maxEnd, note.start + note.duration);
         }, 0);
@@ -2042,12 +2626,13 @@ const App: React.FC = () => {
         const now = Date.now();
         const entropy = Math.floor(Math.random() * 10000);
         const cursorBar = getTransportCursorBar();
+        const targetStartBar = Math.max(1, startBarOverride || cursorBar);
 
         return {
             id: `c-scan-${now}-${entropy}`,
             name: clipName,
             color,
-            start: Math.max(1, cursorBar),
+            start: targetStartBar,
             length: clipLengthBars,
             notes,
             offset: 0,
@@ -2058,21 +2643,25 @@ const App: React.FC = () => {
         };
     }, [getTransportCursorBar]);
 
-    const handleCreateMidiTrackFromScan = useCallback((payload: ApplyScanPayload) => {
+    const handleCreateMidiTrackFromScan = useCallback((payload: PianoScoreMidiCommitPayload) => {
         if (payload.notes.length === 0) {
             alert('El escaneo no detecto notas validas para crear un clip MIDI.');
-            return;
+            return null;
         }
 
         const trackId = `t-scan-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
         const color = getProgressiveTrackColor(tracks.length, tracks.length + 1);
+        const sourceClipStart = tracks
+            .find((track) => track.id === payload.sourceTrackId)
+            ?.clips.find((clip) => clip.id === payload.sourceClipId)
+            ?.start;
         const newTrack = createTrack({
             id: trackId,
-            name: `SCAN ${tracks.length + 1}`,
+            name: payload.clipName.startsWith('SCORE DRAFT') ? payload.clipName : `SCAN ${tracks.length + 1}`,
             type: TrackType.MIDI,
             color,
             volume: -6,
-            clips: [buildScannedMidiClip(payload.notes, payload.clipName, color)]
+            clips: [buildScannedMidiClip(payload.notes, payload.clipName, color, sourceClipStart)]
         });
 
         appendTrack(newTrack, { reason: 'scanner-create-track', recolor: true });
@@ -2080,43 +2669,74 @@ const App: React.FC = () => {
         setSelectedClipId(newTrack.clips[0]?.id ?? null);
         setMainView('arrange');
         setBottomView('editor');
-        closeAllToolPanels();
-    }, [appendTrack, buildScannedMidiClip, closeAllToolPanels, tracks.length, getProgressiveTrackColor]);
+        return {
+            trackId,
+            clipId: newTrack.clips[0]?.id ?? ''
+        };
+    }, [appendTrack, buildScannedMidiClip, tracks, tracks.length, getProgressiveTrackColor]);
 
-    const handleInsertScanIntoMidiTrack = useCallback((trackId: string, payload: ApplyScanPayload) => {
+    const handleUpdateMidiClipFromScore = useCallback((trackId: string, clipId: string, payload: PianoScoreMidiCommitPayload): boolean => {
         if (payload.notes.length === 0) {
-            alert('El escaneo no contiene notas para insertar.');
-            return;
+            return false;
         }
 
-        let inserted = false;
-        let insertedClipId: string | null = null;
-        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
-            if (track.id !== trackId) return track;
-            if (track.type !== TrackType.MIDI) return track;
+        let updated = false;
+        const nextLength = Math.max(1, Math.ceil(payload.notes.reduce((maxEnd, note) => {
+            return Math.max(maxEnd, note.start + note.duration);
+        }, 0) / 16));
 
-            inserted = true;
-            const clipColor = track.color;
-            const newClip = buildScannedMidiClip(payload.notes, payload.clipName, clipColor);
-            insertedClipId = newClip.id;
+        applyTrackMutation((prevTracks) => prevTracks.map((track) => {
+            if (track.id !== trackId || track.type !== TrackType.MIDI) {
+                return track;
+            }
+
+            const nextClips = track.clips.map((clip) => {
+                if (clip.id !== clipId) return clip;
+                updated = true;
+                return {
+                    ...clip,
+                    name: payload.clipName || clip.name,
+                    notes: payload.notes,
+                    length: nextLength
+                };
+            });
+
+            if (!updated) {
+                return track;
+            }
 
             return {
                 ...track,
-                clips: [...track.clips, newClip]
+                clips: nextClips,
+                sessionClips: track.sessionClips.map((slot) => {
+                    if (!slot.clip || slot.clip.id !== clipId) return slot;
+                    return {
+                        ...slot,
+                        clip: {
+                            ...slot.clip,
+                            name: payload.clipName || slot.clip.name,
+                            notes: payload.notes,
+                            length: nextLength
+                        }
+                    };
+                })
             };
         }), { recolor: false });
 
-        if (!inserted) {
-            alert('No se pudo insertar el clip: la pista destino no es MIDI.');
-            return;
+        if (updated) {
+            setSelectedTrackId(trackId);
+            setSelectedClipId(clipId);
         }
 
+        return updated;
+    }, [applyTrackMutation]);
+
+    const handleSelectPianoScoreSource = useCallback((trackId: string, clipId: string) => {
         setSelectedTrackId(trackId);
-        setSelectedClipId(insertedClipId);
+        setSelectedClipId(clipId);
         setMainView('arrange');
         setBottomView('editor');
-        closeAllToolPanels();
-    }, [applyTrackMutation, buildScannedMidiClip, closeAllToolPanels]);
+    }, []);
 
     const removeTrackWithRoutingCleanup = useCallback((trackId: string) => {
         applyTrackMutation((prevTracks) => removeTrackRoutingReferences(prevTracks, trackId), { recolor: false, reason: 'delete-track' });
@@ -2128,10 +2748,8 @@ const App: React.FC = () => {
     }, [applyTrackMutation, selectedTrackId]);
 
     const getPlaybackBarTime = useCallback(() => {
-        const secondsPerBar = getSecondsPerBar(transport.bpm);
-        const currentSeconds = engineAdapter.getCurrentTime();
-        return (currentSeconds / Math.max(0.0001, secondsPerBar)) + 1;
-    }, [transport.bpm]);
+        return engineAdapter.getTransportAuthoritySnapshot().currentBarTime;
+    }, []);
 
     const handleMixerTrackUpdate = useCallback((trackId: string, updates: Partial<Track>) => {
         const nowMs = performance.now();
@@ -2192,16 +2810,26 @@ const App: React.FC = () => {
         }), { recolor: false });
     }, [applyTrackMutation, getPlaybackBarTime, transport.isPlaying]);
 
-    const shouldRunAutomationLoop = useMemo(() => {
-        return tracks.some((track) => {
+    const automationReadTracks = useMemo(() => {
+        return tracks.filter((track) => {
             const mode: AutomationMode = track.automationMode ?? 'read';
-            if (mode === 'off') return false;
-            if (mode === 'read') {
-                return Boolean(track.automationLanes && track.automationLanes.length > 0);
-            }
-            return true;
+            if (mode === 'off' || mode === 'write') return false;
+            return Boolean(track.automationLanes?.some((lane) => lane.points.length > 0));
         });
     }, [tracks]);
+
+    const automationWriteTrackIds = useMemo(() => {
+        return new Set(
+            tracks
+                .filter((track) => {
+                    const mode: AutomationMode = track.automationMode ?? 'read';
+                    return mode === 'write' || mode === 'latch';
+                })
+                .map((track) => track.id)
+        );
+    }, [tracks]);
+
+    const shouldRunAutomationLoop = automationReadTracks.length > 0 || automationWriteTrackIds.size > 0;
 
     useEffect(() => {
         if (!transport.isPlaying || !shouldRunAutomationLoop) {
@@ -2210,7 +2838,6 @@ const App: React.FC = () => {
 
         let animationFrame = 0;
         let lastFrameTime = 0;
-
         const targetFps = 30;
         const minFrameDelta = 1000 / targetFps;
 
@@ -2220,37 +2847,50 @@ const App: React.FC = () => {
                 const nowMs = performance.now();
                 const barTime = getPlaybackBarTime();
 
-                applyTrackMutation((prevTracks) => {
-                    let changed = false;
+                const runtimeFrameValues: AutomationRuntimeFrame['values'] = [];
 
-                    const nextTracks = prevTracks.map((track) => {
-                        const mode: AutomationMode = track.automationMode ?? 'read';
-                        if (mode === 'off') {
+                automationReadTracks.forEach((track) => {
+                    const mode: AutomationMode = track.automationMode ?? 'read';
+                    const runtimeValue: AutomationRuntimeFrame['values'][number] = { trackId: track.id };
+                    let hasRuntimeValue = false;
+
+                    AUTOMATION_TARGETS.forEach((param) => {
+                        const key = `${track.id}:${param}`;
+                        const touchUntil = automationTouchUntilRef.current.get(key) ?? 0;
+                        const isTouchActive = mode === 'touch' && nowMs <= touchUntil;
+                        const isLatchActive = mode === 'latch' && automationLatchActiveRef.current.has(key);
+                        const shouldRead = mode === 'read' || (mode === 'touch' && !isTouchActive) || (mode === 'latch' && !isLatchActive);
+                        if (!shouldRead) return;
+
+                        const laneValue = sampleAutomationLaneAtBar(getLaneByParam(track, param), barTime);
+                        if (laneValue === null) return;
+
+                        const desired = denormalizeTrackParam(track, param, laneValue);
+                        const runtimeParam = param as 'volume' | 'pan' | 'reverb';
+                        runtimeValue[runtimeParam] = desired;
+                        hasRuntimeValue = true;
+                    });
+
+                    if (hasRuntimeValue) {
+                        runtimeFrameValues.push(runtimeValue);
+                    }
+                });
+
+                let changed = false;
+                let nextTracks = tracks;
+
+                if (automationWriteTrackIds.size > 0) {
+                    nextTracks = tracks.map((track) => {
+                        if (!automationWriteTrackIds.has(track.id)) {
                             return track;
                         }
 
+                        const mode: AutomationMode = track.automationMode ?? 'read';
                         let nextTrack = track;
 
                         AUTOMATION_TARGETS.forEach((param) => {
                             const key = `${track.id}:${param}`;
-                            const touchUntil = automationTouchUntilRef.current.get(key) ?? 0;
-                            const isTouchActive = mode === 'touch' && nowMs <= touchUntil;
                             const isLatchActive = mode === 'latch' && automationLatchActiveRef.current.has(key);
-
-                            const shouldRead = mode === 'read' || (mode === 'touch' && !isTouchActive) || (mode === 'latch' && !isLatchActive);
-
-                            if (shouldRead) {
-                                const laneValue = sampleAutomationLaneAtBar(getLaneByParam(nextTrack, param), barTime);
-                                if (laneValue !== null) {
-                                    const desired = denormalizeTrackParam(nextTrack, param, laneValue);
-                                    const current = getTrackParamValue(nextTrack, param);
-                                    if (Math.abs(desired - current) > 0.001) {
-                                        nextTrack = { ...nextTrack, [param]: desired };
-                                        changed = true;
-                                    }
-                                }
-                            }
-
                             const shouldWrite = mode === 'write' || isLatchActive;
                             if (!shouldWrite) return;
 
@@ -2268,9 +2908,19 @@ const App: React.FC = () => {
 
                         return nextTrack;
                     });
+                }
 
-                    return changed ? nextTracks : prevTracks;
-                }, { noHistory: true, recolor: false });
+                if (runtimeFrameValues.length > 0) {
+                    engineAdapter.applyAutomationRuntimeFrame({
+                        capturedAt: Date.now(),
+                        barTime,
+                        values: runtimeFrameValues
+                    });
+                }
+
+                if (changed) {
+                    setTracksNoHistory(nextTracks);
+                }
             }
 
             animationFrame = requestAnimationFrame(tick);
@@ -2278,7 +2928,15 @@ const App: React.FC = () => {
 
         animationFrame = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(animationFrame);
-    }, [applyTrackMutation, getPlaybackBarTime, shouldRunAutomationLoop, transport.isPlaying]);
+    }, [automationReadTracks, automationWriteTrackIds, getPlaybackBarTime, setTracksNoHistory, shouldRunAutomationLoop, tracks, transport.isPlaying]);
+
+    useEffect(() => {
+        if (transport.isPlaying) {
+            return;
+        }
+
+        engineAdapter.updateTracks(latestTracksRef.current);
+    }, [transport.isPlaying]);
 
     useEffect(() => {
         if (!transport.isPlaying && wasPlayingRef.current) {
@@ -2603,12 +3261,43 @@ const App: React.FC = () => {
             return;
         }
 
+        resetAudioIncidentWindow(true);
         const secondsPerBar = getSecondsPerBar(transport.bpm);
         const diagnostics = engineAdapter.getDiagnostics();
         const estimatedLatencyCompensationBars = Math.max(0, (diagnostics.latency || 0) / secondsPerBar);
 
         const punchPlan = resolvePunchRecordingPlan(armedTracks);
         const transportWasRunning = isPlayingRef.current || engineAdapter.getIsPlaying() || transport.isPlaying;
+        const recordingStartAuthority = engineAdapter.getTransportAuthoritySnapshot();
+        const journalEntriesByTrack = new Map(
+            armedTracks.map((track) => {
+                const monitorMode = track.micSettings?.monitorInputMode || 'mono';
+                return [track.id, createRecordingJournalEntry({
+                    id: buildRuntimeId('rec-journal'),
+                    trackId: track.id,
+                    trackName: track.name,
+                    inputDeviceId: track.inputDeviceId,
+                    monitorMode,
+                    createdAt: Date.now(),
+                    barTime: recordingStartAuthority.currentBarTime,
+                    contextTimeSec: recordingStartAuthority.currentTimeSec
+                })];
+            })
+        );
+        const failStartJournalEntries = (reason: string) => {
+            journalEntriesByTrack.forEach((entry) => {
+                failRecordingJournalForTrack(entry.id, reason, {
+                    at: Date.now(),
+                    barTime: recordingStartAuthority.currentBarTime,
+                    contextTimeSec: recordingStartAuthority.currentTimeSec
+                });
+            });
+        };
+
+        updateRecordingJournal((entries) => pruneRecordingJournalEntries([
+            ...entries,
+            ...Array.from(journalEntriesByTrack.values())
+        ]));
 
         if (punchPlan) {
             const playbackStartBar = punchPlan.startPlaybackBar;
@@ -2620,6 +3309,7 @@ const App: React.FC = () => {
             if (!transportWasRunning) {
                 const ready = await engineAdapter.ensurePlaybackReady();
                 if (!ready || !isTransportCommandCurrent(commandToken)) {
+                    failStartJournalEntries('record-start-aborted:punch-preroll');
                     return;
                 }
 
@@ -2629,26 +3319,28 @@ const App: React.FC = () => {
 
                 if (!engineAdapter.getIsPlaying() || !isTransportCommandCurrent(commandToken)) {
                     isPlayingRef.current = false;
+                    failStartJournalEntries('record-start-aborted:transport-play');
                     return;
                 }
             }
 
-            setTransport((prev: TransportState) => ({
-                ...prev,
+            const punchStartSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+            syncTransportStateFromAuthority(punchStartSnapshot, {
                 isPlaying: true,
                 currentBar: playbackStartPosition.currentBar,
                 currentBeat: playbackStartPosition.currentBeat,
                 currentSixteenth: playbackStartPosition.currentSixteenth
-            }));
+            });
         } else if (!transportWasRunning) {
             const startedPlayback = await playFromTransportCursor(commandToken);
             if (!startedPlayback || !isTransportCommandCurrent(commandToken)) {
+                failStartJournalEntries('record-start-aborted:cursor-play');
                 return;
             }
         }
 
-        const recordingStartSeconds = Math.max(0, engineAdapter.getCurrentTime());
-        const recordingCaptureStartBar = Math.max(1, 1 + (recordingStartSeconds / secondsPerBar));
+        const recordingStartSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+        const recordingCaptureStartBar = recordingStartSnapshot.currentBarTime;
         const recordingTargetStartBar = punchPlan ? punchPlan.punchInBar : recordingCaptureStartBar;
         const sourceTrimOffsetBars = punchPlan
             ? Math.max(0, recordingTargetStartBar - recordingCaptureStartBar)
@@ -2657,13 +3349,30 @@ const App: React.FC = () => {
         pauseResumeArmedRef.current = false;
         setTransport((prev: TransportState) => ({ ...prev, isPlaying: true, isRecording: true }));
         await Promise.all(armedTracks.map(async (track) => {
+            const journalEntry = journalEntriesByTrack.get(track.id);
             try {
+                appendRecordingJournalForTrack(journalEntry?.id, 'start-requested', {
+                    at: Date.now(),
+                    barTime: recordingTargetStartBar,
+                    contextTimeSec: recordingStartSnapshot.currentTimeSec
+                });
                 await engineAdapter.startRecording(track.id, track.inputDeviceId);
                 const monitorLatencyCompBars = Math.max(
                     0,
                     ((track.micSettings?.monitorLatencyCompensationMs || 0) / 1000) / secondsPerBar
                 );
+                appendRecordingJournalForTrack(journalEntry?.id, 'started', {
+                    at: Date.now(),
+                    barTime: recordingTargetStartBar,
+                    contextTimeSec: recordingStartSnapshot.currentTimeSec,
+                    details: {
+                        monitorMode: track.micSettings?.monitorInputMode || 'mono',
+                        sourceTrimOffsetBars: Number(sourceTrimOffsetBars.toFixed(6))
+                    }
+                });
                 recordingSessionMetaRef.current.set(track.id, {
+                    journalId: journalEntry?.id || buildRuntimeId('rec-journal-fallback'),
+                    monitorMode: track.micSettings?.monitorInputMode || 'mono',
                     recordingStartBar: recordingTargetStartBar,
                     latencyCompensationBars: estimatedLatencyCompensationBars + monitorLatencyCompBars,
                     sourceTrimOffsetBars,
@@ -2671,6 +3380,15 @@ const App: React.FC = () => {
                 });
             } catch (error) {
                 console.error(`No se pudo iniciar grabacion para ${track.name}.`, error);
+                failRecordingJournalForTrack(
+                    journalEntry?.id,
+                    `start-failed:${track.name}`,
+                    {
+                        at: Date.now(),
+                        barTime: recordingTargetStartBar,
+                        contextTimeSec: recordingStartSnapshot.currentTimeSec
+                    }
+                );
                 recordingSessionMetaRef.current.delete(track.id);
             }
         }));
@@ -2678,14 +3396,21 @@ const App: React.FC = () => {
         const activeRecordingTrackIds = new Set(engineAdapter.getActiveRecordingTrackIds());
         armedTracks.forEach((track) => {
             if (!activeRecordingTrackIds.has(track.id)) {
+                const journalEntry = journalEntriesByTrack.get(track.id);
+                failRecordingJournalForTrack(
+                    journalEntry?.id,
+                    `inactive-after-start:${track.name}`,
+                    { at: Date.now() }
+                );
                 recordingSessionMetaRef.current.delete(track.id);
             }
         });
 
         if (activeRecordingTrackIds.size === 0) {
+            clearRecordingRuntimeForTracks(armedTracks.map((track) => track.id));
             setTransport((prev: TransportState) => ({ ...prev, isRecording: false }));
         }
-    }, [beginTransportCommand, transport.isPlaying, tracks, hasActiveRecordingSessions, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm, getProgressiveTrackColor]);
+    }, [appendRecordingJournalForTrack, beginTransportCommand, transport.isPlaying, tracks, hasActiveRecordingSessions, finalizeActiveRecordings, appendTracks, isTransportCommandCurrent, playFromTransportCursor, transport.bpm, getProgressiveTrackColor, updateRecordingJournal, syncTransportStateFromAuthority, failRecordingJournalForTrack, clearRecordingRuntimeForTracks, resetAudioIncidentWindow]);
 
     useEffect(() => {
         if (!transport.isRecording) return;
@@ -2700,8 +3425,12 @@ const App: React.FC = () => {
                 return;
             }
 
-            const currentBar = Math.max(1, 1 + (Math.max(0, engineAdapter.getCurrentTime()) / getSecondsPerBar(transport.bpm)));
-            const punchDecision = shouldFinalizePunchRecording(currentBar, activeRecordingTrackIds, recordingSessionMetaRef.current);
+            const transportSnapshot = engineAdapter.getTransportAuthoritySnapshot();
+            const punchDecision = shouldFinalizePunchRecording(
+                transportSnapshot.currentBarTime,
+                activeRecordingTrackIds,
+                recordingSessionMetaRef.current
+            );
             if (!punchDecision.shouldFinalize) {
                 animationFrame = requestAnimationFrame(checkPunchAutoStop);
                 return;
@@ -2753,20 +3482,35 @@ const App: React.FC = () => {
     ]);
 
     const createProjectDataSnapshot = useCallback((transportSnapshot: TransportState, nameOverride?: string): ProjectData => {
-        return {
+        const snapshot: ProjectData = {
             version: '3.0-reference',
             name: nameOverride || projectName,
             tracks: buildPersistedTracks(tracks),
             transport: transportSnapshot,
             audioSettings,
+            scoreWorkspaces: scoreWorkspaces.map((workspace) => ({
+                ...workspace,
+                source: { ...workspace.source },
+                layout: { ...workspace.layout },
+                notationOverrides: workspace.notationOverrides.map((override) => ({ ...override })),
+                confidenceRegions: workspace.confidenceRegions.map((region) => ({ ...region }))
+            })),
             createdAt: Date.now(),
             lastModified: Date.now()
         };
-    }, [audioSettings, buildPersistedTracks, projectName, tracks]);
+        return repairProjectData(snapshot, { source: 'snapshot-save' }).project;
+    }, [audioSettings, buildPersistedTracks, projectName, scoreWorkspaces, tracks]);
 
-    const hydrateProjectData = useCallback(async (projectData: ProjectData, preferredName?: string) => {
-        if (!projectData.version || !Array.isArray(projectData.tracks) || !projectData.transport) {
-            throw new Error('Formato de archivo invalido');
+    const hydrateProjectData = useCallback(async (
+        projectCandidate: ProjectData,
+        preferredName?: string,
+        options?: { source?: string; rememberReport?: boolean }
+    ): Promise<ProjectIntegrityReport> => {
+        const integrityResult = repairProjectData(projectCandidate, { source: options?.source || 'hydrate-project' });
+        const projectData = integrityResult.project;
+
+        if (options?.rememberReport !== false) {
+            rememberProjectIntegrityReport(integrityResult.report);
         }
 
         engineAdapter.stop(true);
@@ -2818,6 +3562,13 @@ const App: React.FC = () => {
 
         setTransport(normalizedTransport);
         setAudioSettings(sanitizeAudioSettings(projectData.audioSettings || getDefaultAudioSettings()));
+        setScoreWorkspaces((projectData.scoreWorkspaces || []).map((workspace) => ({
+            ...workspace,
+            source: { ...workspace.source },
+            layout: { ...workspace.layout },
+            notationOverrides: workspace.notationOverrides.map((override) => ({ ...override })),
+            confidenceRegions: workspace.confidenceRegions.map((region) => ({ ...region }))
+        })));
         setProjectName(preferredName || projectData.name || 'Sin TÃ­tulo');
 
         engineAdapter.setBpm(normalizedTransport.bpm);
@@ -2825,7 +3576,8 @@ const App: React.FC = () => {
 
         setSelectedTrackId(rehydratedTracks[0]?.id || null);
         setSelectedClipId(rehydratedTracks[0]?.clips[0]?.id || null);
-    }, [replaceTracks]);
+        return integrityResult.report;
+    }, [rememberProjectIntegrityReport, replaceTracks]);
 
     const handleRestoreRecoverySnapshot = useCallback(async () => {
         if (!recoverySnapshot) {
@@ -2837,7 +3589,10 @@ const App: React.FC = () => {
         setLoadingMessage('Restaurando autosave...');
 
         try {
-            await hydrateProjectData(recoverySnapshot.project, recoverySnapshot.projectName);
+            await hydrateProjectData(recoverySnapshot.project, recoverySnapshot.projectName, {
+                source: 'recovery-restore',
+                rememberReport: true
+            });
             clearAutosaveSnapshot(recoverySnapshot.id);
             setRecoverySnapshot(null);
             setActiveModal(null);
@@ -2861,6 +3616,12 @@ const App: React.FC = () => {
     useEffect(() => {
         const sessionInfo = startRecoverySession();
         if (sessionInfo.hadUncleanExit) {
+            updateRecordingJournal((entries) => recoverRecordingJournalEntries(
+                entries,
+                'unclean-exit',
+                Date.now()
+            ));
+
             const latestSnapshot = getLatestAutosaveSnapshot();
             if (latestSnapshot) {
                 setRecoverySnapshot(latestSnapshot);
@@ -2879,7 +3640,12 @@ const App: React.FC = () => {
             window.removeEventListener('beforeunload', handleBeforeUnload);
             stopRecoverySession();
         };
-    }, []);
+    }, [updateRecordingJournal]);
+    useEffect(() => {
+        if (activeModal === 'recovery') return;
+        if (recordingRecoveryAttentionSummary.totalCount === 0) return;
+        setActiveModal((current) => current ?? 'recording-recovery');
+    }, [activeModal, recordingRecoveryAttentionSummary.totalCount]);
 
     useEffect(() => {
         const timeoutId = window.setTimeout(() => {
@@ -2907,6 +3673,7 @@ const App: React.FC = () => {
         setProjectName("Sin TÃ­tulo");
         setSelectedTrackId(null);
         setSelectedClipId(null);
+        setScoreWorkspaces([]);
         closeAllToolPanels();
         setTransport((prev: TransportState) => ({
             ...prev,
@@ -2945,7 +3712,14 @@ const App: React.FC = () => {
             const projectData: ProjectData = JSON.parse(text);
 
             const nameFromDisk = filename.replace(/\.esp$/i, '');
-            await hydrateProjectData(projectData, nameFromDisk || projectData.name);
+            const integrityReport = await hydrateProjectData(projectData, nameFromDisk || projectData.name, {
+                source: 'open-project',
+                rememberReport: true
+            });
+            if (integrityReport.issueCount > 0) {
+                console.warn('Project integrity repaired during open.', integrityReport);
+                alert(summarizeProjectIntegrityReport(integrityReport, 'Proyecto abierto'));
+            }
 
         } catch (err) {
             console.error("Open Project Error", err);
@@ -2979,13 +3753,19 @@ const App: React.FC = () => {
                     currentBeat: clockSnapshot.currentBeat,
                     currentSixteenth: clockSnapshot.currentSixteenth
                 }, projectName);
-                const jsonString = JSON.stringify(projectMetadata, null, 2);
+                const integrityResult = repairProjectData(projectMetadata, { source: 'save-project' });
+                rememberProjectIntegrityReport(integrityResult.report);
+                const jsonString = JSON.stringify(integrityResult.project, null, 2);
                 setLoadingMessage("Escribiendo disco...");
 
                 // FIX: Update Project Name from Save Result
                 const result = await platformService.saveProject(jsonString, projectName);
                 if (result.success && result.filePath) {
                     setProjectName(result.filePath);
+                }
+                if (result.success && integrityResult.report.issueCount > 0) {
+                    console.warn('Project integrity repaired during save.', integrityResult.report);
+                    alert(summarizeProjectIntegrityReport(integrityResult.report, 'Proyecto guardado'));
                 }
 
             } catch (e) {
@@ -2998,7 +3778,7 @@ const App: React.FC = () => {
                 setShowFileMenu(false);
             }
         }, 20);
-    }, [createProjectDataSnapshot, projectName, transport]);
+    }, [createProjectDataSnapshot, projectName, rememberProjectIntegrityReport, transport]);
 
     const assignClipToSessionSlot = useCallback((track: Track, sceneIndex: number, clip: Clip): Track => {
         const safeSceneIndex = Math.max(0, Math.min(7, sceneIndex));
@@ -3539,32 +4319,117 @@ const App: React.FC = () => {
             return true;
         }
 
-        return tracks.some((track) => {
-            if (track.type !== TrackType.AUDIO) {
-                return false;
+        if (engineAdapter.getActiveRecordingTrackIds().length > 0) {
+            return true;
+        }
+
+        return engineAdapter.getMonitoringRouteSnapshots().some((route) => route.active);
+    }, [transport.isPlaying, transport.isRecording]);
+    useEffect(() => {
+        const now = Date.now();
+        setAudioIncidentWindow((prev) => {
+            if (hasRealtimeAudioActivity) {
+                if (prev.active) {
+                    return prev;
+                }
+                return createAudioIncidentWindow(
+                    Math.max(0, Number(engineStats.schedulerDropoutCount || 0)),
+                    Math.max(0, Number(engineStats.schedulerUnderrunCount || 0)),
+                    true,
+                    now
+                );
             }
 
-            if (track.monitor === 'in') {
-                return true;
+            if (!prev.active && prev.dropoutsDeltaWindow === 0 && prev.underrunsDeltaWindow === 0) {
+                return prev;
             }
 
-            if (track.monitor === 'auto' && track.isArmed) {
-                return true;
-            }
-
-            return Boolean(track.micSettings?.monitoringEnabled);
+            return createAudioIncidentWindow(
+                Math.max(0, Number(engineStats.schedulerDropoutCount || 0)),
+                Math.max(0, Number(engineStats.schedulerUnderrunCount || 0)),
+                false,
+                now
+            );
         });
-    }, [tracks, transport.isPlaying, transport.isRecording]);
-    const recentDropoutDelta = useMemo(() => {
-        const baseline = engineOverloadBaselineRef.current;
-        if (!baseline) return 0;
-        return Math.max(0, Number(engineStats.schedulerDropoutCount || 0) - baseline.dropoutCount);
-    }, [engineStats.schedulerDropoutCount]);
-    const recentUnderrunDelta = useMemo(() => {
-        const baseline = engineOverloadBaselineRef.current;
-        if (!baseline) return 0;
-        return Math.max(0, Number(engineStats.schedulerUnderrunCount || 0) - baseline.underrunCount);
-    }, [engineStats.schedulerUnderrunCount]);
+    }, [engineStats.schedulerDropoutCount, engineStats.schedulerUnderrunCount, hasRealtimeAudioActivity]);
+
+    useEffect(() => {
+        if (!audioIncidentWindow.active) {
+            return;
+        }
+
+        const currentDropoutCount = Math.max(0, Number(engineStats.schedulerDropoutCount || 0));
+        const currentUnderrunCount = Math.max(0, Number(engineStats.schedulerUnderrunCount || 0));
+
+        setAudioIncidentWindow((prev) => {
+            if (!prev.active) {
+                return prev;
+            }
+
+            const nextDropoutsDelta = Math.max(0, currentDropoutCount - prev.baselineDropoutCount);
+            const nextUnderrunsDelta = Math.max(0, currentUnderrunCount - prev.baselineUnderrunCount);
+            const changed = nextDropoutsDelta !== prev.dropoutsDeltaWindow || nextUnderrunsDelta !== prev.underrunsDeltaWindow;
+
+            if (!changed) {
+                return prev;
+            }
+
+            return {
+                ...prev,
+                dropoutsDeltaWindow: nextDropoutsDelta,
+                underrunsDeltaWindow: nextUnderrunsDelta,
+                lastCounterChangeAt: Date.now()
+            };
+        });
+    }, [audioIncidentWindow.active, engineStats.schedulerDropoutCount, engineStats.schedulerUnderrunCount]);
+
+    useEffect(() => {
+        if (!audioIncidentWindow.active || (audioIncidentWindow.dropoutsDeltaWindow === 0 && audioIncidentWindow.underrunsDeltaWindow === 0)) {
+            return;
+        }
+
+        const interval = window.setInterval(() => {
+            setAudioIncidentWindow((prev) => {
+                if (!prev.active || (prev.dropoutsDeltaWindow === 0 && prev.underrunsDeltaWindow === 0)) {
+                    return prev;
+                }
+
+                if (!prev.lastCounterChangeAt || (Date.now() - prev.lastCounterChangeAt) < AUDIO_INCIDENT_RESET_COOLDOWN_MS) {
+                    return prev;
+                }
+
+                return createAudioIncidentWindow(
+                    Math.max(0, Number(engineStats.schedulerDropoutCount || 0)),
+                    Math.max(0, Number(engineStats.schedulerUnderrunCount || 0)),
+                    true,
+                    Date.now()
+                );
+            });
+        }, 250);
+
+        return () => window.clearInterval(interval);
+    }, [audioIncidentWindow.active, audioIncidentWindow.dropoutsDeltaWindow, audioIncidentWindow.underrunsDeltaWindow, audioIncidentWindow.lastCounterChangeAt, engineStats.schedulerDropoutCount, engineStats.schedulerUnderrunCount]);
+
+    const recentDropoutDelta = audioIncidentWindow.dropoutsDeltaWindow;
+    const recentUnderrunDelta = audioIncidentWindow.underrunsDeltaWindow;
+    const sessionTrackCount = useMemo(
+        () => tracks.filter((track) => track.type === TrackType.AUDIO || track.type === TrackType.MIDI).length,
+        [tracks]
+    );
+    const sessionOverloadDecision = useMemo<SessionOverloadDecision>(() => (
+        assessSessionOverload({
+            engineStats: engineStats || null,
+            sessionTrackCount,
+            sceneCount: 8,
+            recentDropoutDelta,
+            recentUnderrunDelta
+        })
+    ), [
+        engineStats,
+        recentDropoutDelta,
+        recentUnderrunDelta,
+        sessionTrackCount
+    ]);
     const computedSessionHealthSnapshot = useMemo(() => {
         const baseSnapshot = engineAdapter.getSessionHealthSnapshot({
             capturedAt: Date.now(),
@@ -3624,6 +4489,25 @@ const App: React.FC = () => {
             return computedSessionHealthSnapshot;
         });
     }, [computedSessionHealthSnapshot]);
+    const visualPerformance = useMemo<VisualPerformanceDecision>(() => (
+        assessVisualPerformance({
+            capturedAt: Date.now(),
+            uiFpsP95: uiFrameTelemetry.fpsP95,
+            frameDropRatio: uiFrameTelemetry.frameDropRatio,
+            hasPlaybackActivity: transport.isPlaying || transport.isRecording,
+            worstBurstMs: uiFrameTelemetry.worstBurstMs,
+            sampleWindowMs: uiFrameTelemetry.sampleWindowMs,
+            hasActiveViewportInteraction: uiFrameTelemetry.hasActiveViewportInteraction
+        })
+    ), [
+        transport.isPlaying,
+        transport.isRecording,
+        uiFrameTelemetry.fpsP95,
+        uiFrameTelemetry.frameDropRatio,
+        uiFrameTelemetry.worstBurstMs,
+        uiFrameTelemetry.sampleWindowMs,
+        uiFrameTelemetry.hasActiveViewportInteraction
+    ]);
     useEffect(() => {
         const decision = audioPriorityControllerRef.current.evaluate(sessionHealthSnapshot);
         setGlobalAudioPriority((prev) => {
@@ -3634,6 +4518,7 @@ const App: React.FC = () => {
                 && prev.disableHeavyVisuals === decision.disableHeavyVisuals
                 && prev.simplifyMeters === decision.simplifyMeters
                 && prev.showBanner === decision.showBanner
+                && prev.reasonCode === decision.reasonCode
                 && prev.reasons.join('|') === decision.reasons.join('|');
 
             if (same) {
@@ -3647,7 +4532,8 @@ const App: React.FC = () => {
                 disableHeavyVisuals: decision.disableHeavyVisuals,
                 simplifyMeters: decision.simplifyMeters,
                 showBanner: decision.showBanner,
-                reasons: decision.reasons
+                reasons: decision.reasons,
+                reasonCode: decision.reasonCode
             };
         });
 
@@ -3671,6 +4557,60 @@ const App: React.FC = () => {
     const selectedTrackPunchRange = useMemo(() => (
         selectedAudioTrack ? normalizePunchRange(selectedAudioTrack.punchRange) : null
     ), [selectedAudioTrack]);
+    const selectedAudioClipEditorView = useMemo<AudioClipEditorViewState | null>(() => {
+        if (!selectedAudioTrack || !selectedClipId) {
+            return null;
+        }
+
+        const context = resolveTrackClipEditingContext(selectedAudioTrack, selectedClipId);
+        if (!context.clip) {
+            return null;
+        }
+
+        return {
+            clipId: context.clip.id,
+            isCompClip: context.isCompClip,
+            isTakeClip: context.isTakeClip,
+            takeId: context.take?.id,
+            takeLabel: context.take?.label,
+            takeLaneId: context.takeLane?.id,
+            takeLaneName: context.takeLane?.name,
+            compLaneId: context.compLane?.id,
+            compSegmentId: context.compSegment?.id,
+            punchRange: selectedTrackPunchRange
+        };
+    }, [selectedAudioTrack, selectedClipId, selectedTrackPunchRange]);
+    const monitoringRouteDetails = useMemo(() => {
+        const pendingFinalizeTrackIds = new Set(engineAdapter.getPendingFinalizeTrackIds());
+        return engineAdapter.getMonitoringRouteSnapshots().map((route) => ({
+            ...route,
+            pendingFinalize: pendingFinalizeTrackIds.has(route.trackId)
+        }));
+    }, [tracks, transport.isPlaying, transport.isRecording, recordingJournalEntries]);
+    const monitoringRouteSnapshot = useMemo(() => {
+        const routes = monitoringRouteDetails;
+        return {
+            activeCount: routes.filter((route) => route.active).length,
+            stereoCount: routes.filter((route) => route.active && route.mode === 'stereo').length,
+            sharedInputStreamCount: routes.filter((route) => route.sharedInputStream).length,
+            pendingFinalizeCount: routes.filter((route) => route.pendingFinalize).length
+        };
+    }, [monitoringRouteDetails]);
+    const monitoringLatencySummary = useMemo(() => {
+        const baseLatencyMs = Number(Math.max(0, sessionHealthSnapshot.monitorLatencyP95Ms).toFixed(3));
+        const maxLatencyCompensationMs = monitoringRouteDetails.reduce((max, route) => {
+            return Math.max(max, route.latencyCompensationMs);
+        }, 0);
+        const maxEffectiveMonitorLatencyMs = monitoringRouteDetails.reduce((max, route) => {
+            return Math.max(max, baseLatencyMs + route.latencyCompensationMs);
+        }, baseLatencyMs);
+
+        return {
+            baseLatencyMs,
+            maxLatencyCompensationMs: Number(maxLatencyCompensationMs.toFixed(3)),
+            maxEffectiveMonitorLatencyMs: Number(maxEffectiveMonitorLatencyMs.toFixed(3))
+        };
+    }, [monitoringRouteDetails, sessionHealthSnapshot.monitorLatencyP95Ms]);
     const handleCloseSettings = useCallback(() => {
         setShowSettings(false);
     }, []);
@@ -3715,37 +4655,19 @@ const App: React.FC = () => {
         scaleRoot: transport.scaleRoot,
         scaleType: transport.scaleType
     }), [transport.gridSize, transport.scaleRoot, transport.scaleType, transport.snapToGrid]);
-    const timelineUiFrameBudgetMs = Math.max(8, globalAudioPriority.uiUpdateDebounceMs);
-    const timelineMeterFrameBudgetMs = globalAudioPriority.mode === 'critical'
-        ? 140
-        : globalAudioPriority.mode === 'guarded'
-            ? 80
-            : 0;
-    const timelineMaxActiveMeterTracks = globalAudioPriority.mode === 'critical'
-        ? 16
-        : globalAudioPriority.mode === 'guarded'
-            ? 48
-            : 128;
-    const mixerMeterUpdateIntervalMs = globalAudioPriority.mode === 'critical'
-        ? 120
-        : globalAudioPriority.mode === 'guarded'
-            ? 66
-            : 33;
-    const mixerMaxMeterTracks = globalAudioPriority.mode === 'critical'
-        ? 24
-        : globalAudioPriority.mode === 'guarded'
-            ? 72
-            : 128;
-    const performerFrameIntervalMs = globalAudioPriority.mode === 'critical'
-        ? 220
-        : globalAudioPriority.mode === 'guarded'
-            ? 80
-            : 33;
+    const timelineUiFrameBudgetMs = visualPerformance.uiFrameBudgetMs;
+    const timelineMeterFrameBudgetMs = visualPerformance.meterFrameBudgetMs;
+    const timelineMaxActiveMeterTracks = visualPerformance.maxActiveMeterTracks;
+    const mixerMeterUpdateIntervalMs = visualPerformance.mixerMeterUpdateIntervalMs;
+    const mixerMaxMeterTracks = visualPerformance.mixerMaxMeterTracks;
+    const performerFrameIntervalMs = visualPerformance.performerFrameIntervalMs;
+    const diagnosticsVisible = diagnosticsVisibilityMode === 'debug';
 
     return (
         <div
             data-audio-priority={globalAudioPriority.mode}
-            className={`daw-immersive-shell flex flex-col h-screen w-screen bg-[#111218] text-daw-text font-sans overflow-hidden selection:bg-daw-ruby selection:text-white ${globalAudioPriority.reduceAnimations ? 'audio-priority-reduced' : ''}`}
+            data-visual-performance={visualPerformance.mode}
+            className={`daw-immersive-shell flex flex-col h-screen w-screen bg-[#111218] text-daw-text font-sans overflow-hidden selection:bg-daw-ruby selection:text-white ${visualPerformance.reduceAnimations ? 'audio-priority-reduced' : ''}`}
         >
 
             {loadingProject && (
@@ -3774,18 +4696,45 @@ const App: React.FC = () => {
                 </div>
             )}
 
-            {globalAudioPriority.showBanner && (
+            {diagnosticsVisible && globalAudioPriority.showBanner && (
                 <div className="fixed right-4 top-[56px] z-[130] px-3 py-1.5 rounded-sm border border-daw-ruby/35 bg-[#140e16]/92 backdrop-blur-md text-[9px] uppercase tracking-wider font-bold text-gray-200 flex items-center gap-2 shadow-lg">
                     <span className="text-daw-ruby">Audio Priority</span>
                     <span className={globalAudioPriority.mode === 'critical' ? 'text-red-300' : 'text-amber-300'}>
                         {globalAudioPriority.mode.toUpperCase()}
                     </span>
-                    <span className="text-gray-500 font-mono">
-                        UI p95 {uiFrameTelemetry.fpsP95.toFixed(1)}fps
-                    </span>
-                    <span className="text-gray-600 font-mono">
-                        Drop {(uiFrameTelemetry.frameDropRatio * 100).toFixed(1)}%
-                    </span>
+                    <span className="text-gray-500 font-mono">{globalAudioPriority.reasonCode}</span>
+                </div>
+            )}
+
+            {recordingRecoveryAttentionSummary.totalCount > 0 && activeModal !== 'recording-recovery' && (
+                <div className="fixed left-[64px] right-4 top-[56px] z-[129] rounded-sm border border-amber-400/25 bg-[#16120c]/94 backdrop-blur-md px-3 py-2 shadow-lg flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-8 h-8 rounded-sm bg-amber-500/15 text-amber-300 flex items-center justify-center shrink-0">
+                            <AlertTriangle size={16} />
+                        </div>
+                        <div className="min-w-0">
+                            <div className="text-[10px] font-black uppercase tracking-[0.18em] text-amber-200">Recording Recovery</div>
+                            <div className="text-[11px] text-gray-300 truncate">
+                                {recordingRecoveryAttentionSummary.failedCount > 0
+                                    ? `${recordingRecoveryAttentionSummary.failedCount} sesiones de grabacion fallaron`
+                                    : `${recordingRecoveryAttentionSummary.recoveredCount} sesiones de grabacion fueron recuperadas tras cierre inesperado`}
+                            </div>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <button
+                            onClick={() => setActiveModal('recording-recovery')}
+                            className="px-3 h-8 rounded-sm bg-amber-300 text-[#1a140b] text-[10px] font-bold uppercase tracking-[0.16em] hover:brightness-110 transition-all"
+                        >
+                            Revisar
+                        </button>
+                        <button
+                            onClick={acknowledgeRecordingRecoveryNotice}
+                            className="px-3 h-8 rounded-sm border border-white/10 text-[10px] uppercase tracking-[0.16em] text-gray-300 hover:bg-white/[0.06] transition-all"
+                        >
+                            Ocultar
+                        </button>
+                    </div>
                 </div>
             )}
 
@@ -3852,7 +4801,7 @@ const App: React.FC = () => {
                     <div className="flex flex-col gap-2 w-full items-center">
                         <SidebarItem icon={Search} label="Navegador de Archivos" active={showBrowser} onClick={() => toggleToolPanel('browser')} />
                         <SidebarItem icon={Sparkles} label="Generador AI" active={showAI} onClick={() => toggleToolPanel('ai')} color="text-daw-cyan" />
-                        <SidebarItem icon={Piano} label="Scanner de Notas" active={showNoteScanner} onClick={() => toggleToolPanel('scanner')} color="text-daw-violet" />
+                        <SidebarItem icon={Piano} label="Piano Score" active={showNoteScanner} onClick={() => toggleToolPanel('scanner')} color="text-daw-violet" />
                     </div>
                     <div className="w-6 h-px bg-white/5 my-1"></div>
                     <div className="flex flex-col gap-2 w-full items-center">
@@ -3880,7 +4829,7 @@ const App: React.FC = () => {
                     {/* Project Input removed in favor of platformService */}
                 </div>
 
-                {hasLoadedAISidebar && (
+                {!isScannerImmersive && hasLoadedAISidebar && (
                     <React.Suspense fallback={null}>
                         <AISidebar
                             isOpen={showAI}
@@ -3892,42 +4841,47 @@ const App: React.FC = () => {
                     </React.Suspense>
                 )}
 
-                <FluidPanel
-                    isOpen={showBrowser}
-                    direction="left"
-                    className="absolute left-[50px] top-0 bottom-0 w-[300px] z-30 h-full border-r border-[#333] shadow-2xl bg-[#1a1a1a]"
-                >
-                    <Browser
-                        onImport={handleImportAudio}
-                        onImportFromLibrary={handleImportLibraryEntry}
-                        onCreateGeneratorTrack={handleCreateBrowserGeneratorTrack}
-                        tracks={tracks}
-                    />
-                </FluidPanel>
-
-                <FluidPanel
-                    isOpen={showNoteScanner}
-                    direction="fade"
-                    keepMounted
-                    className="absolute left-[50px] top-0 right-0 bottom-0 z-[80] h-full border-l border-[#333] shadow-2xl bg-[#0a0a0d]/95 backdrop-blur-[2px]"
-                >
-                    {hasLoadedNoteScanner && (
-                        <React.Suspense fallback={<div className="h-full w-full bg-[#0a0a0d]" />}>
-                            <NoteScannerPanel
-                                isOpen={showNoteScanner}
-                                tracks={tracks}
-                                bpm={transport.bpm}
-                                selectedTrackId={selectedTrackId}
-                                onClose={closeAllToolPanels}
-                                onCreateMidiTrack={handleCreateMidiTrackFromScan}
-                                onInsertIntoTrack={handleInsertScanIntoMidiTrack}
-                            />
-                        </React.Suspense>
-                    )}
-                </FluidPanel>
+                {!isScannerImmersive && (
+                    <FluidPanel
+                        isOpen={showBrowser}
+                        direction="left"
+                        className="absolute left-[50px] top-0 bottom-0 w-[300px] z-30 h-full border-r border-[#333] shadow-2xl bg-[#1a1a1a]"
+                    >
+                        <Browser
+                            onImport={handleImportAudio}
+                            onImportFromLibrary={handleImportLibraryEntry}
+                            onCreateGeneratorTrack={handleCreateBrowserGeneratorTrack}
+                            tracks={tracks}
+                        />
+                    </FluidPanel>
+                )}
 
                 <div className="flex-1 overflow-hidden relative flex flex-col bg-transparent">
-                    {mainView === 'arrange' ? (
+                    {isScannerImmersive ? (
+                        <div className="flex-1 overflow-hidden bg-[#090b12] animate-view-enter">
+                            {hasLoadedNoteScanner && (
+                                <React.Suspense fallback={<div className="h-full w-full bg-[#0a0a0d]" />}>
+                                    <PianoScoreWorkspace
+                                        isOpen={showNoteScanner}
+                                        tracks={tracks}
+                                        transport={transport}
+                                        selectedTrackId={selectedTrackId}
+                                        selectedClipId={selectedClipId}
+                                        scoreWorkspaces={scoreWorkspaces}
+                                        onClose={closeAllToolPanels}
+                                        onScoreWorkspacesChange={setScoreWorkspaces}
+                                        onCreateMidiTrackFromScore={handleCreateMidiTrackFromScan}
+                                        onUpdateMidiClip={handleUpdateMidiClipFromScore}
+                                        onSelectSource={handleSelectPianoScoreSource}
+                                        onPlay={handlePlay}
+                                        onPause={handlePause}
+                                        onStop={handleStop}
+                                        onSeekToBarTime={handleSeekToBarTime}
+                                    />
+                                </React.Suspense>
+                            )}
+                        </div>
+                    ) : mainView === 'arrange' ? (
                         <div key="arrange" className="flex-1 overflow-hidden bg-transparent relative animate-view-enter">
                             <div
                                 ref={timelineContainerRef}
@@ -3966,12 +4920,14 @@ const App: React.FC = () => {
                                     uiFrameBudgetMs={timelineUiFrameBudgetMs}
                                     meterFrameBudgetMs={timelineMeterFrameBudgetMs}
                                     maxActiveMeterTracks={timelineMaxActiveMeterTracks}
+                                    simplifyPlaybackVisuals={visualPerformance.simplifyPlaybackVisuals}
                                 />
                             </div>
                             <div className="absolute right-0 top-0 bottom-0 w-[292px] z-[85]">
                                 <TakeLanesPanel
                                     track={selectedAudioTrack}
                                     selectedClipId={selectedClipId}
+                                    selectedTrackPunchRange={selectedTrackPunchRange}
                                     onSelectTake={handleSelectTakeFromPanel}
                                     onToggleTakeMute={handleToggleTakeMuteFromPanel}
                                     onToggleTakeSolo={handleToggleTakeSoloFromPanel}
@@ -3985,8 +4941,7 @@ const App: React.FC = () => {
                             <SessionView
                                 tracks={tracks}
                                 bpm={transport.bpm}
-                                sessionHealthSnapshot={sessionHealthSnapshot}
-                                engineStats={engineStats}
+                                overloadDecision={sessionOverloadDecision}
                                 onClipSelect={handleClipSelect}
                                 onExternalDrop={(trackId, sceneIndex, payload) => {
                                     void handleSessionExternalDrop(trackId, sceneIndex, payload);
@@ -4012,35 +4967,49 @@ const App: React.FC = () => {
                             />
                         </div>
                     )}
-                    <div className="h-[300px] bg-[#1a1a1a] border-t border-daw-border relative z-50 shadow-[0_-5px_30px_rgba(0,0,0,0.3)] shrink-0 flex flex-col">
-                        <div className="h-7 bg-[#121212] border-b border-daw-border flex items-end px-2 gap-1">
-                            <button onClick={() => setBottomView('devices')} className={`text-[9px] font-bold px-4 py-1.5 rounded-t-sm transition-all uppercase tracking-wider flex items-center gap-2 ${bottomView === 'devices' ? 'bg-[#1a1a1a] text-white border-t border-l border-r border-daw-border relative top-[1px]' : 'text-gray-500 hover:text-white bg-[#0e0e0e]'}`}><Cpu size={10} /> Dispositivos</button>
-                            <button onClick={() => setBottomView('editor')} className={`text-[9px] font-bold px-4 py-1.5 rounded-t-sm transition-all uppercase tracking-wider flex items-center gap-2 ${bottomView === 'editor' ? 'bg-[#1a1a1a] text-white border-t border-l border-r border-daw-border relative top-[1px]' : 'text-gray-500 hover:text-white bg-[#0e0e0e]'}`}><Layers size={10} /> Editor</button>
-                        </div>
-                        <div className="flex-1 overflow-hidden relative bg-[#1a1a1a] flex">
-                            <div className="min-w-0 flex-1 h-full">
-                                {bottomView === 'devices' ? (
-                                    <div key="devices" className="h-full animate-view-enter">
-                                        <DeviceRack selectedTrack={selectedTrack} onTrackUpdate={(id, updates) => updateTrackById(id, updates, { recolor: false })} />
-                                    </div>
-                                ) : (
-                                    <div key="editor" className="h-full animate-view-enter">
-                                        <Editor
-                                            track={selectedTrack}
-                                            selectedClipId={selectedClipId}
-                                            onClipUpdate={handleEditorClipUpdate}
-                                            transport={editorTransportView}
+                    {!isScannerImmersive && (
+                        <div className="h-[300px] bg-[#1a1a1a] border-t border-daw-border relative z-50 shadow-[0_-5px_30px_rgba(0,0,0,0.3)] shrink-0 flex flex-col">
+                            <div className="h-7 bg-[#121212] border-b border-daw-border flex items-end px-2 gap-1">
+                                <button onClick={() => setBottomView('devices')} className={`text-[9px] font-bold px-4 py-1.5 rounded-t-sm transition-all uppercase tracking-wider flex items-center gap-2 ${bottomView === 'devices' ? 'bg-[#1a1a1a] text-white border-t border-l border-r border-daw-border relative top-[1px]' : 'text-gray-500 hover:text-white bg-[#0e0e0e]'}`}><Cpu size={10} /> Dispositivos</button>
+                                <button onClick={() => setBottomView('editor')} className={`text-[9px] font-bold px-4 py-1.5 rounded-t-sm transition-all uppercase tracking-wider flex items-center gap-2 ${bottomView === 'editor' ? 'bg-[#1a1a1a] text-white border-t border-l border-r border-daw-border relative top-[1px]' : 'text-gray-500 hover:text-white bg-[#0e0e0e]'}`}><Layers size={10} /> Editor</button>
+                            </div>
+                            <div className="flex-1 overflow-hidden relative bg-[#1a1a1a] flex">
+                                <div className="min-w-0 flex-1 h-full">
+                                    {bottomView === 'devices' ? (
+                                        <div key="devices" className="h-full animate-view-enter">
+                                            <DeviceRack selectedTrack={selectedTrack} onTrackUpdate={(id, updates) => updateTrackById(id, updates, { recolor: false })} />
+                                        </div>
+                                    ) : (
+                                        <div key="editor" className="h-full animate-view-enter">
+                                            <Editor
+                                                track={selectedTrack}
+                                                selectedClipId={selectedClipId}
+                                                audioViewState={selectedAudioClipEditorView}
+                                                selectedTrackPunchRange={selectedTrackPunchRange}
+                                                onClipUpdate={handleEditorClipUpdate}
+                                                onConsolidate={handleConsolidateClips}
+                                                onReverse={handleReverseClip}
+                                                onPromoteToComp={handlePromoteClipToComp}
+                                                transport={editorTransportView}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                                {bottomView === 'devices' && (
+                                    <div
+                                        className="h-full shrink-0 border-l border-white/8 bg-[#0d0d14]"
+                                        style={{ width: 'clamp(220px, 24vw, 320px)', flex: '0 0 clamp(220px, 24vw, 320px)' }}
+                                    >
+                                        <AsciiPerformerDock
+                                            isPlaying={transport.isPlaying}
+                                            suspendAnimation={transport.isPlaying || transport.isRecording || visualPerformance.freezePerformerDock || globalAudioPriority.disableHeavyVisuals}
+                                            frameIntervalMs={performerFrameIntervalMs}
                                         />
                                     </div>
                                 )}
                             </div>
-                            <AsciiPerformerDock
-                                isPlaying={transport.isPlaying}
-                                suspendAnimation={globalAudioPriority.disableHeavyVisuals}
-                                frameIntervalMs={performerFrameIntervalMs}
-                            />
                         </div>
-                    </div>
+                    )}
                 </div>
             </div>
             {!isScannerImmersive && (
@@ -4073,12 +5042,62 @@ const App: React.FC = () => {
                             <span className={`w-1.5 h-1.5 rounded-full ${engineStats.state === 'running' ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.9)]' : 'bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.8)]'}`}></span>
                             <span className="text-[9px] font-mono text-gray-300">{Math.round(transport.bpm)} BPM</span>
                         </div>
+                        {diagnosticsVisible && visualPerformance.showBadge && (
+                            <div className="flex items-center gap-2 px-2.5 h-5 rounded-sm border border-white/10 bg-white/[0.03]">
+                                <span className="text-[9px] uppercase tracking-[0.14em] text-gray-500">Visual Load</span>
+                                <span className={`${visualPerformance.mode === 'degraded' ? 'text-amber-200' : 'text-gray-300'} text-[9px] font-mono`}>
+                                    {visualPerformance.uiFpsP95.toFixed(1)} FPS
+                                </span>
+                            </div>
+                        )}
                         <div className="flex items-center gap-2 px-2.5 h-5 rounded-sm border border-white/10 bg-white/[0.03]" title={`Autosave reason: ${lastAutosaveReason}`}>
                             <span className="text-[9px] uppercase tracking-[0.14em] text-gray-500">Autosave</span>
                             <span className="text-[9px] font-mono text-gray-200">
                                 {lastAutosaveAt ? new Date(lastAutosaveAt).toLocaleTimeString() : '--:--:--'}
                             </span>
                         </div>
+                        <div
+                            className={`flex items-center gap-2 px-2.5 h-5 rounded-sm border ${
+                                projectIntegrityReport?.issueCount
+                                    ? 'border-amber-400/30 bg-amber-500/8'
+                                    : 'border-white/10 bg-white/[0.03]'
+                            }`}
+                            title={projectIntegrityReport
+                                ? summarizeProjectIntegrityReport(projectIntegrityReport, 'Integrity')
+                                : 'Integrity pending'}
+                        >
+                            <span className="text-[9px] uppercase tracking-[0.14em] text-gray-500">Integrity</span>
+                            <span className={`text-[9px] font-mono ${
+                                projectIntegrityReport?.issueCount
+                                    ? 'text-amber-200'
+                                    : 'text-gray-200'
+                            }`}>
+                                {projectIntegrityReport
+                                    ? (projectIntegrityReport.issueCount > 0 ? `FIX ${projectIntegrityReport.issueCount}` : 'OK')
+                                    : '--'}
+                            </span>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setActiveModal('monitoring-routes')}
+                            className={`flex items-center gap-2 px-2.5 h-5 rounded-sm border ${
+                                recordingJournalSummary.activeCount > 0 || recordingJournalSummary.failedCount > 0 || recordingJournalSummary.recoveredCount > 0
+                                    ? 'border-fuchsia-400/35 bg-fuchsia-500/10'
+                                    : 'border-white/10 bg-white/[0.03]'
+                            }`}
+                            title={`REC Journal active=${recordingJournalSummary.activeCount} committed=${recordingJournalSummary.committedCount} failed=${recordingJournalSummary.failedCount} recovered=${recordingJournalSummary.recoveredCount} monitoring=${monitoringRouteSnapshot.activeCount} pendingFinalize=${monitoringRouteSnapshot.pendingFinalizeCount} sharedInput=${monitoringRouteSnapshot.sharedInputStreamCount}`}
+                        >
+                            <span className="text-[9px] uppercase tracking-[0.14em] text-gray-500">REC Journal</span>
+                            <span className={`text-[9px] font-mono ${
+                                recordingJournalSummary.activeCount > 0
+                                    ? 'text-fuchsia-200'
+                                    : recordingJournalSummary.failedCount > 0 || recordingJournalSummary.recoveredCount > 0
+                                        ? 'text-amber-200'
+                                        : 'text-gray-200'
+                            }`}>
+                                A{recordingJournalSummary.activeCount} F{recordingJournalSummary.failedCount + recordingJournalSummary.recoveredCount} M{monitoringRouteSnapshot.activeCount}
+                            </span>
+                        </button>
                     </div>
                 </div>
             )}
@@ -4115,6 +5134,163 @@ const App: React.FC = () => {
                         >
                             Descartar y continuar
                         </button>
+                    </div>
+                </div>
+            </Modal>
+            <Modal isOpen={activeModal === 'recording-recovery'} onClose={acknowledgeRecordingRecoveryNotice} title="REC Journal Recovery">
+                <div className="flex flex-col gap-4">
+                    <div className="rounded-sm border border-amber-400/20 bg-amber-500/5 p-3">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-amber-200">Resumen</div>
+                        <div className="mt-2 text-xs text-gray-300 leading-relaxed">
+                            Detectamos entradas del journal de grabacion que requieren atencion. Esto no borra tomas ni cambia el proyecto; solo te avisa que hubo sesiones interrumpidas o fallidas que conviene revisar.
+                        </div>
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-[10px] font-mono">
+                            <div className="rounded-sm border border-white/10 bg-white/[0.03] px-2 py-2 text-center">
+                                <div className="text-gray-500 uppercase tracking-[0.12em]">Total</div>
+                                <div className="mt-1 text-gray-100">{recordingRecoveryAttentionSummary.totalCount}</div>
+                            </div>
+                            <div className="rounded-sm border border-red-400/20 bg-red-500/5 px-2 py-2 text-center">
+                                <div className="text-red-200 uppercase tracking-[0.12em]">Failed</div>
+                                <div className="mt-1 text-red-100">{recordingRecoveryAttentionSummary.failedCount}</div>
+                            </div>
+                            <div className="rounded-sm border border-amber-400/20 bg-amber-500/5 px-2 py-2 text-center">
+                                <div className="text-amber-200 uppercase tracking-[0.12em]">Recovered</div>
+                                <div className="mt-1 text-amber-100">{recordingRecoveryAttentionSummary.recoveredCount}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="flex flex-col gap-2">
+                        {recordingRecoveryAttentionEntries.slice(0, 8).map((entry) => {
+                            const lastPhase = entry.phases.at(-1);
+                            return (
+                                <div key={entry.id} className="rounded-sm border border-white/10 bg-white/[0.03] px-3 py-3">
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="min-w-0">
+                                            <div className="text-xs font-semibold text-white truncate">{entry.trackName}</div>
+                                            <div className="mt-1 text-[10px] uppercase tracking-[0.16em] text-gray-500">{entry.status}</div>
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 font-mono shrink-0">{new Date(entry.updatedAt).toLocaleString()}</div>
+                                    </div>
+                                    <div className="mt-2 text-[11px] text-gray-300">
+                                        {entry.failureReason || lastPhase?.message || 'Sin detalle adicional.'}
+                                    </div>
+                                    <div className="mt-2 text-[10px] text-gray-500 font-mono">
+                                        Phase: {lastPhase?.phase || 'unknown'}{typeof lastPhase?.barTime === 'number' ? ` · bar ${lastPhase.barTime.toFixed(3)}` : ''}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <div className="flex flex-col gap-2">
+                        <button
+                            onClick={acknowledgeRecordingRecoveryNotice}
+                            className="w-full py-2.5 rounded-sm bg-white text-black text-xs font-bold uppercase tracking-wider hover:bg-gray-200 transition-all"
+                        >
+                            Marcar revisado
+                        </button>
+                        <div className="text-[10px] text-gray-500 leading-relaxed">
+                            El journal permanece guardado para diagnostico. Este acuse solo oculta el aviso hasta que aparezca una incidencia nueva.
+                        </div>
+                    </div>
+                </div>
+            </Modal>
+            <Modal isOpen={activeModal === 'monitoring-routes'} onClose={() => setActiveModal(null)} title="Monitoring Router v2">
+                <div className="flex flex-col gap-4">
+                    <div className="rounded-sm border border-white/10 bg-white/[0.03] p-3">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Estado operativo</div>
+                        <div className="mt-3 grid grid-cols-3 md:grid-cols-7 gap-2 text-[10px] font-mono">
+                            <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2 text-center">
+                                <div className="text-gray-500 uppercase tracking-[0.12em]">Active</div>
+                                <div className="mt-1 text-gray-100">{monitoringRouteSnapshot.activeCount}</div>
+                            </div>
+                            <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2 text-center">
+                                <div className="text-gray-500 uppercase tracking-[0.12em]">Stereo</div>
+                                <div className="mt-1 text-gray-100">{monitoringRouteSnapshot.stereoCount}</div>
+                            </div>
+                            <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2 text-center">
+                                <div className="text-gray-500 uppercase tracking-[0.12em]">Shared</div>
+                                <div className="mt-1 text-gray-100">{monitoringRouteSnapshot.sharedInputStreamCount}</div>
+                            </div>
+                            <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2 text-center">
+                                <div className="text-gray-500 uppercase tracking-[0.12em]">Finalize</div>
+                                <div className="mt-1 text-gray-100">{monitoringRouteSnapshot.pendingFinalizeCount}</div>
+                            </div>
+                            <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2 text-center">
+                                <div className="text-gray-500 uppercase tracking-[0.12em]">Base Lat</div>
+                                <div className="mt-1 text-gray-100">{monitoringLatencySummary.baseLatencyMs.toFixed(2)}ms</div>
+                            </div>
+                            <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2 text-center">
+                                <div className="text-gray-500 uppercase tracking-[0.12em]">Comp Max</div>
+                                <div className="mt-1 text-gray-100">{monitoringLatencySummary.maxLatencyCompensationMs.toFixed(2)}ms</div>
+                            </div>
+                            <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2 text-center">
+                                <div className="text-gray-500 uppercase tracking-[0.12em]">Max Eff</div>
+                                <div className="mt-1 text-gray-100">{monitoringLatencySummary.maxEffectiveMonitorLatencyMs.toFixed(2)}ms</div>
+                            </div>
+                        </div>
+                        <div className="mt-3 text-[10px] text-gray-500 leading-relaxed">
+                            Esta vista permite auditar modo de entrada, latencia de monitoreo, stream compartido y pistas con finalize pendiente sin mezclarlo con diagnostico invasivo en la UI principal.
+                        </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="text-[10px] uppercase tracking-[0.16em] text-gray-500">Rutas por pista</div>
+                        <button
+                            onClick={disableAllMonitoring}
+                            className="px-3 h-8 rounded-sm border border-red-400/30 text-[10px] font-bold uppercase tracking-[0.16em] text-red-200 hover:bg-red-500/10 transition-all"
+                        >
+                            Panic Stop Monitoring
+                        </button>
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                        {monitoringRouteDetails.length === 0 && (
+                            <div className="rounded-sm border border-white/10 bg-white/[0.03] px-3 py-4 text-[11px] text-gray-400">
+                                No hay rutas de monitoring configuradas.
+                            </div>
+                        )}
+                        {monitoringRouteDetails.map((route) => (
+                            <div key={route.trackId} className="rounded-sm border border-white/10 bg-white/[0.03] px-3 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <div className="text-xs font-semibold text-white truncate">{route.trackName}</div>
+                                        <div className="mt-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.14em]">
+                                            <span className={route.active ? 'text-emerald-300' : 'text-gray-500'}>
+                                                {route.active ? 'Active' : 'Idle'}
+                                            </span>
+                                            <span className="text-gray-500">·</span>
+                                            <span className="text-gray-300">{route.mode}</span>
+                                            {route.pendingFinalize && (
+                                                <>
+                                                    <span className="text-gray-500">·</span>
+                                                    <span className="text-amber-200">Pending Finalize</span>
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => disableTrackMonitoring(route.trackId)}
+                                        className="px-2.5 h-7 rounded-sm border border-white/10 text-[10px] uppercase tracking-[0.16em] text-gray-300 hover:bg-white/[0.06] transition-all shrink-0"
+                                    >
+                                        Stop
+                                    </button>
+                                </div>
+                                <div className="mt-3 grid grid-cols-3 gap-2 text-[10px] font-mono">
+                                    <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2">
+                                        <div className="text-gray-500 uppercase tracking-[0.12em]">Latency</div>
+                                        <div className="mt-1 text-gray-100">{route.latencyCompensationMs.toFixed(2)}ms</div>
+                                    </div>
+                                    <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2">
+                                        <div className="text-gray-500 uppercase tracking-[0.12em]">Enabled</div>
+                                        <div className="mt-1 text-gray-100">{route.monitoringEnabled ? 'yes' : 'no'}</div>
+                                    </div>
+                                    <div className="rounded-sm border border-white/10 bg-black/20 px-2 py-2">
+                                        <div className="text-gray-500 uppercase tracking-[0.12em]">Shared Stream</div>
+                                        <div className="mt-1 text-gray-100">{route.sharedInputStream ? 'yes' : 'no'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 </div>
             </Modal>

@@ -43,6 +43,9 @@ jobs:
       - name: Live capture benchmark (48x8)
         run: npm run capture:live:48x8
 
+      - name: Transport command contract gate
+        run: npm run transport:gate
+
       - name: Session launch strict gate
         run: npm run launch:gate:strict -- --report benchmarks/session-launch/latest-report.json --out benchmarks/session-launch/latest-gate.json
         env:
@@ -59,6 +62,9 @@ jobs:
 
       - name: Audio priority flapping gate
         run: npm run audio-priority:gate
+
+      - name: Public 1.0 release readiness report
+        run: npm run release:readiness
 
       - name: Upload performance gate artifacts
         if: ${{ always() && hashFiles('benchmarks/audio-performance/latest-report.json') != '' }}
@@ -94,3 +100,20 @@ jobs:
           path: |
             benchmarks/audio-priority/latest-transitions.json
             benchmarks/audio-priority/latest-gate.json
+
+      - name: Upload transport gate artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport-gate
+          path: |
+            benchmarks/transport/latest-runtime.json
+            benchmarks/transport/latest-gate.json
+
+      - name: Upload release readiness artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-readiness
+          path: |
+            benchmarks/release-readiness/latest-report.json

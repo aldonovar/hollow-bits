@@ -1,11 +1,12 @@
 // path: src/services/audioEngine.ts
-import { AudioSettings, Clip, Device, MicInputChannelMode, Track, TrackType } from '../types';
+import { AudioSettings, AutomationRuntimeFrame, Clip, Device, MicInputChannelMode, MonitoringRouteSnapshot, Track, TrackType, TransportAuthoritySnapshot, TransportPlaybackSessionId } from '../types';
 import {
     denormalizeTrackParam,
     getLaneByParam,
     sampleAutomationLaneAtBar
 } from './automationService';
 import { sanitizeAudioSettingsCandidate } from './audioSettingsNormalizer';
+import { barTimeToPosition } from './transportStateService';
 
 interface ActiveSource {
     source?: AudioBufferSourceNode;
@@ -16,6 +17,7 @@ interface ActiveSource {
     originalBpm: number;
     clipTransposeSemitones: number;
     clipPlaybackRate: number;
+    sessionId?: TransportPlaybackSessionId;
 }
 
 interface RecordingSession {
@@ -320,6 +322,10 @@ class AudioEngine {
     granularOverlap: number = 2;
     virtualStartTime: number = 0; // The AudioContext time when playback started
     offsetTime: number = 0; // The project time offset (for seek/resume)
+    transportCommandEpoch: number = 0;
+    activePlaybackSessionId: TransportPlaybackSessionId = 0;
+    playbackSessionSeed: number = 0;
+    playbackCleanupTimeouts: Set<number> = new Set();
 
     // Loop State
     isLooping: boolean = false;
@@ -328,6 +334,7 @@ class AudioEngine {
 
     // Recording
     recordingSessions: Map<string, RecordingSession> = new Map();
+    pendingRecordingFinalizations: Map<string, EngineRecordingResult> = new Map();
     monitoringSessions: Map<string, MonitoringSession> = new Map();
 
     // Settings
@@ -479,6 +486,37 @@ class AudioEngine {
         this.schedulerCpuLoadSamplesPercent = [];
         this.schedulerQueueCandidateSamples = [];
         this.schedulerQueueRebuildCount = 0;
+    }
+
+    private nextTransportCommandEpoch(): number {
+        this.transportCommandEpoch += 1;
+        return this.transportCommandEpoch;
+    }
+
+    private beginPlaybackSession(): TransportPlaybackSessionId {
+        this.playbackSessionSeed += 1;
+        this.activePlaybackSessionId = this.playbackSessionSeed;
+        return this.activePlaybackSessionId;
+    }
+
+    private clearPlaybackCleanupTimeouts() {
+        this.playbackCleanupTimeouts.forEach((timeoutId) => {
+            window.clearTimeout(timeoutId);
+        });
+        this.playbackCleanupTimeouts.clear();
+    }
+
+    private schedulePlaybackCleanup(callback: () => void, delayMs: number) {
+        const timeoutId = window.setTimeout(() => {
+            this.playbackCleanupTimeouts.delete(timeoutId);
+            callback();
+        }, delayMs);
+        this.playbackCleanupTimeouts.add(timeoutId);
+    }
+
+    private invalidatePlaybackSession() {
+        this.activePlaybackSessionId = 0;
+        this.clearPlaybackCleanupTimeouts();
     }
 
     private getSchedulerClipArrayToken(clips: Clip[]): number {
@@ -1107,6 +1145,53 @@ class AudioEngine {
             isVcaMuted,
             blockedBySolo
         };
+    }
+
+    private applyTrackMixToGraph(
+        track: Track,
+        nodes: TrackNodeGraph,
+        context: MixEvaluationContext,
+        now: number,
+        graphStats?: GraphUpdateStats
+    ) {
+        const gainState = this.evaluateTrackGainState(track, context);
+        const trackVolumeDb = this.finiteOr(track.volume, 0);
+        const vcaVolumeDb = gainState.shouldApplyVca ? this.finiteOr(gainState.vcaTrack!.volume, 0) : 0;
+        const vcaGainLinear = gainState.shouldApplyVca ? this.dbToLinear(vcaVolumeDb) : 1;
+
+        let targetGain = this.dbToLinear(trackVolumeDb) * vcaGainLinear;
+
+        if (track.isMuted || gainState.isVcaMuted || gainState.blockedBySolo) {
+            targetGain = 0;
+        }
+
+        const safeTargetGain = Number.isFinite(targetGain) ? targetGain : 0;
+        const safePan = this.finiteOr(track.pan, 0);
+        const safeReverb = this.finiteOr(track.reverb || 0, 0);
+        const normalizedPan = this.normalizePan(safePan);
+        const normalizedReverb = this.normalizeReverbSend(safeReverb);
+        const previousMixState = this.trackMixParamState.get(track.id);
+
+        if (this.shouldUpdateNumber(previousMixState?.gain, safeTargetGain, 0.0008)) {
+            nodes.gain.gain.setTargetAtTime(safeTargetGain, now, 0.02);
+            if (graphStats) graphStats.mixParamWrites += 1;
+        }
+
+        if (this.shouldUpdateNumber(previousMixState?.pan, normalizedPan, 0.0008)) {
+            nodes.panner.pan.setTargetAtTime(normalizedPan, now, 0.02);
+            if (graphStats) graphStats.mixParamWrites += 1;
+        }
+
+        if (this.shouldUpdateNumber(previousMixState?.reverb, normalizedReverb, 0.0015)) {
+            nodes.reverbGain.gain.setTargetAtTime(normalizedReverb, now, 0.02);
+            if (graphStats) graphStats.mixParamWrites += 1;
+        }
+
+        this.trackMixParamState.set(track.id, {
+            gain: safeTargetGain,
+            pan: normalizedPan,
+            reverb: normalizedReverb
+        });
     }
 
     private getDesiredOutputGroupId(track: Track, groupTrackIdSet: Set<string>): string | null {
@@ -1886,17 +1971,37 @@ class AudioEngine {
 
             // WATCHDOG: Check for "Zombie" context (Driver Locked but Silent)
             // Common with 192kHz on some Windows drivers where context says "running" but clock is 0.
+            // Use a second confirmation window so slow-but-valid startups are not misclassified as lockups.
+            const createdContext = this.ctx;
             setTimeout(() => {
-                if (this.ctx && this.ctx.state === 'running' && this.ctx.currentTime < 0.001) {
+                if (this.ctx !== createdContext || !createdContext || createdContext.state !== 'running') {
+                    return;
+                }
+
+                const baselineCurrentTime = createdContext.currentTime;
+                if (baselineCurrentTime >= 0.001) {
+                    return;
+                }
+
+                setTimeout(() => {
+                    if (this.ctx !== createdContext || !createdContext || createdContext.state !== 'running') {
+                        return;
+                    }
+
+                    if (createdContext.currentTime > baselineCurrentTime + 0.0005) {
+                        return;
+                    }
+
                     console.error("[AudioEngine] WATCHDOG TRIGGERED: Context is running but time is stuck! (Driver Lockup?). Forcing downgrade to 48kHz.");
 
-                    // Force Downgrade
-                    this.ctx.close().then(() => {
+                    createdContext.close().then(() => {
+                        if (this.ctx === createdContext) {
+                            this.ctx = null;
+                        }
                         this.isPlaying = false;
                         this.stopSchedulerDriver();
                         this.stopPlayback();
 
-                        this.ctx = null;
                         this.requestedSettings.sampleRate = 48000;
                         this.settings.sampleRate = 48000;
                         this.masterGain = null; // Force graph rebuild
@@ -1930,7 +2035,7 @@ class AudioEngine {
                             console.error('[AudioEngine] Watchdog recovery failed after downgrade.', error);
                         });
                     });
-                }
+                }, 450);
             }, 1000);
 
             // DIAGNOSTICS
@@ -2244,6 +2349,32 @@ class AudioEngine {
         this.monitoringSessions.delete(trackId);
     }
 
+    stopTrackMonitoring(trackId: string) {
+        this.stopMonitoring(trackId);
+    }
+
+    getMonitoringRouteSnapshots(): MonitoringRouteSnapshot[] {
+        return this.currentTracksSnapshot
+            .filter((track) => track.type === TrackType.AUDIO)
+            .map((track) => {
+                const mode = this.resolveMonitorInputMode(track);
+                const session = this.monitoringSessions.get(track.id);
+                return {
+                    trackId: track.id,
+                    trackName: track.name,
+                    active: Boolean(session) && this.isTrackMonitoringActive(track),
+                    mode,
+                    latencyCompensationMs: this.clamp(
+                        this.finiteOr(track.micSettings?.monitorLatencyCompensationMs ?? 0, 0),
+                        0,
+                        24
+                    ),
+                    monitoringEnabled: Boolean(track.micSettings?.monitoringEnabled),
+                    sharedInputStream: Boolean(session && this.recordingSessions.get(track.id)?.stream === session.stream)
+                };
+            });
+    }
+
     private syncMonitoringSessions(tracks: Track[]) {
         const eligibleTrackIds = new Set(
             tracks
@@ -2438,50 +2569,7 @@ class AudioEngine {
 
             if (!nodes) return;
 
-            // Determine Effective Volume
-            // If track is Muted -> 0
-            // If any track is Soloed AND this track is NOT Soloed -> 0
-            // Else -> Volume
-            const gainState = this.evaluateTrackGainState(track, mixContext);
-            const trackVolumeDb = this.finiteOr(track.volume, 0);
-            const vcaVolumeDb = gainState.shouldApplyVca ? this.finiteOr(gainState.vcaTrack!.volume, 0) : 0;
-            const vcaGainLinear = gainState.shouldApplyVca ? this.dbToLinear(vcaVolumeDb) : 1;
-
-            let targetGain = this.dbToLinear(trackVolumeDb) * vcaGainLinear;
-            if (track.isMuted || gainState.isVcaMuted || gainState.blockedBySolo) {
-                targetGain = 0;
-            }
-
-            const safeTargetGain = Number.isFinite(targetGain) ? targetGain : 0;
-            const safePan = this.finiteOr(track.pan, 0);
-            const safeReverb = this.finiteOr(track.reverb || 0, 0);
-
-            const normalizedPan = this.normalizePan(safePan);
-            const normalizedReverb = this.normalizeReverbSend(safeReverb);
-            const previousMixState = this.trackMixParamState.get(track.id);
-
-            if (this.shouldUpdateNumber(previousMixState?.gain, safeTargetGain, 0.0008)) {
-                nodes.gain.gain.setTargetAtTime(safeTargetGain, now, 0.02);
-                graphStats.mixParamWrites += 1;
-            }
-
-            if (this.shouldUpdateNumber(previousMixState?.pan, normalizedPan, 0.0008)) {
-                nodes.panner.pan.setTargetAtTime(normalizedPan, now, 0.02);
-                graphStats.mixParamWrites += 1;
-            }
-
-            // Reverb Parameter (Input 0-1 or dB)
-            // Assuming track.reverb is a 0-1 send level.
-            if (this.shouldUpdateNumber(previousMixState?.reverb, normalizedReverb, 0.0015)) {
-                nodes.reverbGain.gain.setTargetAtTime(normalizedReverb, now, 0.02);
-                graphStats.mixParamWrites += 1;
-            }
-
-            this.trackMixParamState.set(track.id, {
-                gain: safeTargetGain,
-                pan: normalizedPan,
-                reverb: normalizedReverb
-            });
+            this.applyTrackMixToGraph(track, nodes, mixContext, now, graphStats);
 
             const nextSignature = this.createDeviceSignature(track.devices);
             if (this.trackDeviceSignatures.get(track.id) !== nextSignature) {
@@ -2669,6 +2757,51 @@ class AudioEngine {
 
         this.syncCueRouting();
         this.syncMonitoringSessions(safeTracks);
+    }
+
+    applyAutomationRuntimeFrame(frame: AutomationRuntimeFrame) {
+        if (!this.ctx || !this.masterGain || !frame.values.length) {
+            return;
+        }
+
+        const safeTracks = this.currentTracksSnapshot.length > 0
+            ? this.currentTracksSnapshot
+            : Array.from(this.trackNodes.keys()).map((trackId) => ({
+                id: trackId,
+                name: trackId,
+                type: TrackType.AUDIO,
+                color: '#ffffff',
+                volume: 0,
+                pan: 0,
+                reverb: 0,
+                transpose: 0,
+                monitor: 'auto' as const,
+                isMuted: false,
+                isSoloed: false,
+                isArmed: false,
+                clips: [],
+                sessionClips: [],
+                devices: []
+            }));
+
+        const tracksById = new Map(safeTracks.map((track) => [track.id, track]));
+        const mixContext = this.buildMixEvaluationContext(safeTracks);
+        const now = this.ctx.currentTime;
+
+        frame.values.forEach((value) => {
+            const sourceTrack = tracksById.get(value.trackId);
+            const nodes = this.trackNodes.get(value.trackId);
+            if (!sourceTrack || !nodes) return;
+
+            const runtimeTrack: Track = {
+                ...sourceTrack,
+                ...(typeof value.volume === 'number' ? { volume: value.volume } : {}),
+                ...(typeof value.pan === 'number' ? { pan: value.pan } : {}),
+                ...(typeof value.reverb === 'number' ? { reverb: value.reverb } : {})
+            };
+
+            this.applyTrackMixToGraph(runtimeTrack, nodes, mixContext, now);
+        });
     }
 
     // --- TRANSPORT CONTROLS ---
@@ -2963,11 +3096,18 @@ class AudioEngine {
         };
     }
 
+    resetRuntimeTelemetry() {
+        this.resetSchedulerTelemetry();
+    }
+
     getRuntimeDiagnostics() {
         return {
             contextState: this.ctx?.state || 'closed',
             hasMasterGraph: Boolean(this.masterGain && this.masterOutput),
             activeSourceCount: this.activeSources.size,
+            activePlaybackSessionId: this.activePlaybackSessionId,
+            transportCommandEpoch: this.transportCommandEpoch,
+            offsetTimeSec: this.offsetTime,
             trackNodeCount: this.trackNodes.size,
             masterVolumeDb: this.masterVolumeDb,
             cueTrackId: this.cueTrackId,
@@ -3050,23 +3190,34 @@ class AudioEngine {
             return cachedEnvelope;
         }
 
-        const left = buffer.getChannelData(0);
-        const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
+        const channels: Float32Array[] = [];
+        for (let channelIndex = 0; channelIndex < buffer.numberOfChannels; channelIndex += 1) {
+            channels.push(buffer.getChannelData(channelIndex));
+        }
+        if (channels.length === 0) {
+            channels.push(buffer.getChannelData(0));
+        }
 
-        const stepSize = Math.max(1, Math.floor(left.length / safeSteps));
+        const stepSize = Math.max(1, Math.floor(buffer.length / safeSteps));
         const minValues = new Float32Array(safeSteps);
         const maxValues = new Float32Array(safeSteps);
 
         for (let i = 0; i < safeSteps; i++) {
             const start = i * stepSize;
-            const end = Math.min(left.length, start + stepSize);
+            const end = Math.min(buffer.length, start + stepSize);
             let localMin = 1;
             let localMax = -1;
 
             for (let j = start; j < end; j++) {
-                const mixed = (left[j] + right[j]) * 0.5;
-                if (mixed < localMin) localMin = mixed;
-                if (mixed > localMax) localMax = mixed;
+                let sampleMin = 1;
+                let sampleMax = -1;
+                for (let channelIndex = 0; channelIndex < channels.length; channelIndex += 1) {
+                    const sample = channels[channelIndex][j] ?? 0;
+                    if (sample < sampleMin) sampleMin = sample;
+                    if (sample > sampleMax) sampleMax = sample;
+                }
+                if (sampleMin < localMin) localMin = sampleMin;
+                if (sampleMax > localMax) localMax = sampleMax;
             }
 
             minValues[i] = localMin === 1 ? 0 : localMin;
@@ -3127,6 +3278,26 @@ class AudioEngine {
         return this.ctx.currentTime - this.virtualStartTime;
     }
 
+    getTransportAuthoritySnapshot(): TransportAuthoritySnapshot {
+        const currentTimeSec = Math.max(0, this.getCurrentTime());
+        const secondsPerBar = (60 / Math.max(1, this.currentBpm)) * 4;
+        const currentBarTime = Math.max(1, 1 + (currentTimeSec / Math.max(0.0001, secondsPerBar)));
+        const position = barTimeToPosition(currentBarTime);
+
+        return {
+            capturedAt: Date.now(),
+            contextState: this.ctx?.state || 'closed',
+            schedulerMode: this.getEffectiveSchedulerMode(),
+            bpm: this.currentBpm,
+            currentTimeSec,
+            currentBarTime,
+            currentBar: position.currentBar,
+            currentBeat: position.currentBeat,
+            currentSixteenth: position.currentSixteenth,
+            isPlaying: this.isPlaying
+        };
+    }
+
     getContext(): AudioContext {
         if (!this.ctx) {
             // Auto-initialize if not yet created (for file decoding before user interaction)
@@ -3184,11 +3355,18 @@ class AudioEngine {
         return resumedAfterRestart && Boolean(this.masterGain && this.masterOutput);
     }
 
-    play(tracks: Track[], bpm: number, _pitch: number, offsetTime: number) {
+    private playInternal(tracks: Track[], bpm: number, _pitch: number, offsetTime: number, commandEpoch: number) {
+        if (commandEpoch !== this.transportCommandEpoch) {
+            return;
+        }
+
         if (!this.ctx || !this.masterGain) {
             void this.init(this.settings)
                 .then(() => {
-                    this.play(tracks, bpm, _pitch, offsetTime);
+                    if (commandEpoch !== this.transportCommandEpoch) {
+                        return;
+                    }
+                    this.playInternal(tracks, bpm, _pitch, offsetTime, commandEpoch);
                 })
                 .catch((error) => {
                     console.warn('No se pudo inicializar AudioContext al reproducir.', error);
@@ -3198,7 +3376,10 @@ class AudioEngine {
         if (this.ctx.state !== 'running') {
             void this.ctx.resume()
                 .then(() => {
-                    this.play(tracks, bpm, _pitch, offsetTime);
+                    if (commandEpoch !== this.transportCommandEpoch) {
+                        return;
+                    }
+                    this.playInternal(tracks, bpm, _pitch, offsetTime, commandEpoch);
                 })
                 .catch((error) => {
                     console.warn('No se pudo reanudar AudioContext al reproducir.', error);
@@ -3206,6 +3387,7 @@ class AudioEngine {
             return;
         }
 
+        this.invalidatePlaybackSession();
         this.stopPlayback();
         this.stopSchedulerDriver();
         this.resetSchedulerQueueState();
@@ -3215,34 +3397,53 @@ class AudioEngine {
 
         this.isPlaying = true;
         this.offsetTime = offsetTime;
+        const sessionId = this.beginPlaybackSession();
 
         // Calculate the "Zero Point" of the timeline relative to Now
         // ProjectTime = Now - VirtualStart
         // VirtualStart = Now - ProjectTime
         this.virtualStartTime = this.ctx.currentTime - offsetTime;
         this.primeSchedulerQueueState(offsetTime, offsetTime + this.scheduleAheadTime);
+        if (sessionId !== this.activePlaybackSessionId) {
+            return;
+        }
 
         // Start Scheduler
         this.startSchedulerDriver();
     }
 
+    play(tracks: Track[], bpm: number, _pitch: number, offsetTime: number) {
+        if (this.isPlaying && this.activePlaybackSessionId) {
+            return;
+        }
+        const commandEpoch = this.nextTransportCommandEpoch();
+        this.playInternal(tracks, bpm, _pitch, offsetTime, commandEpoch);
+    }
+
     pause() {
+        if (!this.isPlaying && this.activePlaybackSessionId === 0) {
+            return;
+        }
+        this.nextTransportCommandEpoch();
         const pauseTime = this.getCurrentTime();
         this.isPlaying = false;
         this.offsetTime = pauseTime; // Store where we stopped
         this.virtualStartTime = (this.ctx?.currentTime || 0) - pauseTime;
-        this.stopPlayback(); // Kill sound
         this.stopSchedulerDriver();
         this.resetSchedulerQueueState();
+        this.invalidatePlaybackSession();
+        this.stopPlayback(); // Kill sound
         // Do not suspend context, just stop scheduling
     }
 
     stop(reset: boolean) {
+        this.nextTransportCommandEpoch();
         const stopTime = this.getCurrentTime();
         this.isPlaying = false;
-        this.stopPlayback();
         this.stopSchedulerDriver();
         this.resetSchedulerQueueState();
+        this.invalidatePlaybackSession();
+        this.stopPlayback();
 
         if (reset) {
             this.offsetTime = 0;
@@ -3254,8 +3455,11 @@ class AudioEngine {
     }
 
     seek(time: number, tracks: Track[], bpm: number) {
+        this.nextTransportCommandEpoch();
         const wasPlaying = this.isPlaying;
+        this.invalidatePlaybackSession();
         this.stopPlayback(); // Stop current sounds
+        this.stopSchedulerDriver();
         this.resetSchedulerQueueState();
 
         this.offsetTime = time;
@@ -3322,6 +3526,8 @@ class AudioEngine {
         try {
             if (!this.isPlaying) return;
             if (!this.ctx) return;
+            const playbackSessionId = this.activePlaybackSessionId;
+            if (!playbackSessionId) return;
 
             if (tracks && tracks.length > 0) {
                 const safeTracks = tracks.map((track) => this.sanitizeTrack(track));
@@ -3341,7 +3547,7 @@ class AudioEngine {
             const schedulerCandidates = this.collectSchedulerCandidates(projectTime, lookAheadTime);
 
             schedulerCandidates.forEach((entry) => {
-                if (!this.isPlaying) return;
+                if (!this.isPlaying || playbackSessionId !== this.activePlaybackSessionId) return;
                 const { track, clip } = entry;
                 if (track.isMuted) return;
 
@@ -3412,7 +3618,7 @@ class AudioEngine {
                     }
                 }
 
-                this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId);
+                this.scheduleAudioClip(clip, track, playAt, finalBufferOffset, durationToPlay, clipNodeId, playbackSessionId);
             });
         } finally {
             const loopEndedAtMs = performance.now();
@@ -3456,8 +3662,8 @@ class AudioEngine {
         }
     }
 
-    scheduleAudioClip(clip: Clip, track: Track, playAt: number, bufferOffset: number, duration: number, nodeId: string) {
-        if (!this.ctx || !clip.buffer || !this.isPlaying) return;
+    scheduleAudioClip(clip: Clip, track: Track, playAt: number, bufferOffset: number, duration: number, nodeId: string, sessionId: TransportPlaybackSessionId = this.activePlaybackSessionId) {
+        if (!this.ctx || !clip.buffer || !this.isPlaying || !sessionId || sessionId !== this.activePlaybackSessionId) return;
         if (!isFinite(duration) || duration <= 0) return;
         const clipBuffer = clip.buffer;
 
@@ -3502,7 +3708,8 @@ class AudioEngine {
                     offset: safeOffset,
                     originalBpm: clipOriginalBpm,
                     clipTransposeSemitones,
-                    clipPlaybackRate: playbackProfile.clipPlaybackRate
+                    clipPlaybackRate: playbackProfile.clipPlaybackRate,
+                    sessionId
                 });
 
                 source.onended = () => {
@@ -3543,7 +3750,8 @@ class AudioEngine {
                     offset: safeOffset,
                     originalBpm: clipOriginalBpm,
                     clipTransposeSemitones,
-                    clipPlaybackRate: playbackProfile.clipPlaybackRate
+                    clipPlaybackRate: playbackProfile.clipPlaybackRate,
+                    sessionId
                 });
 
                 node.onprocessorerror = (e) => console.error(e);
@@ -3592,7 +3800,7 @@ class AudioEngine {
                     // older engines may not support canceling on this param
                 }
                 isPlayingParam?.setValueAtTime(0, now);
-                window.setTimeout(() => {
+                this.schedulePlaybackCleanup(() => {
                     try { activeSource.granularNode?.disconnect(); } catch {
                         // already disconnected
                     }
@@ -3610,6 +3818,7 @@ class AudioEngine {
 
     stopPlayback() {
         const now = this.ctx?.currentTime || 0;
+        this.clearPlaybackCleanupTimeouts();
         this.activeSources.forEach(({ source, granularNode, gain }) => {
             if (source) {
                 try { source.stop(); } catch (e) { }
@@ -3623,7 +3832,7 @@ class AudioEngine {
                     // older engines may not support canceling on this param
                 }
                 isPlayingParam?.setValueAtTime(0, now);
-                setTimeout(() => granularNode.disconnect(), 100);
+                this.schedulePlaybackCleanup(() => granularNode.disconnect(), 100);
             }
             try { gain.disconnect(); } catch {
                 // already disconnected
@@ -3642,6 +3851,7 @@ class AudioEngine {
     async startRecording(trackId: string, deviceId?: string) {
         if (!this.ctx) return;
         if (this.recordingSessions.has(trackId)) return;
+        this.pendingRecordingFinalizations.delete(trackId);
 
         try {
             const existingMonitoring = this.monitoringSessions.get(trackId);
@@ -3675,6 +3885,11 @@ class AudioEngine {
     }
 
     async stopRecording(trackId: string): Promise<EngineRecordingResult | null> {
+        const pendingResult = this.pendingRecordingFinalizations.get(trackId);
+        if (pendingResult) {
+            return pendingResult;
+        }
+
         const session = this.recordingSessions.get(trackId);
         if (!session) return null;
 
@@ -3696,13 +3911,15 @@ class AudioEngine {
                     const blob = new Blob(session.recordedChunks, { type: 'audio/webm' });
                     const arrayBuffer = await blob.arrayBuffer();
                     const buffer = await this.decodeAudioData(arrayBuffer);
-                    resolve({
+                    const result = {
                         blob,
                         buffer,
                         startedAtContextTime: session.startedAtContextTime,
                         stoppedAtContextTime,
                         estimatedLatencyMs: session.estimatedLatencyMs
-                    });
+                    };
+                    this.pendingRecordingFinalizations.set(trackId, result);
+                    resolve(result);
                 } catch (error) {
                     console.error('Failed to finalize recording', error);
                     resolve(null);
@@ -3730,8 +3947,28 @@ class AudioEngine {
         });
     }
 
+    async finalizeRecording(trackId: string): Promise<EngineRecordingResult | null> {
+        const pendingResult = this.pendingRecordingFinalizations.get(trackId);
+        if (pendingResult) {
+            this.pendingRecordingFinalizations.delete(trackId);
+            return pendingResult;
+        }
+
+        const stoppedResult = await this.stopRecording(trackId);
+        if (!stoppedResult) {
+            return null;
+        }
+
+        this.pendingRecordingFinalizations.delete(trackId);
+        return stoppedResult;
+    }
+
     getActiveRecordingTrackIds(): string[] {
         return Array.from(this.recordingSessions.keys());
+    }
+
+    getPendingFinalizeTrackIds(): string[] {
+        return Array.from(this.pendingRecordingFinalizations.keys());
     }
 
     // --- GENERATORS & PREVIEW ---
@@ -3851,7 +4088,8 @@ class AudioEngine {
                     offset: 0,
                     originalBpm: clipOriginalBpm,
                     clipTransposeSemitones,
-                    clipPlaybackRate: 1
+                    clipPlaybackRate: 1,
+                    sessionId: this.activePlaybackSessionId
                 });
             } catch (error) {
                 console.error('Session granular playback failed', error);
@@ -3877,7 +4115,8 @@ class AudioEngine {
             offset: 0,
             originalBpm: clipOriginalBpm,
             clipTransposeSemitones,
-            clipPlaybackRate: 1
+            clipPlaybackRate: 1,
+            sessionId: this.activePlaybackSessionId
         });
 
         source.onended = () => {
@@ -3912,7 +4151,7 @@ class AudioEngine {
 
                 if (value.source) {
                     if (shouldScheduleStop) {
-                        setTimeout(() => {
+                        this.schedulePlaybackCleanup(() => {
                             try { value.source?.disconnect(); } catch {
                                 // already disconnected
                             }
@@ -3926,7 +4165,7 @@ class AudioEngine {
 
                 if (value.granularNode) {
                     value.granularNode.parameters.get('isPlaying')?.setValueAtTime(0, shouldScheduleStop ? stopAt! : now);
-                    setTimeout(() => {
+                    this.schedulePlaybackCleanup(() => {
                         try { value.granularNode?.disconnect(); } catch {
                             // already disconnected
                         }
@@ -3934,7 +4173,7 @@ class AudioEngine {
                 }
 
                 if (shouldScheduleStop) {
-                    setTimeout(() => {
+                    this.schedulePlaybackCleanup(() => {
                         try { value.gain.disconnect(); } catch {
                             // already disconnected
                         }
@@ -3946,7 +4185,7 @@ class AudioEngine {
                 }
 
                 if (shouldScheduleStop) {
-                    setTimeout(() => {
+                    this.schedulePlaybackCleanup(() => {
                         this.activeSources.delete(key);
                     }, scheduleDelayMs);
                 } else {

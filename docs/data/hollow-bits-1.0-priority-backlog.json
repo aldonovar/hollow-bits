@@ -1,0 +1,170 @@
+{
+  "release": {
+    "name": "Hollow Bits 1.0 Public",
+    "targetDate": "2026-09-18"
+  },
+  "policy": {
+    "P0": "Core failure that can break transport, live reliability, recording safety or project integrity. Must be resolved before release candidate.",
+    "P1": "Critical workflow depth or platform support gap that does not fully break the core, but would make Public 1.0 non-credible if left open.",
+    "P2": "Important quality, depth or workflow improvement that should land for 1.0 if it does not threaten P0/P1 closure.",
+    "P3": "Polish, convenience or expansion work that is valuable but must never block the release."
+  },
+  "backlog": {
+    "P0": [
+      {
+        "id": "P0-B4-1",
+        "block": "block-4",
+        "title": "Finalize recording recovery UX and failure surfacing",
+        "definitionOfDone": [
+          "Finalize partial failures are surfaced deterministically per track/take.",
+          "Recovered recording sessions are visible and actionable after restart.",
+          "No silent take loss remains in recording smoke and reliability artifacts."
+        ]
+      },
+      {
+        "id": "P0-B4-2",
+        "block": "block-4",
+        "title": "Monitor router v2 platform validation",
+        "definitionOfDone": [
+          "Monitoring modes mono/stereo/left/right behave consistently on the target Windows matrix.",
+          "Immediate monitor stop works with no residual routed signal.",
+          "Monitor latency p95 remains within 12ms at 48k/128."
+        ]
+      },
+      {
+        "id": "P0-B5-1",
+        "block": "block-5",
+        "title": "Take lane and comping roundtrip integrity",
+        "definitionOfDone": [
+          "Comp lane rebuild is identical after save/open and crash recovery.",
+          "No take, comp segment or lane reference becomes orphaned.",
+          "Punch and comp edits remain sample-accurate on renderable audio."
+        ]
+      },
+      {
+        "id": "P0-B6-1",
+        "block": "block-6",
+        "title": "Live 48x8 reliability and stage-safe hardening",
+        "definitionOfDone": [
+          "90 minute live stress run completes without critical failure.",
+          "Launch/replay/session recording behavior remains deterministic under stress.",
+          "Stage-safe runtime does not surface intrusive technical UX."
+        ]
+      },
+      {
+        "id": "P0-B11-1",
+        "block": "block-11",
+        "title": "Windows GA smoke and release discipline",
+        "definitionOfDone": [
+          "Windows smoke matrix is complete and repeatable.",
+          "Known P0 and P1 issues are zero at release candidate cut.",
+          "Rollback plan and known-issues policy are documented."
+        ]
+      }
+    ],
+    "P1": [
+      {
+        "id": "P1-B7-1",
+        "block": "block-7",
+        "title": "Routing 1.0 completeness",
+        "definitionOfDone": [
+          "Groups, returns and sends pre/post are stable in large sessions.",
+          "Cue monitor path is operational.",
+          "Cycle prevention is enforced and tested."
+        ]
+      },
+      {
+        "id": "P1-B7-2",
+        "block": "block-7",
+        "title": "Automation runtime depth",
+        "definitionOfDone": [
+          "Read/touch/latch/write are reliable on core parameters.",
+          "Automation playback remains outside React hot paths.",
+          "Automation does not destabilize Arrange or Session playback."
+        ]
+      },
+      {
+        "id": "P1-B8-1",
+        "block": "block-8",
+        "title": "VST3 and CLAP host boundary",
+        "definitionOfDone": [
+          "Plugin scan, cache and quarantine are reproducible.",
+          "A faulty plugin cannot crash the whole session without containment.",
+          "Plugin crash/fault reporting is retained for support."
+        ]
+      },
+      {
+        "id": "P1-B9-1",
+        "block": "block-9",
+        "title": "Export parity and delivery",
+        "definitionOfDone": [
+          "Master and stem export pass parity tolerance checks.",
+          "WAV, AIFF, FLAC and MP3 paths are stable.",
+          "Export report includes format, duration, peaks and parity notes."
+        ]
+      },
+      {
+        "id": "P1-B11-2",
+        "block": "block-11",
+        "title": "Linux Preview packaging and support matrix",
+        "definitionOfDone": [
+          "Linux Preview package strategy is fixed.",
+          "Wayland/Hyprland and PipeWire/JACK/ALSA matrix is documented.",
+          "Preview limitations are explicit and published."
+        ]
+      }
+    ],
+    "P2": [
+      {
+        "id": "P2-B10-1",
+        "block": "block-10",
+        "title": "Browser 1.0 workflow depth",
+        "definitionOfDone": [
+          "Import and drag/drop workflows feel complete for 1.0.",
+          "Collections/favorites cover the main browse use cases.",
+          "Directory scan remains reliable on the Windows GA matrix."
+        ]
+      },
+      {
+        "id": "P2-B10-2",
+        "block": "block-10",
+        "title": "MIDI baseline for Public 1.0",
+        "definitionOfDone": [
+          "MIDI input, record and piano roll flow are production-credible.",
+          "Quantize and scale helpers cover the baseline writing workflow.",
+          "MIDI does not regress transport or recording reliability."
+        ]
+      },
+      {
+        "id": "P2-B8-2",
+        "block": "block-8",
+        "title": "Freeze, bounce and commit chain depth",
+        "definitionOfDone": [
+          "Freeze and bounce are stable on representative projects.",
+          "Committed chains preserve audible output within tolerance.",
+          "Performance gains are measurable after freezing."
+        ]
+      }
+    ],
+    "P3": [
+      {
+        "id": "P3-PROG-1",
+        "block": "program",
+        "title": "Expanded diagnostics UX",
+        "definitionOfDone": [
+          "Debug-only diagnostics are more discoverable for QA.",
+          "No diagnostic feature leaks into normal end-user UX."
+        ]
+      },
+      {
+        "id": "P3-PROG-2",
+        "block": "program",
+        "title": "Post-1.0 AI and collaboration exploration",
+        "definitionOfDone": [
+          "Any AI or collab work is gated behind 1.0 core health.",
+          "No exploratory work can regress transport, recording or release discipline."
+        ]
+      }
+    ]
+  }
+}
