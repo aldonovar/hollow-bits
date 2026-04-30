@@ -117,7 +117,7 @@ const WaveformBitmapCanvas: React.FC<WaveformBitmapCanvasProps> = React.memo(({
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
-    useLayoutEffect(() => {
+    const drawBitmap = () => {
         const canvas = canvasRef.current;
         if (!canvas) return;
 
@@ -137,7 +137,23 @@ const WaveformBitmapCanvas: React.FC<WaveformBitmapCanvasProps> = React.memo(({
 
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, displayWidth, displayHeight);
+        ctx.shadowBlur = 1;
+        ctx.shadowColor = 'rgba(0,0,0,0.2)';
         ctx.drawImage(bitmap.canvas, 0, 0, displayWidth, displayHeight);
+    };
+
+    useLayoutEffect(() => {
+        drawBitmap();
+    }, [bitmap, width, height]);
+
+    useEffect(() => {
+        const handleVis = () => {
+            if (document.visibilityState === 'visible') {
+                requestAnimationFrame(() => drawBitmap());
+            }
+        };
+        document.addEventListener('visibilitychange', handleVis);
+        return () => document.removeEventListener('visibilitychange', handleVis);
     }, [bitmap, width, height]);
 
     return (
@@ -452,9 +468,10 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
 
         const centerY = heightBucket / 2;
         const amp = heightBucket * (renderMode === 'full' ? 0.47 : 0.44);
+        // Elite fidelity: Massive sample rate for high-definition waveform plotting
         const sampleSteps = renderMode === 'full'
-            ? Math.min(2600, Math.max(240, Math.ceil(widthBucket * (zoom < 35 ? 1.45 : zoom < 90 ? 1.9 : 2.35))))
-            : Math.min(960, Math.max(128, Math.ceil(widthBucket * 0.8)));
+            ? Math.min(16000, Math.max(1600, Math.ceil(widthBucket * (zoom < 35 ? 6.0 : zoom < 90 ? 8.0 : 12.0))))
+            : Math.min(2400, Math.max(256, Math.ceil(widthBucket * 1.5)));
         const envelope = audioEngine.getWaveformEnvelopeData(buffer, sampleSteps);
         const pointCount = Math.min(envelope.max.length, envelope.min.length);
         if (pointCount === 0) {
@@ -462,16 +479,39 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         }
 
         ctx.clearRect(0, 0, widthBucket, heightBucket);
-        ctx.strokeStyle = `${track.color}66`;
+        ctx.strokeStyle = `${track.color}33`; // Subtler center line
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(0, centerY);
         ctx.lineTo(widthBucket, centerY);
         ctx.stroke();
 
-        ctx.fillStyle = renderMode === 'full' ? `${track.color}7A` : `${track.color}4A`;
-        ctx.strokeStyle = renderMode === 'full' ? `${track.color}F0` : `${track.color}D8`;
-        ctx.lineWidth = renderMode === 'full' ? 1.25 : 1.05;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        const gradient = ctx.createLinearGradient(0, centerY - amp, 0, centerY + amp);
+        if (renderMode === 'full') {
+            gradient.addColorStop(0, `${track.color}E6`);
+            gradient.addColorStop(0.2, `${track.color}A0`);
+            gradient.addColorStop(0.5, `${track.color}20`);
+            gradient.addColorStop(0.8, `${track.color}A0`);
+            gradient.addColorStop(1, `${track.color}E6`);
+        } else {
+            gradient.addColorStop(0, `${track.color}80`);
+            gradient.addColorStop(0.5, `${track.color}15`);
+            gradient.addColorStop(1, `${track.color}80`);
+        }
+
+        ctx.fillStyle = gradient;
+        ctx.strokeStyle = renderMode === 'full' ? `${track.color}FF` : `${track.color}D8`;
+        ctx.lineWidth = renderMode === 'full' ? 1.5 : 1.05;
+        
+        if (renderMode === 'full') {
+            ctx.shadowColor = `${track.color}80`;
+            ctx.shadowBlur = 5;
+            ctx.shadowOffsetY = 0;
+        }
+
         ctx.beginPath();
         ctx.moveTo(0, centerY);
         for (let i = 0; i < pointCount; i += 1) {
@@ -487,29 +527,6 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
-
-        if (renderMode === 'full') {
-            ctx.strokeStyle = `${track.color}F4`;
-            ctx.lineWidth = 0.8;
-            ctx.beginPath();
-            for (let i = 0; i < pointCount; i += 1) {
-                const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
-                const y = centerY - (envelope.max[i] * amp);
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
-            ctx.stroke();
-
-            ctx.strokeStyle = `${track.color}D0`;
-            ctx.beginPath();
-            for (let i = 0; i < pointCount; i += 1) {
-                const x = (i / Math.max(1, pointCount - 1)) * widthBucket;
-                const y = centerY - (envelope.min[i] * amp);
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
-            ctx.stroke();
-        }
 
         const nextBitmap = {
             canvas,
@@ -635,10 +652,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
     }, [zoom, totalWidth, showBeatGrid, showDetailGrid, gridSize]);
 
     const compOverlayModel = useMemo(() => {
-        if (shouldSimplifyVisuals) {
-            return EMPTY_COMP_OVERLAY_MODEL;
-        }
-
+        // Removed shouldSimplifyVisuals check to keep nodes stable
         return buildCompLaneOverlayModel({
             track,
             zoom,
@@ -646,16 +660,13 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
             viewportWidthPx: visibleRect.width,
             viewportPaddingPx: 300
         });
-    }, [shouldSimplifyVisuals, track, zoom, visibleRect.left, visibleRect.width]);
+    }, [track, zoom, visibleRect.left, visibleRect.width]);
 
-    const visibleCompSegments = shouldSimplifyVisuals ? [] : compOverlayModel.visibleSegments;
-    const compBoundaryHandles = shouldSimplifyVisuals ? [] : compOverlayModel.boundaryHandles;
+    const visibleCompSegments = compOverlayModel.visibleSegments;
+    const compBoundaryHandles = compOverlayModel.boundaryHandles;
 
     const crossfades = useMemo(() => {
-        if (shouldSimplifyVisuals) {
-            return [];
-        }
-
+        // Removed shouldSimplifyVisuals check to keep nodes stable
         const fades: Array<{
             id: string;
             left: number;
@@ -708,9 +719,8 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
 
     // VIRTUALIZATION FILTER
     const visibleClips = useMemo(() => {
-        const bufferPx = shouldSimplifyVisuals
-            ? Math.max(120, Math.min(200, Math.round(visibleRect.width * 0.14)))
-            : Math.max(320, Math.min(560, Math.round(visibleRect.width * 0.34))); // Render extra pixels to prevent flickering
+        // Unified bufferPx to prevent unmounts when simplifyPlaybackVisuals toggles
+        const bufferPx = Math.max(320, Math.min(560, Math.round(visibleRect.width * 0.34)));
         const startPx = Math.max(0, visibleRect.left - bufferPx);
         const endPx = visibleRect.left + visibleRect.width + bufferPx;
 
@@ -757,7 +767,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 style={gridStyle}
             >
                 {visibleCompSegments.length > 0 && (
-                    <div className="absolute inset-0 z-[12] pointer-events-none">
+                    <div className={`absolute inset-0 z-[12] pointer-events-none transition-opacity duration-150 ${shouldSimplifyVisuals ? 'opacity-0' : 'opacity-100'}`}>
                         <div className="absolute left-1 top-1 h-4 px-1.5 rounded-[2px] border border-daw-violet/45 bg-[#0b0c12]/80 text-[8px] font-black uppercase tracking-wider text-daw-violet/95 flex items-center gap-1.5">
                             <span>Comp</span>
                             <span className={`${compOverlayModel.isActiveLane ? 'text-emerald-300' : 'text-amber-300'}`}>
@@ -995,7 +1005,7 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 })}
 
                 {compBoundaryHandles.length > 0 && (
-                    <div className="absolute inset-0 z-[34] pointer-events-none">
+                    <div className={`absolute inset-0 z-[34] pointer-events-none transition-opacity duration-150 ${shouldSimplifyVisuals ? 'opacity-0' : 'opacity-100'}`}>
                         {compBoundaryHandles.map((handle: CompBoundaryBlendHandleModel) => (
                             <div
                                 key={handle.id}
@@ -1059,56 +1069,58 @@ const TrackLane: React.FC<TrackLaneProps> = React.memo(({
                 )}
 
                 {/* AUTOMATIC CROSSFADE OVERLAYS */}
-                {!shouldSimplifyVisuals && crossfades.map(xfade => (
-                    <div
-                        key={xfade.id}
-                        className="absolute top-0 bottom-0 z-30 pointer-events-none"
-                        style={{
-                            left: `${xfade.left}px`,
-                            width: `${xfade.overlapWidth}px`,
-                            background: 'linear-gradient(to right, rgba(0,0,0,0), rgba(255,255,255,0.035), rgba(0,0,0,0))'
-                        }}
-                    >
-                        <svg width={xfade.width} height="100%" preserveAspectRatio="none" className="overflow-visible">
-                            <path
-                                d={`M 0 0 C ${xfade.width * 0.5} 0, ${xfade.width * 0.5} ${trackHeight}, ${xfade.width} ${trackHeight}`}
-                                fill="none"
-                                stroke="#e5e7eb"
-                                strokeWidth="1.5"
-                                strokeOpacity="0.72"
-                                vectorEffect="non-scaling-stroke"
-                            />
-                            <path
-                                d={`M 0 ${trackHeight} C ${xfade.width * 0.5} ${trackHeight}, ${xfade.width * 0.5} 0, ${xfade.width} 0`}
-                                fill="none"
-                                stroke="#e5e7eb"
-                                strokeWidth="1.5"
-                                strokeOpacity="0.72"
-                                vectorEffect="non-scaling-stroke"
-                            />
-                        </svg>
-
-                        <button
-                            data-handle-type="crossfade"
-                            className="pointer-events-auto absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full border border-daw-cyan/80 bg-[#0a0a0f] shadow-[0_0_10px_rgba(34,211,238,0.35)] hover:scale-110 transition-transform"
-                            style={{ left: `${Math.max(0, xfade.width - 7)}px` }}
-                            title={`Crossfade ${xfade.fadeLengthBars.toFixed(2)} bars`}
-                            onMouseDown={(event) => {
-                                event.stopPropagation();
-                                setDragAction({
-                                    type: 'crossfade',
-                                    leftClip: xfade.leftClip,
-                                    rightClip: xfade.rightClip,
-                                    overlapLengthBars: xfade.overlapLengthBars,
-                                    initialFadeBars: xfade.fadeLengthBars,
-                                    startX: event.clientX,
-                                    startY: event.clientY,
-                                    historyGroupId: createHistoryGroupId('crossfade', track.id, `${xfade.leftClip.id}|${xfade.rightClip.id}`)
-                                });
+                <div className={`absolute inset-0 z-30 pointer-events-none transition-opacity duration-150 ${shouldSimplifyVisuals ? 'opacity-0' : 'opacity-100'}`}>
+                    {crossfades.map(xfade => (
+                        <div
+                            key={xfade.id}
+                            className="absolute top-0 bottom-0 pointer-events-none"
+                            style={{
+                                left: `${xfade.left}px`,
+                                width: `${xfade.overlapWidth}px`,
+                                background: 'linear-gradient(to right, rgba(0,0,0,0), rgba(255,255,255,0.035), rgba(0,0,0,0))'
                             }}
-                        />
-                    </div>
-                ))}
+                        >
+                            <svg width={xfade.width} height="100%" preserveAspectRatio="none" className="overflow-visible">
+                                <path
+                                    d={`M 0 0 C ${xfade.width * 0.5} 0, ${xfade.width * 0.5} ${trackHeight}, ${xfade.width} ${trackHeight}`}
+                                    fill="none"
+                                    stroke="#e5e7eb"
+                                    strokeWidth="1.5"
+                                    strokeOpacity="0.72"
+                                    vectorEffect="non-scaling-stroke"
+                                />
+                                <path
+                                    d={`M 0 ${trackHeight} C ${xfade.width * 0.5} ${trackHeight}, ${xfade.width * 0.5} 0, ${xfade.width} 0`}
+                                    fill="none"
+                                    stroke="#e5e7eb"
+                                    strokeWidth="1.5"
+                                    strokeOpacity="0.72"
+                                    vectorEffect="non-scaling-stroke"
+                                />
+                            </svg>
+
+                            <button
+                                data-handle-type="crossfade"
+                                className="pointer-events-auto absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full border border-daw-cyan/80 bg-[#0a0a0f] shadow-[0_0_10px_rgba(34,211,238,0.35)] hover:scale-110 transition-transform"
+                                style={{ left: `${Math.max(0, xfade.width - 7)}px` }}
+                                title={`Crossfade ${xfade.fadeLengthBars.toFixed(2)} bars`}
+                                onMouseDown={(event) => {
+                                    event.stopPropagation();
+                                    setDragAction({
+                                        type: 'crossfade',
+                                        leftClip: xfade.leftClip,
+                                        rightClip: xfade.rightClip,
+                                        overlapLengthBars: xfade.overlapLengthBars,
+                                        initialFadeBars: xfade.fadeLengthBars,
+                                        startX: event.clientX,
+                                        startY: event.clientY,
+                                        historyGroupId: createHistoryGroupId('crossfade', track.id, `${xfade.leftClip.id}|${xfade.rightClip.id}`)
+                                    });
+                                }}
+                            />
+                        </div>
+                    ))}
+                </div>
             </div>
         </div>
     );
@@ -1139,7 +1151,6 @@ interface TimelineProps {
     zoom: number;
     trackHeight: number;
     bpm: number;
-    isPlaying: boolean;
     onSeek: (bar: number) => void;
     onTrackSelect: (id: string) => void;
     onTrackUpdate: (id: string, updates: Partial<Track>, options?: TimelineMutationOptions) => void;
@@ -1357,9 +1368,8 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         let lastFrameTime = 0;
 
         const updateMeters = (timestamp: number) => {
-            const trackLoad = activeMeterTrackIds.length;
-            const playingFps = trackLoad > 32 ? 14 : trackLoad > 16 ? 18 : 24;
-            const idleFps = 8;
+            const playingFps = 60;
+            const idleFps = 60;
             const baseFrameDelta = audioEngine.getIsPlaying() ? (1000 / playingFps) : (1000 / idleFps);
             const minFrameDelta = Math.max(baseFrameDelta, effectiveMeterFrameBudgetMs);
             if ((timestamp - lastFrameTime) >= minFrameDelta) {
@@ -1460,15 +1470,23 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         commitCursorRef.current = commitCursor;
 
         const updateCursor = (timestamp: number) => {
-            const baseFrameDelta = isPlaying ? (1000 / 60) : (1000 / 10);
-            const minFrameDelta = isPlaying ? baseFrameDelta : Math.max(baseFrameDelta, Math.max(8, uiFrameBudgetMs));
+            const isPlayingNow = audioEngine.getIsPlaying();
+            const baseFrameDelta = isPlayingNow ? (1000 / 60) : (1000 / 10);
+            const minFrameDelta = isPlayingNow ? baseFrameDelta : Math.max(baseFrameDelta, Math.max(8, uiFrameBudgetMs));
+            
             if (timestamp - lastFrameTime < minFrameDelta) {
                 animationFrameId = requestAnimationFrame(updateCursor);
                 return;
             }
             lastFrameTime = timestamp;
 
-            commitCursor(audioEngine.getCurrentTime());
+            if (isPlayingNow) {
+                commitCursor(audioEngine.getCurrentTime());
+            } else {
+                const clockSnapshot = getTransportClockSnapshot();
+                const idleBarTime = positionToBarTime(clockSnapshot);
+                commitCursor(barToSeconds(idleBarTime, bpm));
+            }
 
             animationFrameId = requestAnimationFrame(updateCursor);
         };
@@ -1477,17 +1495,7 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         const closeMenu = () => setContextMenu(null);
         window.addEventListener('click', closeMenu);
 
-        if (isPlaying) {
-            commitCursor(audioEngine.getCurrentTime());
-        } else {
-            const clockSnapshot = getTransportClockSnapshot();
-            const idleBarTime = positionToBarTime(clockSnapshot);
-            commitCursor(barToSeconds(idleBarTime, bpm));
-        }
-
-        if (isPlaying) {
-            animationFrameId = requestAnimationFrame(updateCursor);
-        }
+        animationFrameId = requestAnimationFrame(updateCursor);
 
         return () => {
             if (animationFrameId) {
@@ -1498,25 +1506,9 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
         };
     }, [
         bpm,
-        isPlaying,
         uiFrameBudgetMs,
         zoom
     ]);
-
-    useEffect(() => {
-        if (isPlaying) {
-            return;
-        }
-
-        const syncIdleCursor = () => {
-            const clockSnapshot = getTransportClockSnapshot();
-            const idleBarTime = positionToBarTime(clockSnapshot);
-            commitCursorRef.current?.(barToSeconds(idleBarTime, bpm));
-        };
-
-        syncIdleCursor();
-        return subscribeTransportClock(syncIdleCursor);
-    }, [bpm, isPlaying]);
 
     // Global Drag Events with Ghost Preview
     useEffect(() => {

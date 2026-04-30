@@ -15,43 +15,91 @@ interface TrackHeaderProps {
 }
 
 const dbToMeterNormalized = (db: number): number => {
-    const minDb = -72;
-    const maxDb = 6;
-    const clamped = Math.min(maxDb, Math.max(minDb, db));
-    const normalized = (clamped - minDb) / (maxDb - minDb);
-    return Math.pow(normalized, 1.35);
+    if (db <= -72) return 0;
+    if (db >= 6) return 1;
+
+    // Piecewise standard DAW mapping for ultra-precise visualization:
+    // +6 to -12 dB -> top 30% of the meter
+    if (db >= -12) {
+        return 0.7 + ((db + 12) / 18) * 0.3;
+    }
+    // -12 to -36 dB -> middle 40% of the meter
+    if (db >= -36) {
+        return 0.3 + ((db + 36) / 24) * 0.4;
+    }
+    // -36 to -72 dB -> bottom 30% of the meter
+    return ((db + 72) / 36) * 0.3;
 };
 
 const TrackMeterStrip: React.FC<{ trackId: string; isMuted: boolean }> = React.memo(({ trackId, isMuted }) => {
-    const meterSnapshot = useSyncExternalStore(
-        useCallback((listener) => trackHeaderMeterStore.subscribe(trackId, listener), [trackId]),
-        useCallback(() => trackHeaderMeterStore.getSnapshot(trackId), [trackId]),
-        () => trackHeaderMeterStore.getSnapshot(trackId)
-    );
+    const isMutedRef = React.useRef(isMuted);
+    isMutedRef.current = isMuted;
 
-    const peakMeterLevel = isMuted ? 0 : dbToMeterNormalized(meterSnapshot.peakDb);
-    const rmsMeterLevel = isMuted ? 0 : Math.min(peakMeterLevel, dbToMeterNormalized(meterSnapshot.rmsDb));
-    const clipped = !isMuted && meterSnapshot.clipped;
+    const clipIndicatorRef = React.useRef<HTMLDivElement>(null);
+    const peakBarRef = React.useRef<HTMLDivElement>(null);
+    const rmsBarRef = React.useRef<HTMLDivElement>(null);
+    const peakLineRef = React.useRef<HTMLDivElement>(null);
 
-    const peakHeight = Math.min(100, peakMeterLevel * 100);
-    const rmsHeight = Math.min(100, rmsMeterLevel * 100);
-    const peakLineBottom = Math.max(0, Math.min(99, peakHeight));
+    React.useEffect(() => {
+        const updateMeters = () => {
+            const meterSnapshot = trackHeaderMeterStore.getSnapshot(trackId);
+            const muted = isMutedRef.current;
+
+            const peakMeterLevel = muted ? 0 : dbToMeterNormalized(meterSnapshot.peakDb);
+            const rmsMeterLevel = muted ? 0 : Math.min(peakMeterLevel, dbToMeterNormalized(meterSnapshot.rmsDb));
+            const clipped = !muted && meterSnapshot.clipped;
+
+            const peakHeight = Math.min(100, peakMeterLevel * 100);
+            const rmsHeight = Math.min(100, rmsMeterLevel * 100);
+            const peakLineBottom = Math.max(0, Math.min(99, peakHeight));
+
+            if (clipIndicatorRef.current) {
+                if (clipped) {
+                    clipIndicatorRef.current.className = "w-full h-px mb-[1px] transition-colors duration-100 bg-red-500 shadow-[0_0_5px_red]";
+                } else {
+                    clipIndicatorRef.current.className = "w-full h-px mb-[1px] transition-colors duration-100 bg-[#1a1a1a]";
+                }
+            }
+
+            if (peakBarRef.current) {
+                peakBarRef.current.style.transform = `scaleY(${peakHeight / 100})`;
+            }
+
+            if (rmsBarRef.current) {
+                rmsBarRef.current.style.transform = `scaleY(${rmsHeight / 100})`;
+            }
+
+            if (peakLineRef.current) {
+                peakLineRef.current.style.bottom = `${peakLineBottom}%`;
+            }
+        };
+
+        // Initial update
+        updateMeters();
+
+        // Subscribe to store updates
+        const unsubscribe = trackHeaderMeterStore.subscribe(trackId, updateMeters);
+        return unsubscribe;
+    }, [trackId]);
 
     return (
         <div className="w-2.5 h-full bg-[#0a0a0a] border-l border-[#333] flex flex-col relative shrink-0">
-            <div className={`w-full h-px mb-[1px] transition-colors duration-100 ${clipped ? 'bg-red-500 shadow-[0_0_5px_red]' : 'bg-[#1a1a1a]'}`}></div>
+            <div ref={clipIndicatorRef} className="w-full h-px mb-[1px] transition-colors duration-100 bg-[#1a1a1a]"></div>
             <div className="flex-1 relative bg-[#050505] overflow-hidden">
                 <div
+                    ref={peakBarRef}
                     className="absolute inset-x-0 bottom-0 h-full bg-meter-gradient opacity-85 will-change-transform"
-                    style={{ transform: `scaleY(${peakHeight / 100})`, transformOrigin: 'bottom' }}
+                    style={{ transform: `scaleY(0)`, transformOrigin: 'bottom', transition: 'transform 20ms ease-out' }}
                 ></div>
                 <div
+                    ref={rmsBarRef}
                     className="absolute inset-x-0 bottom-0 h-full bg-white/18 will-change-transform"
-                    style={{ transform: `scaleY(${rmsHeight / 100})`, transformOrigin: 'bottom' }}
+                    style={{ transform: `scaleY(0)`, transformOrigin: 'bottom', transition: 'transform 20ms ease-out' }}
                 ></div>
                 <div
+                    ref={peakLineRef}
                     className="absolute left-0 right-0 h-[1px] bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.5)]"
-                    style={{ bottom: `${peakLineBottom}%` }}
+                    style={{ bottom: `0%`, transition: 'bottom 40ms ease-out' }}
                 ></div>
             </div>
         </div>

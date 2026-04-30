@@ -9,20 +9,42 @@ class PlatformService {
   public platform: string;
 
   private toArrayBuffer(data: unknown): ArrayBuffer | null {
-    if (data instanceof ArrayBuffer) return data;
+    if (!data) return null;
+
+    if (data instanceof ArrayBuffer) {
+        return data;
+    }
 
     if (ArrayBuffer.isView(data)) {
       const view = data as Uint8Array;
       return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
     }
 
-    if (data && typeof data === 'object') {
+    if (typeof data === 'object') {
       const candidate = data as { type?: unknown; data?: unknown };
       if (candidate.type === 'Buffer' && Array.isArray(candidate.data)) {
         return new Uint8Array(candidate.data).buffer;
       }
+
+      const anyData = data as any;
+      
+      // Handle cross-context Uint8Array where prototypes are lost
+      if (typeof anyData.byteLength === 'number') {
+          if (anyData.buffer && typeof anyData.buffer.slice === 'function') {
+              return anyData.buffer.slice(anyData.byteOffset || 0, (anyData.byteOffset || 0) + anyData.byteLength);
+          }
+          
+          // Electron sometimes sends a Uint8Array proxy that acts like an array
+          const len = anyData.byteLength;
+          const u8 = new Uint8Array(len);
+          for (let i = 0; i < len; i++) {
+              u8[i] = anyData[i];
+          }
+          return u8.buffer;
+      }
     }
 
+    console.warn("Failed to convert IPC data to ArrayBuffer. Type is:", typeof data);
     return null;
   }
 

@@ -1,4 +1,4 @@
-﻿// path: src/App.tsx
+// path: src/App.tsx
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Transport from './components/Transport';
 import DeviceRack from './components/DeviceRack';
@@ -3856,8 +3856,10 @@ const App: React.FC = () => {
             setImportProgress((prev) => prev ? { ...prev, currentFile: source.name } : prev);
 
             try {
+                console.log("Processing source:", source.name, source.arrayBuffer);
                 const arrayBuffer = source.arrayBuffer.slice(0);
                 const audioBuffer = await engineAdapter.decodeAudioData(arrayBuffer);
+                console.log("Decoded successfully!");
 
                 let sourceId: string | undefined;
                 try {
@@ -4911,7 +4913,6 @@ const App: React.FC = () => {
                                     onAddTrack={handleTimelineAddTrack}
                                     gridSize={transport.gridSize}
                                     snapToGrid={transport.snapToGrid}
-                                    isPlaying={transport.isPlaying}
                                     selectedTrackId={selectedTrackId}
                                     selectedTrackPunchRange={selectedTrackPunchRange}
                                     selectedTrackColor={selectedAudioTrack?.color || null}

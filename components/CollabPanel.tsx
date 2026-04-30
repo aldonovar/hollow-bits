@@ -1,5 +1,8 @@
 import React from 'react';
 import { Copy, Radio, Users, Wifi, WifiOff } from 'lucide-react';
+import { useAuthStore } from '../stores/authStore';
+import { CollabAuthModal } from './CollabAuthModal';
+import { useState, useEffect } from 'react';
 
 interface CollabActivityEntry {
     id: string;
@@ -32,6 +35,26 @@ const CollabPanel: React.FC<CollabPanelProps> = ({
     onStopSession,
     onCopyInvite
 }) => {
+    const { session, user, initialize } = useAuthStore();
+    const [showAuth, setShowAuth] = useState(false);
+
+    useEffect(() => {
+        const unsubscribe = initialize();
+        return () => unsubscribe();
+    }, [initialize]);
+
+    const handleStartSession = () => {
+        if (!session) {
+            setShowAuth(true);
+        } else {
+            onStartSession();
+        }
+    };
+
+    const handleStopSession = () => {
+        onStopSession();
+    };
+
     return (
         <div className="space-y-4">
             <div className="rounded-sm border border-white/10 bg-white/[0.03] p-3">
@@ -49,6 +72,7 @@ const CollabPanel: React.FC<CollabPanelProps> = ({
                         onChange={(event) => onUserNameChange(event.target.value)}
                         className="mt-2 w-full h-9 bg-[#0b0e14] border border-white/10 rounded-sm px-2 text-xs text-gray-200 focus:outline-none focus:border-daw-cyan/50"
                         placeholder="Producer"
+                        disabled={!!session}
                     />
                 </div>
 
@@ -67,7 +91,7 @@ const CollabPanel: React.FC<CollabPanelProps> = ({
             <div className="flex items-center gap-2">
                 {!sessionId ? (
                     <button
-                        onClick={onStartSession}
+                        onClick={handleStartSession}
                         className="h-9 px-4 rounded-sm border border-daw-violet/40 bg-daw-violet/15 hover:bg-daw-violet/25 text-[10px] font-bold uppercase tracking-wider text-daw-violet flex items-center gap-2"
                     >
                         <Radio size={12} /> Iniciar sesion host
@@ -81,7 +105,7 @@ const CollabPanel: React.FC<CollabPanelProps> = ({
                             <Copy size={12} /> Copiar invite
                         </button>
                         <button
-                            onClick={onStopSession}
+                            onClick={handleStopSession}
                             className="h-9 px-4 rounded-sm border border-rose-400/40 bg-rose-500/10 hover:bg-rose-500/20 text-[10px] font-bold uppercase tracking-wider text-rose-200"
                         >
                             Cerrar sesion
@@ -121,7 +145,16 @@ const CollabPanel: React.FC<CollabPanelProps> = ({
                     )}
                 </div>
             </div>
-        </div>
+            {showAuth && (
+        <CollabAuthModal 
+            onClose={() => setShowAuth(false)} 
+            onSuccess={() => {
+                setShowAuth(false);
+                onStartSession();
+            }} 
+        />
+    )}
+</div>
     );
 };
 
