@@ -1,3 +1,51 @@
+.hollow-auth-overlay {
+  --bg:#060608;--bg-elevated:#0c0c10;--bg-surface:#111116;--bg-panel:#16161d;
+  --glass:rgba(14,14,20,0.75);--glass-hover:rgba(22,22,30,0.85);
+  --border:rgba(255,255,255,0.06);--border-hover:rgba(255,255,255,0.12);--border-accent:rgba(168,85,247,0.25);
+  --purple:#a855f7;--rose:#f43f5e;--pink:#ec4899;--lilac:#c084fc;--amber:#fb923c;
+  --text:#f0eff4;--text-2:rgba(255,255,255,0.55);--text-3:rgba(255,255,255,0.3);
+  --grad:linear-gradient(135deg,#a855f7,#f43f5e);
+  --meter:linear-gradient(90deg,#a855f7 0%,#ec4899 50%,#f43f5e 100%);
+  --glow:radial-gradient(ellipse 900px 400px at 50% -80px,rgba(168,85,247,0.14),transparent),radial-gradient(ellipse 700px 350px at 85% 100%,rgba(244,63,94,0.08),transparent);
+  --shadow:0 20px 60px rgba(0,0,0,0.6);--shadow-sm:0 8px 24px rgba(0,0,0,0.4);
+  --r:4px;--r-lg:6px;--r-xl:8px;
+  --ff:'Space Grotesk',sans-serif;--fd:'Outfit',sans-serif;--fm:'JetBrains Mono',monospace;
+  --ease:cubic-bezier(0.32,0.72,0,1);
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  overflow-y: auto;
+}
+
+.hollow-auth-overlay__close {
+  position: fixed;
+  top: 22px;
+  right: 22px;
+  width: 36px;
+  height: 36px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--glass);
+  color: var(--text-2);
+  transition: all .2s var(--ease);
+}
+
+.hollow-auth-overlay__close:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+  background: var(--glass-hover);
+}
+
+.auth-page--modal {
+  min-height: 100vh;
+}
+
 .auth-page {
   min-height: calc(100vh - 100px);
   display: flex;
@@ -254,7 +302,20 @@
   transition: color 0.2s ease;
 }
 
-.auth-card__footer a:hover {
+.auth-card__footer button {
+  color: var(--purple);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s ease;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.auth-card__footer a:hover,
+.auth-card__footer button:hover {
   color: var(--lilac);
 }
 
