@@ -19,9 +19,7 @@ import {
 } from '../services/transportClockStore';
 import { barToSeconds, positionToBarTime } from '../services/transportStateService';
 import {
-    buildCompLaneOverlayModel,
-    type CompLaneOverlayModel,
-    type CompBoundaryBlendHandleModel
+    buildCompLaneOverlayModel
 } from '../services/compLaneOverlayService';
 import { COMP_CLIP_ID_PREFIX } from '../services/takeCompingService';
 
