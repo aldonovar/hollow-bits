@@ -281,6 +281,10 @@ export const CollabAuthModal: React.FC<CollabAuthModalProps> = ({
             ) : (
               <p>¿Ya tienes una cuenta? <button type="button" onClick={() => switchType('login')}>Inicia sesión</button></p>
             )}
+            <div style={{ marginTop: '1rem', fontSize: '0.85rem', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+              <a href="https://play.hollowbits.com/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>Privacidad</a>
+              <a href="https://play.hollowbits.com/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>Términos</a>
+            </div>
           </div>
         </div>
       </div>
