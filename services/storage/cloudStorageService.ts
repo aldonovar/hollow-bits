@@ -1,4 +1,4 @@
-import { supabase } from '../../../lib/supabase';
+import { supabase } from '../supabase';
 
 /**
  * Service to manage cloud storage operations for audio files in Supabase.

@@ -15,8 +15,7 @@ import {
     resolveCrossfadePreviewBars
 } from '../services/timelineCrossfadeService';
 import {
-    getTransportClockSnapshot,
-    subscribeTransportClock
+    getTransportClockSnapshot
 } from '../services/transportClockStore';
 import { barToSeconds, positionToBarTime } from '../services/transportStateService';
 import {
@@ -175,13 +174,13 @@ const seededRatio = (seed: number): number => {
     return value - Math.floor(value);
 };
 
-const EMPTY_COMP_OVERLAY_MODEL: CompLaneOverlayModel = {
-    laneId: null,
-    laneName: null,
-    isActiveLane: false,
-    visibleSegments: [],
-    boundaryHandles: []
-};
+// const EMPTY_COMP_OVERLAY_MODEL: CompLaneOverlayModel = {
+//     laneId: null,
+//     laneName: null,
+//     isActiveLane: false,
+//     visibleSegments: [],
+//     boundaryHandles: []
+// };
 
 type ClipDragAction = {
     type: 'trim-left' | 'trim-right' | 'fade-in' | 'fade-out' | 'stretch';
@@ -1185,7 +1184,6 @@ const Timeline: React.FC<TimelineProps> = React.memo(({
     zoom,
     trackHeight,
     bpm,
-    isPlaying,
     onSeek,
     onTrackSelect,
     onTrackUpdate,

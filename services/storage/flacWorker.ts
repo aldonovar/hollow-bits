@@ -7,7 +7,7 @@
 
 self.onmessage = async (e: MessageEvent) => {
   try {
-    const { id, pcmData, sampleRate, numChannels } = e.data;
+    const { id, pcmData, sampleRate } = e.data;
     
     console.log(`[FLAC Worker] Starting compression for file: ${id} at ${sampleRate}Hz`);
     
