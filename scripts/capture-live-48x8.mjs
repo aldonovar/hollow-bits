@@ -138,7 +138,8 @@ const run = async () => {
       ...process.env,
       HOLLOW_BENCHMARK_MODE: 'live-48x8'
     },
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: process.platform === 'win32'
   });
 
   const timeout = setTimeout(() => {
