@@ -173,13 +173,7 @@ const seededRatio = (seed: number): number => {
     return value - Math.floor(value);
 };
 
-// const EMPTY_COMP_OVERLAY_MODEL: CompLaneOverlayModel = {
-//     laneId: null,
-//     laneName: null,
-//     isActiveLane: false,
-//     visibleSegments: [],
-//     boundaryHandles: []
-// };
+
 
 type ClipDragAction = {
     type: 'trim-left' | 'trim-right' | 'fade-in' | 'fade-out' | 'stretch';

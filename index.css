@@ -1,4 +1,6 @@
-/* Custom styles - Tailwind provided via CDN in index.html */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 body {
   margin: 0;
   padding: 0;
