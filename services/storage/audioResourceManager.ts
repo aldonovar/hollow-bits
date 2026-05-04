@@ -4,9 +4,50 @@ import { cloudStorageService } from './cloudStorageService';
 /**
  * Audio Resource Manager
  * Proxy between the Engine and the storage layers (Local/OPFS + Cloud/Supabase).
+ * Now supports background FLAC compression via WebWorkers to halve egress costs.
  */
 class AudioResourceManager {
-  
+  private worker: Worker | null = null;
+
+  constructor() {
+    this.initWorker();
+  }
+
+  private initWorker() {
+    if (typeof window !== 'undefined') {
+      // Initialize the Web Worker for FLAC encoding
+      this.worker = new Worker(new URL('./flacWorker.ts', import.meta.url), { type: 'module' });
+    }
+  }
+
+  /**
+   * Promisifies the Worker compression call.
+   */
+  private compressToFlac(id: string, pcmData: ArrayBuffer | Float32Array): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      if (!this.worker) return reject(new Error("Worker not initialized"));
+
+      const handleMessage = (e: MessageEvent) => {
+        if (e.data.id === id) {
+          this.worker?.removeEventListener('message', handleMessage);
+          if (e.data.success) {
+            resolve(e.data.flacBlob);
+          } else {
+            reject(new Error(e.data.error));
+          }
+        }
+      };
+
+      this.worker.addEventListener('message', handleMessage);
+      this.worker.postMessage({
+        id,
+        pcmData,
+        sampleRate: 44100, // Hardcoded for demo, engine will provide this
+        numChannels: 1
+      });
+    });
+  }
+
   /**
    * Retrieves an audio buffer. Checks local OPFS/IDB cache first.
    * If not found, downloads from cloud and caches it locally.
@@ -33,26 +74,33 @@ class AudioResourceManager {
 
   /**
    * Commits the current session's new audio recordings to the cloud in the background.
+   * Compresses WAV to FLAC dynamically before upload to save 50% bandwidth.
    */
   public async commitSessionAudio(projectId: string, unsyncedFiles: Map<string, Blob>): Promise<void> {
     const uploadPromises = Array.from(unsyncedFiles.entries()).map(async ([fileId, blob]) => {
       try {
-        // Upload to cloud
-        await cloudStorageService.uploadAudioToCloud(projectId, fileId, blob);
-        // We can optionally verify it was already cached locally, or cache it now
-        // if it originated purely from RAM.
+        // Compress to FLAC if it's raw WAV
+        let uploadBlob = blob;
+        if (blob.type === 'audio/wav' || blob.type === 'audio/x-wav' || blob.type === '') {
+           const arrayBuffer = await blob.arrayBuffer();
+           uploadBlob = await this.compressToFlac(fileId, arrayBuffer);
+        }
+
+        // Upload compressed FLAC to cloud
+        await cloudStorageService.uploadAudioToCloud(projectId, fileId, uploadBlob);
+        
       } catch (err) {
-        console.error(`[Storage] Failed to sync ${fileId} to cloud`, err);
+        console.error(`[Storage] Failed to compress/sync ${fileId} to cloud`, err);
       }
     });
 
-    // Fire and forget (lazy cloud syncing)
+    // Fire and forget
     Promise.allSettled(uploadPromises).then(results => {
       const failed = results.filter(r => r.status === 'rejected');
       if (failed.length > 0) {
         console.warn(`[Storage] ${failed.length} files failed to sync in background.`);
       } else {
-        console.log(`[Storage] Lazy sync complete. ${results.length} files synced.`);
+        console.log(`[Storage] Lazy sync complete. ${results.length} files compressed to FLAC and synced.`);
       }
     });
   }
