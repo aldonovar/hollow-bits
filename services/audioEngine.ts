@@ -3034,7 +3034,7 @@ class AudioEngine {
             output = this.masterFrequencyDataBuffer;
         }
 
-        this.masterAnalyser.getByteFrequencyData(output);
+        this.masterAnalyser.getByteFrequencyData(output as any);
         return output;
     }
 

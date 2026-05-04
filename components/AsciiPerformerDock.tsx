@@ -677,13 +677,15 @@ const AsciiPerformerDock: React.FC<AsciiPerformerDockProps> = ({
             <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_55%_20%,rgba(244,218,255,0.22),transparent_58%)]" />
 
             <div className="relative h-full w-full performer-stage flex items-center justify-center">
-                <img
-                    src={BASE_PERFORMER_IMAGE_SRC}
-                    alt="Pixel art performer fallback"
-                    className={`absolute inset-0 h-full w-full object-contain bg-[#090910] transition-opacity duration-300 ${showFallbackImage ? 'opacity-100' : 'opacity-0'}`}
-                    style={{ imageRendering: 'pixelated' }}
-                    draggable={false}
-                />
+                {!loadFailed && (
+                    <img
+                        src={BASE_PERFORMER_IMAGE_SRC}
+                        alt=""
+                        className={`absolute inset-0 h-full w-full object-contain bg-[#090910] transition-opacity duration-300 ${showFallbackImage ? 'opacity-100' : 'opacity-0'}`}
+                        style={{ imageRendering: 'pixelated' }}
+                        draggable={false}
+                    />
+                )}
                 <canvas
                     ref={canvasRef}
                     aria-label="Pixel art performer"

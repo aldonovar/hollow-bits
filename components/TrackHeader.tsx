@@ -1,5 +1,5 @@
 
-import React from 'react';
+import React, { useCallback, useSyncExternalStore } from 'react';
 import { Track } from '../types';
 import { Trash2 } from 'lucide-react';
 import Knob from './Knob';
