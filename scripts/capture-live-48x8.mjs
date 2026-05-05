@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const DEFAULT_TIMEOUT_MS = 12 * 60 * 1000;
+const IS_CI = !!(process.env.CI || process.env.GITHUB_ACTIONS);
+const DEFAULT_TIMEOUT_MS = IS_CI ? 3 * 60 * 1000 : 12 * 60 * 1000;
 const STATUS_PREFIX = 'BENCHMARK_STATUS:';
 
 const parseNumber = (value, fallback) => {
@@ -123,6 +124,12 @@ const run = async () => {
     '--benchmark-recording-cycles', String(Math.max(1, Math.floor(options.recordingCycles))),
     '--benchmark-seed', String(Math.max(1, Math.floor(options.seed)))
   ];
+
+  // In CI environments, Electron needs headless flags since there is no display/GPU
+  if (IS_CI) {
+    args.push('--disable-gpu', '--no-sandbox', '--headless=new', '--disable-software-rasterizer');
+    console.log('- CI mode: headless flags enabled');
+  }
 
   console.log('Live capture runner');
   console.log(`- electron: ${electronBin}`);
