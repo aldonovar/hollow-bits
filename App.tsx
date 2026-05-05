@@ -327,7 +327,7 @@ const App: React.FC = () => {
     const initialCollabSnapshot = useMemo(() => loadCollabSessionSnapshot(), []);
 
     // Auth session (used for session indicator widget in sidebar)
-    const { user, session, signOut: authSignOut, initialize: authInitialize } = useAuthStore();
+    const { user, profile, session, signOut: authSignOut, initialize: authInitialize } = useAuthStore();
 
     useEffect(() => {
         // Initialize auth store inside DAW — handles hash token SSO from cross-domain redirect
@@ -1214,6 +1214,7 @@ const App: React.FC = () => {
         const urlParams = new URLSearchParams(window.location.search);
         const token = urlParams.get('token');
         const projectId = urlParams.get('project');
+        const localPath = urlParams.get('localPath');
 
         if (token) {
             const loadSharedSession = async () => {
@@ -1238,9 +1239,14 @@ const App: React.FC = () => {
                             alert('Has entrado en modo EDITOR.');
                         }
 
-                        // Load data if present
-                        if (sharedSession.data) {
-                            const integrityReport = await hydrateProjectData(sharedSession.data as unknown as ProjectData, sharedSession.name, {
+                        const { data: projectRow } = await supabase
+                            .from('projects')
+                            .select('data')
+                            .eq('id', sharedSession.project_id)
+                            .single();
+
+                        if (projectRow?.data) {
+                            const integrityReport = await hydrateProjectData(projectRow.data as unknown as ProjectData, sharedSession.name, {
                                 source: 'open-project',
                                 rememberReport: true
                             });
@@ -1285,6 +1291,34 @@ const App: React.FC = () => {
                 }
             };
             loadCloudProject();
+        } else if (localPath) {
+            const loadLocalProject = async () => {
+                setLoadingProject(true);
+                setLoadingMessage('Cargando proyecto local...');
+                try {
+                    const file = await platformService.readFileFromPath(localPath);
+                    if (!file?.data) {
+                        alert('No se pudo leer el proyecto local.');
+                        return;
+                    }
+
+                    const decoder = new TextDecoder();
+                    const parsed = JSON.parse(decoder.decode(file.data)) as ProjectData;
+                    const integrityReport = await hydrateProjectData(parsed, parsed.name || file.name.replace(/\.esp$/i, ''), {
+                        source: 'open-project',
+                        rememberReport: true
+                    });
+                    if (integrityReport.issueCount > 0) {
+                        console.warn('Project integrity repaired during local open.', integrityReport);
+                    }
+                } catch (e) {
+                    console.error('Error loading local project:', e);
+                    alert('No se pudo abrir el proyecto local.');
+                } finally {
+                    setLoadingProject(false);
+                }
+            };
+            loadLocalProject();
         }
     }, []);
 
@@ -5158,16 +5192,16 @@ const App: React.FC = () => {
                                     <div className="flex flex-col gap-3">
                                         <div className="flex items-center gap-3">
                                             <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-rose-500 flex items-center justify-center text-white font-bold text-lg">
-                                                {(user?.user_metadata?.full_name || user?.email || '?').charAt(0)}
+                                                {(profile?.full_name || profile?.username || user?.email || '?').charAt(0)}
                                             </div>
                                             <div className="flex flex-col min-w-0">
-                                                <span className="text-sm text-gray-200 font-medium truncate">{user?.user_metadata?.full_name || 'Usuario DAW'}</span>
+                                                <span className="text-sm text-gray-200 font-medium truncate">{profile?.full_name || profile?.username || 'Usuario DAW'}</span>
                                                 <span className="text-[10px] text-gray-500 truncate">{user?.email}</span>
                                             </div>
                                         </div>
                                         <div className="h-px bg-white/10 w-full my-1" />
-                                        <button onClick={() => { setShowSessionPopover(false); window.location.href = import.meta.env.PROD ? 'https://hollowbits.com/console' : '/console'; }} className="w-full py-2 text-xs text-gray-300 hover:bg-white/5 hover:text-white rounded text-left px-2 transition-colors flex items-center gap-2">
-                                            <span>Ir al Dashboard</span>
+                                        <button onClick={() => { setShowSessionPopover(false); if (platformService.isDesktop) { platformService.showHub(); } else { window.location.href = import.meta.env.PROD ? 'https://hollowbits.com/console' : '/console'; } }} className="w-full py-2 text-xs text-gray-300 hover:bg-white/5 hover:text-white rounded text-left px-2 transition-colors flex items-center gap-2">
+                                            <span>Ir al Hub</span>
                                         </button>
                                         <button onClick={() => { setShowSessionPopover(false); authSignOut(); }} className="w-full py-2 text-xs text-rose-400 hover:bg-rose-500/10 rounded text-left px-2 transition-colors flex items-center gap-2">
                                             <LogOut size={12} />
@@ -5200,7 +5234,7 @@ const App: React.FC = () => {
                                                     Vincular Cuenta
                                                 </button>
                                                 <button 
-                                                    onClick={() => { setShowSessionPopover(false); window.location.href = import.meta.env.PROD ? 'https://hollowbits.com/login' : '/login'; }}
+                                                    onClick={() => { setShowSessionPopover(false); if (platformService.isDesktop) { platformService.showHub(); } else { window.location.href = import.meta.env.PROD ? 'https://hollowbits.com/login' : '/login'; } }}
                                                     className="w-full py-2 text-xs font-medium text-gray-400 hover:text-white bg-transparent border border-white/10 hover:bg-white/5 rounded transition-colors text-center"
                                                 >
                                                     Ir al Portal de Login
@@ -5215,9 +5249,9 @@ const App: React.FC = () => {
                         {session ? (
                             <button onClick={() => setShowSessionPopover(!showSessionPopover)} className="group relative flex flex-col items-center gap-1 w-full outline-none">
                                 {/* Avatar con iniciales */}
-                                <div className="relative w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-rose-500 flex items-center justify-center shadow-[0_0_10px_rgba(168,85,247,0.4)] ring-1 ring-white/10 cursor-pointer hover:ring-white/30 transition-all" title={(user?.user_metadata?.full_name || user?.email) ?? 'Sesión activa'}>
+                                <div className="relative w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-rose-500 flex items-center justify-center shadow-[0_0_10px_rgba(168,85,247,0.4)] ring-1 ring-white/10 cursor-pointer hover:ring-white/30 transition-all" title={(profile?.full_name || profile?.username || user?.email) ?? 'Sesión activa'}>
                                     <span className="text-white text-[10px] font-bold uppercase select-none">
-                                        {(user?.user_metadata?.full_name || user?.email || '?').charAt(0)}
+                                        {(profile?.full_name || profile?.username || user?.email || '?').charAt(0)}
                                     </span>
                                     {/* Online dot */}
                                     <span className="absolute bottom-0 right-0 w-2 h-2 rounded-full bg-green-400 ring-1 ring-[#1a1a1a]" />

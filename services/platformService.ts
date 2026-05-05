@@ -1,5 +1,13 @@
 
-import { DesktopWindowState, DirectoryScanRequest, FileData, ScannedFileEntry } from '../types';
+import {
+  DesktopAuthLaunchResult,
+  DesktopAuthRequest,
+  DesktopOpenEditorRequest,
+  DesktopWindowState,
+  DirectoryScanRequest,
+  FileData,
+  ScannedFileEntry,
+} from '../types';
 import { desktopRuntimeService } from './desktopRuntimeService';
 
 class PlatformService {
@@ -75,6 +83,84 @@ class PlatformService {
     const host = desktopRuntimeService.api;
     if (host) {
       host.close();
+    }
+  }
+
+  public async openEditor(request?: DesktopOpenEditorRequest): Promise<boolean> {
+    const host = desktopRuntimeService.api;
+    if (!host?.openEditor) {
+      return false;
+    }
+
+    try {
+      const result = await host.openEditor(request);
+      return result.success;
+    } catch (error) {
+      console.error('Unable to open editor', error);
+      return false;
+    }
+  }
+
+  public async showHub(): Promise<boolean> {
+    const host = desktopRuntimeService.api;
+    if (!host?.showHub) {
+      return false;
+    }
+
+    try {
+      const result = await host.showHub();
+      return result.success;
+    } catch (error) {
+      console.error('Unable to show hub', error);
+      return false;
+    }
+  }
+
+  public async openDesktopAuth(request?: DesktopAuthRequest): Promise<DesktopAuthLaunchResult> {
+    const host = desktopRuntimeService.api;
+    if (!host?.openDesktopAuth) {
+      return {
+        success: false,
+        error: 'Desktop auth bridge is only available inside Electron.',
+      };
+    }
+
+    try {
+      return await host.openDesktopAuth(request);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('Unable to open desktop auth bridge', error);
+      return { success: false, error: message };
+    }
+  }
+
+  public async openExternalUrl(url: string): Promise<boolean> {
+    const host = desktopRuntimeService.api;
+    if (!host?.openExternalUrl) {
+      window.open(url, '_blank', 'noopener,noreferrer');
+      return true;
+    }
+
+    try {
+      const result = await host.openExternalUrl(url);
+      return result.success;
+    } catch (error) {
+      console.error('Unable to open external URL', error);
+      return false;
+    }
+  }
+
+  public onHubRefresh(callback: () => void): (() => void) {
+    const host = desktopRuntimeService.api;
+    if (!host?.onHubRefresh) {
+      return () => undefined;
+    }
+
+    try {
+      return host.onHubRefresh(callback);
+    } catch (error) {
+      console.error('Unable to subscribe hub refresh', error);
+      return () => undefined;
     }
   }
 

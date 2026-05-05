@@ -14,6 +14,27 @@ contextBridge.exposeInMainWorld('electron', {
         ipcRenderer.on('window-state-changed', handler);
         return () => ipcRenderer.removeListener('window-state-changed', handler);
     },
+    openEditor: (request) => ipcRenderer.invoke('desktop-open-editor', request),
+    showHub: () => ipcRenderer.invoke('desktop-show-hub'),
+    openDesktopAuth: (request) => ipcRenderer.invoke('desktop-open-auth', request),
+    openExternalUrl: (url) => ipcRenderer.invoke('desktop-open-external-url', url),
+    getPendingAuthCallback: () => ipcRenderer.invoke('desktop-get-pending-auth-callback'),
+    onAuthCallback: (callback) => {
+        const handler = (_event, payload) => {
+            callback(payload);
+        };
+
+        ipcRenderer.on('desktop-auth-callback', handler);
+        return () => ipcRenderer.removeListener('desktop-auth-callback', handler);
+    },
+    onHubRefresh: (callback) => {
+        const handler = () => {
+            callback();
+        };
+
+        ipcRenderer.on('desktop-hub-refresh', handler);
+        return () => ipcRenderer.removeListener('desktop-hub-refresh', handler);
+    },
 
     // File System Bridges
     saveProject: (data, filename) => ipcRenderer.invoke('save-project', data, filename),

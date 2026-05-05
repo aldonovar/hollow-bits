@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const {
     BENCHMARK_MODE,
@@ -99,6 +100,10 @@ const MAX_IMPORT_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_IMPORT_BATCH_BYTES = 1024 * 1024 * 1024;
 
 let mainWindow = null;
+let hubWindow = null;
+let editorWindow = null;
+let pendingAuthCallbackUrl = null;
+let pendingAuthState = null;
 const liveBenchmarkConfig = parseLiveCaptureConfig(process.argv, process.env);
 const liveBenchmarkRuntime = {
     enabled: Boolean(liveBenchmarkConfig),
@@ -312,8 +317,9 @@ ipcMain.handle('benchmark-publish-status', async (_event, payload) => {
         const exitCode = sanitized.status === 'success' ? 0 : 1;
         process.exitCode = exitCode;
         setTimeout(() => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.close();
+            const benchmarkWindow = editorWindow || mainWindow;
+            if (benchmarkWindow && !benchmarkWindow.isDestroyed()) {
+                benchmarkWindow.close();
             }
             app.exit(exitCode);
         }, 150);
@@ -525,15 +531,68 @@ try {
     // Config not critical for dev
 }
 
-const createWindow = () => {
+const isDevRuntime = () => process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
+
+const getWindowIcon = () => (app.isPackaged ? undefined : path.join(__dirname, '../build/icon.png'));
+
+const toRendererQuery = (surface, params = {}) => {
+    const query = { surface };
+    for (const [key, value] of Object.entries(params)) {
+        if (typeof value === 'string' && value.trim()) {
+            query[key] = value.trim();
+        }
+    }
+    return query;
+};
+
+const loadRendererSurface = (win, surface, params = {}) => {
+    const query = toRendererQuery(surface, params);
+
+    if (isDevRuntime()) {
+        const search = new URLSearchParams(query);
+        win.loadURL(`http://localhost:3000?${search.toString()}`);
+        return;
+    }
+
+    win.loadFile(path.join(__dirname, '../dist/index.html'), { query });
+};
+
+const attachWindowLifecycle = (win, role) => {
+    const notifyState = () => broadcastWindowState(win);
+    win.on('maximize', notifyState);
+    win.on('unmaximize', notifyState);
+    win.on('minimize', notifyState);
+    win.on('restore', notifyState);
+    win.on('enter-full-screen', notifyState);
+    win.on('leave-full-screen', notifyState);
+    win.webContents.on('did-finish-load', notifyState);
+    win.on('unresponsive', () => {
+        logMainError(`${role}-window-unresponsive`, 'Renderer no responde.');
+    });
+    win.webContents.on('render-process-gone', (_event, details) => {
+        logMainError(`${role}-render-process-gone`, `${details.reason} (exitCode=${details.exitCode})`);
+    });
+    win.webContents.on('did-fail-load', (_event, code, description, validatedURL) => {
+        logMainError(`${role}-did-fail-load`, `code=${code} url=${validatedURL} reason=${description}`);
+    });
+};
+
+const createHubWindow = () => {
     const windowIcon = app.isPackaged ? undefined : path.join(__dirname, '../build/icon.png');
 
-    // Create the browser window.
-    mainWindow = new BrowserWindow({
-        width: 1400,
-        height: 900,
+    if (hubWindow && !hubWindow.isDestroyed()) {
+        if (!hubWindow.isVisible()) hubWindow.show();
+        hubWindow.focus();
+        return hubWindow;
+    }
+
+    hubWindow = new BrowserWindow({
+        width: 1320,
+        height: 860,
+        minWidth: 1040,
+        minHeight: 720,
         icon: windowIcon,
-        frame: false, // Custom TitleBar required
+        frame: false,
         transparent: false,
         backgroundColor: '#0f1118',
         show: false,
@@ -546,37 +605,84 @@ const createWindow = () => {
         },
         autoHideMenuBar: true,
     });
+    mainWindow = hubWindow;
 
-    const notifyState = () => broadcastWindowState(mainWindow);
-    mainWindow.on('maximize', notifyState);
-    mainWindow.on('unmaximize', notifyState);
-    mainWindow.on('minimize', notifyState);
-    mainWindow.on('restore', notifyState);
-    mainWindow.on('enter-full-screen', notifyState);
-    mainWindow.on('leave-full-screen', notifyState);
-    mainWindow.webContents.on('did-finish-load', notifyState);
-    mainWindow.on('closed', () => {
-        mainWindow = null;
+    attachWindowLifecycle(hubWindow, 'hub');
+    hubWindow.on('closed', () => {
+        hubWindow = null;
+        if (!editorWindow) {
+            mainWindow = null;
+        }
     });
-    mainWindow.on('unresponsive', () => {
-        logMainError('window-unresponsive', 'Renderer no responde.');
+
+    loadRendererSurface(hubWindow, 'hub');
+
+    hubWindow.once('ready-to-show', () => {
+        if (!hubWindow || hubWindow.isDestroyed()) return;
+        hubWindow.show();
+        broadcastWindowState(hubWindow);
     });
-    mainWindow.webContents.on('render-process-gone', (_event, details) => {
-        logMainError('render-process-gone', `${details.reason} (exitCode=${details.exitCode})`);
+
+    return hubWindow;
+};
+
+const normalizeEditorRequest = (request) => {
+    if (!request || typeof request !== 'object') return {};
+    return {
+        project: typeof request.projectId === 'string' ? request.projectId : undefined,
+        token: typeof request.shareToken === 'string' ? request.shareToken : undefined,
+        localPath: typeof request.localPath === 'string' ? request.localPath : undefined,
+    };
+};
+
+const showHubWindow = () => {
+    const hub = createHubWindow();
+    if (hub && !hub.isDestroyed()) {
+        if (!hub.isVisible()) hub.show();
+        hub.focus();
+        hub.webContents.send('desktop-hub-refresh');
+    }
+};
+
+const createEditorWindow = (request = {}) => {
+    if (editorWindow && !editorWindow.isDestroyed()) {
+        editorWindow.focus();
+        return editorWindow;
+    }
+
+    const windowIcon = getWindowIcon();
+    editorWindow = new BrowserWindow({
+        width: 1400,
+        height: 900,
+        minWidth: 1120,
+        minHeight: 720,
+        icon: windowIcon,
+        frame: false,
+        transparent: false,
+        backgroundColor: '#0f1118',
+        show: false,
+        thickFrame: true,
+        roundedCorners: true,
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.cjs'),
+            contextIsolation: true,
+            nodeIntegration: false,
+        },
+        autoHideMenuBar: true,
     });
-    mainWindow.webContents.on('did-fail-load', (_event, code, description, validatedURL) => {
-        logMainError('did-fail-load', `code=${code} url=${validatedURL} reason=${description}`);
-    });
-    mainWindow.webContents.on('did-finish-load', () => {
+    mainWindow = editorWindow;
+
+    attachWindowLifecycle(editorWindow, 'editor');
+    editorWindow.webContents.on('did-finish-load', () => {
         try {
-            mainWindow.webContents.setAudioMuted(false);
+            editorWindow.webContents.setAudioMuted(false);
         } catch {
             // keep running even if platform does not support call
         }
 
         if (liveBenchmarkRuntime.enabled && liveBenchmarkConfig) {
             console.log(`[benchmark] mode=${BENCHMARK_MODE} config=${JSON.stringify(liveBenchmarkConfig)}`);
-            mainWindow.webContents.send('benchmark-start', {
+            editorWindow.webContents.send('benchmark-start', {
                 tracks: liveBenchmarkConfig.tracks,
                 scenes: liveBenchmarkConfig.scenes,
                 quantizeBars: liveBenchmarkConfig.quantizeBars,
@@ -588,38 +694,193 @@ const createWindow = () => {
         }
     });
 
-    // Check if running in dev mode
-    const isDev = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
-
-    if (isDev) {
-        console.log("Loading Development URL: http://localhost:3000");
-        mainWindow.loadURL('http://localhost:3000');
-        // mainWindow.webContents.openDevTools();
-    } else {
-        mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
-    }
-
-    mainWindow.once('ready-to-show', () => {
-        if (!mainWindow.isDestroyed()) {
-            try {
-                mainWindow.webContents.setAudioMuted(false);
-            } catch {
-                // keep running even if platform does not support call
-            }
-            if (!liveBenchmarkRuntime.enabled) {
-                mainWindow.show();
-            }
-            broadcastWindowState(mainWindow);
+    editorWindow.on('closed', () => {
+        editorWindow = null;
+        mainWindow = hubWindow;
+        if (!liveBenchmarkRuntime.enabled && hubWindow && !hubWindow.isDestroyed()) {
+            showHubWindow();
         }
     });
+
+    if (hubWindow && !hubWindow.isDestroyed() && !liveBenchmarkRuntime.enabled) {
+        hubWindow.hide();
+    }
+
+    loadRendererSurface(editorWindow, 'editor', normalizeEditorRequest(request));
+
+    editorWindow.once('ready-to-show', () => {
+        if (!editorWindow || editorWindow.isDestroyed()) return;
+        try {
+            editorWindow.webContents.setAudioMuted(false);
+        } catch {
+            // keep running even if platform does not support call
+        }
+        if (!liveBenchmarkRuntime.enabled) {
+            editorWindow.show();
+        }
+        broadcastWindowState(editorWindow);
+    });
+
+    return editorWindow;
 };
 
+const AUTH_PROTOCOL = 'hollowbits';
+const DESKTOP_AUTH_BRIDGE_URL = 'https://hollowbits.com/desktop-auth';
+
+const findAuthCallbackUrl = (argv) => {
+    if (!Array.isArray(argv)) return null;
+    return argv.find((entry) => typeof entry === 'string' && entry.startsWith(`${AUTH_PROTOCOL}://`)) || null;
+};
+
+const getAuthCallbackState = (url) => {
+    try {
+        const parsed = new URL(url);
+        const hashParams = new URLSearchParams(parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash);
+        return hashParams.get('desktop_state') || parsed.searchParams.get('desktop_state') || parsed.searchParams.get('state') || null;
+    } catch {
+        return null;
+    }
+};
+
+const createDesktopAuthBridgeUrl = (request) => {
+    const state = crypto.randomBytes(18).toString('base64url');
+    pendingAuthState = state;
+
+    const returnTo = new URL(`${AUTH_PROTOCOL}://auth/callback`);
+    returnTo.searchParams.set('desktop_state', state);
+
+    const bridgeUrl = new URL(DESKTOP_AUTH_BRIDGE_URL);
+    bridgeUrl.searchParams.set('source', 'desktop');
+    bridgeUrl.searchParams.set('mode', request?.mode === 'signup' ? 'signup' : 'login');
+    bridgeUrl.searchParams.set('state', state);
+    bridgeUrl.searchParams.set('return_to', returnTo.toString());
+    if (request?.prompt === 'none' || request?.prompt === 'select_account') {
+        bridgeUrl.searchParams.set('prompt', request.prompt);
+    }
+
+    return { url: bridgeUrl.toString(), state };
+};
+
+const deliverAuthCallback = (url) => {
+    if (!url) return;
+    const callbackState = getAuthCallbackState(url);
+    if (pendingAuthState && callbackState && callbackState !== pendingAuthState) {
+        console.warn('[auth] Ignoring desktop auth callback with mismatched state.');
+        return;
+    }
+    if (callbackState && callbackState === pendingAuthState) {
+        pendingAuthState = null;
+    }
+
+    pendingAuthCallbackUrl = url;
+    if (!app.isReady()) return;
+    const target = hubWindow && !hubWindow.isDestroyed() ? hubWindow : createHubWindow();
+    if (target && !target.isDestroyed()) {
+        if (!target.isVisible()) target.show();
+        target.focus();
+        target.webContents.send('desktop-auth-callback', url);
+    }
+};
+
+ipcMain.handle('desktop-open-editor', async (_event, request) => {
+    try {
+        createEditorWindow(request);
+        return { success: true };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logMainError('desktop-open-editor', message);
+        return { success: false, error: message };
+    }
+});
+
+ipcMain.handle('desktop-show-hub', async () => {
+    try {
+        if (editorWindow && !editorWindow.isDestroyed()) {
+            editorWindow.close();
+        } else {
+            showHubWindow();
+        }
+        return { success: true };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logMainError('desktop-show-hub', message);
+        return { success: false, error: message };
+    }
+});
+
+ipcMain.handle('desktop-open-auth', async (_event, request) => {
+    try {
+        const authRequest = createDesktopAuthBridgeUrl(request || {});
+        await shell.openExternal(authRequest.url);
+        return { success: true, ...authRequest };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logMainError('desktop-open-auth', message);
+        return { success: false, error: message };
+    }
+});
+
+ipcMain.handle('desktop-open-external-url', async (_event, rawUrl) => {
+    const url = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+    if (!/^https?:\/\//i.test(url)) {
+        return { success: false, error: 'Unsupported external URL.' };
+    }
+
+    try {
+        await shell.openExternal(url);
+        return { success: true };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: message };
+    }
+});
+
+ipcMain.handle('desktop-get-pending-auth-callback', async () => {
+    const url = pendingAuthCallbackUrl;
+    pendingAuthCallbackUrl = null;
+    return url;
+});
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+    app.quit();
+} else {
+    app.on('second-instance', (_event, argv) => {
+        const callbackUrl = findAuthCallbackUrl(argv);
+        if (callbackUrl) {
+            deliverAuthCallback(callbackUrl);
+        } else {
+            showHubWindow();
+        }
+    });
+}
+
+app.on('open-url', (event, url) => {
+    event.preventDefault();
+    deliverAuthCallback(url);
+});
+
 app.whenReady().then(() => {
-    createWindow();
+    if (process.defaultApp) {
+        app.setAsDefaultProtocolClient(AUTH_PROTOCOL, process.execPath, [path.resolve(process.argv[1] || '')]);
+    } else {
+        app.setAsDefaultProtocolClient(AUTH_PROTOCOL);
+    }
+
+    const initialAuthCallback = findAuthCallbackUrl(process.argv);
+    if (initialAuthCallback) {
+        pendingAuthCallbackUrl = initialAuthCallback;
+    }
+
+    if (liveBenchmarkRuntime.enabled) {
+        createEditorWindow();
+    } else {
+        createHubWindow();
+    }
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
-            createWindow();
+            createHubWindow();
         }
     });
 });

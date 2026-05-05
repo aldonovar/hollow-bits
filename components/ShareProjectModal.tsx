@@ -5,11 +5,11 @@ import { Copy, Check, Trash2, X, Eye, Edit2 } from 'lucide-react';
 
 export interface ProjectShare {
   id: string;
-  project_id: string;
+  project_id: string | null;
   token: string;
-  access_level: 'viewer' | 'editor';
-  created_at: string;
-  created_by: string;
+  access_level: string;
+  created_at: string | null;
+  created_by: string | null;
   invited_email: string | null;
 }
 

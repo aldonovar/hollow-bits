@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ArrowRight, X, AlertCircle } from 'lucide-react';
 import { supabase } from '../services/supabase';
 import { useAuthStore } from '../stores/authStore';
+import { platformService } from '../services/platformService';
 import './Auth.css';
 
 interface CollabAuthModalProps {
@@ -58,6 +59,18 @@ export const CollabAuthModal: React.FC<CollabAuthModalProps> = ({ onClose, onSuc
   const handleGoogleLogin = async () => {
     setLoading(true);
     try {
+      if (platformService.isDesktop) {
+        const result = await platformService.openDesktopAuth({
+          mode: 'login',
+          prompt: 'select_account',
+        });
+        if (!result.success) {
+          setError(result.error || 'No se pudo abrir el puente de autenticacion.');
+          setLoading(false);
+        }
+        return;
+      }
+
       const callbackUrl = `${window.location.origin}/engine`; // Regresar al DAW
       const { error: oauthError } = await supabase.auth.signInWithOAuth({
         provider: 'google',
@@ -72,7 +85,9 @@ export const CollabAuthModal: React.FC<CollabAuthModalProps> = ({ onClose, onSuc
       if (oauthError) {
         setError(oauthError.message);
         setLoading(false);
+        return;
       }
+
     } catch (err: any) {
       setError(err.message || 'Ocurrió un error inesperado de red. Verifica tu conexión.');
       setLoading(false);

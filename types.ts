@@ -567,12 +567,37 @@ export interface DesktopWindowState {
   isFullScreen: boolean;
 }
 
+export interface DesktopOpenEditorRequest {
+  projectId?: string;
+  shareToken?: string;
+  localPath?: string;
+}
+
+export interface DesktopAuthRequest {
+  mode?: 'login' | 'signup';
+  prompt?: 'select_account' | 'none';
+}
+
+export interface DesktopAuthLaunchResult {
+  success: boolean;
+  url?: string;
+  state?: string;
+  error?: string;
+}
+
 export interface DesktopHostAPI {
   minimize: () => void;
   maximize: () => void;
   close: () => void;
   getWindowState?: () => Promise<DesktopWindowState>;
   onWindowStateChange?: (callback: (state: DesktopWindowState) => void) => (() => void);
+  openEditor?: (request?: DesktopOpenEditorRequest) => Promise<{ success: boolean; error?: string }>;
+  showHub?: () => Promise<{ success: boolean; error?: string }>;
+  openDesktopAuth?: (request?: DesktopAuthRequest) => Promise<DesktopAuthLaunchResult>;
+  openExternalUrl?: (url: string) => Promise<{ success: boolean; error?: string }>;
+  getPendingAuthCallback?: () => Promise<string | null>;
+  onAuthCallback?: (callback: (url: string) => void) => (() => void);
+  onHubRefresh?: (callback: () => void) => (() => void);
   selectFiles: () => Promise<FileData[]>;
   readFileFromPath?: (filePath: string) => Promise<FileData | null>;
   selectDirectory?: () => Promise<string | null>;
