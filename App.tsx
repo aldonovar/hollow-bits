@@ -1,4 +1,5 @@
 // path: src/App.tsx
+import './index.css';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Transport from './components/Transport';
 import DeviceRack from './components/DeviceRack';
@@ -14,6 +15,7 @@ import Modal from './components/Modal';
 import { FluidPanel } from './components/FluidPanel';
 import AsciiPerformerDock from './components/AsciiPerformerDock';
 import CollabPanel, { CollabActivityEntry } from './components/CollabPanel';
+import { MiniAuthPanel } from './components/MiniAuthPanel';
 import { INITIAL_TRACKS, getTrackColorByPosition } from './constants';
 import { LoopMode, Note, SessionHealthSnapshot, StudioPerformanceProfile, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry, PunchRange, TransportAuthoritySnapshot, MonitoringRouteMode, RecordingCommitResult, RecordingJournalEntry, AutomationRuntimeFrame, AudioIncidentWindow, DiagnosticsVisibilityMode, VisualPerformanceSnapshot, AudioClipEditorViewState, ScoreWorkspaceState } from './types';
 import { engineAdapter, type EngineDiagnostics } from './services/engineAdapter';
@@ -117,14 +119,17 @@ import {
 } from './services/takeLaneControlService';
 import { useUndoRedo } from './hooks/useUndoRedo';
 import {
-    FolderInput, Settings, Cpu, LayoutGrid, Search, Users, Layers, Sliders, Sparkles, AlertTriangle, Undo2, Redo2, PlayCircle, Folder, HardDrive, Save, Trash2, Piano
+    FolderInput, Settings, Cpu, LayoutGrid, Search, Users, Layers, Sliders, Sparkles, AlertTriangle, Undo2, Redo2, PlayCircle, Folder, HardDrive, Save, Trash2, Piano, LogOut, UserCircle2, Share2, Cloud, CloudOff, X
 } from 'lucide-react';
 import { HardwareSettingsModal } from './components/HardwareSettingsModal';
+import { ShareProjectModal } from './components/ShareProjectModal';
 import { audioEngine } from './services/audioEngine';
+import { supabase } from './services/supabase';
 import {
     getTransportClockSnapshot,
     setTransportClockSnapshot
 } from './services/transportClockStore';
+import { useAuthStore } from './stores/authStore';
 
 const AISidebar = React.lazy(() => import('./components/AISidebar'));
 const PianoScoreWorkspace = React.lazy(() => import('./components/PianoScoreWorkspace'));
@@ -321,8 +326,17 @@ const toPersistentClip = (clip: Clip): Clip => {
 const App: React.FC = () => {
     const initialCollabSnapshot = useMemo(() => loadCollabSessionSnapshot(), []);
 
+    // Auth session (used for session indicator widget in sidebar)
+    const { user, session, signOut: authSignOut, initialize: authInitialize } = useAuthStore();
+
+    useEffect(() => {
+        // Initialize auth store inside DAW — handles hash token SSO from cross-domain redirect
+        const unsubscribe = authInitialize();
+        return () => unsubscribe();
+    }, [authInitialize]);
+
     // --- STATE ---
-    const [projectName, setProjectName] = useState("Sin TÃ­tulo");
+    const [projectName, setProjectName] = useState("Sin Título");
     const [loadingProject, setLoadingProject] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState("");
     const [importProgress, setImportProgress] = useState<{ total: number; completed: number; currentFile: string | null } | null>(null);
@@ -342,6 +356,7 @@ const App: React.FC = () => {
     const [activeMixSnapshot, setActiveMixSnapshot] = useState<MixSnapshotSlot | null>(null);
     const [projectCommandCount, setProjectCommandCount] = useState(() => initialCollabSnapshot.commandCount);
     const [collabSessionId, setCollabSessionId] = useState<string | null>(() => initialCollabSnapshot.sessionId);
+    const [isReadOnly, setIsReadOnly] = useState(false);
     const [collabUserName, setCollabUserName] = useState(() => initialCollabSnapshot.userName);
     const [collabActivity, setCollabActivity] = useState<CollabActivityEntry[]>(() => initialCollabSnapshot.activity);
     const [collabCommandJournal, setCollabCommandJournal] = useState<CollabCommandRecord[]>(() => initialCollabSnapshot.commandJournal);
@@ -355,11 +370,18 @@ const App: React.FC = () => {
     // Menus & Modals
     const [showFileMenu, setShowFileMenu] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
-    const [activeModal, setActiveModal] = useState<'settings' | 'help' | 'collab' | 'new-project-confirm' | 'recovery' | 'recording-recovery' | 'monitoring-routes' | null>(null);
+    const [activeModal, setActiveModal] = useState<'settings' | 'help' | 'collab' | 'auth' | 'new-project-confirm' | 'recovery' | 'recording-recovery' | 'monitoring-routes' | 'share' | null>(null);
+    const [isRenamingProject, setIsRenamingProject] = useState(false);
+    const [renameValue, setRenameValue] = useState("");
+    const [showProjectBrowser, setShowProjectBrowser] = useState(false);
+    const [cloudProjects, setCloudProjects] = useState<Array<{ id: string; name: string; updated_at: string; data: any }>>([]);
+    const [loadingCloudProjects, setLoadingCloudProjects] = useState(false);
     const [showExportModal, setShowExportModal] = useState(false);
     const [recoverySnapshot, setRecoverySnapshot] = useState<ProjectAutosaveSnapshot | null>(null);
     const [lastAutosaveAt, setLastAutosaveAt] = useState<number | null>(null);
     const [lastAutosaveReason, setLastAutosaveReason] = useState<string>('initial-snapshot');
+    const [showSessionPopover, setShowSessionPopover] = useState(false);
+    const [sessionPopoverView, setSessionPopoverView] = useState<'main' | 'login'>('main');
     const [projectIntegrityReport, setProjectIntegrityReport] = useState<ProjectIntegrityReport | null>(null);
     const [recordingJournalEntries, setRecordingJournalEntries] = useState<RecordingJournalEntry[]>(() => loadRecordingJournalEntries());
     const [recordingRecoveryAcknowledgedAt, setRecordingRecoveryAcknowledgedAt] = useState<number>(() => loadRecordingJournalRecoveryAcknowledgedAt());
@@ -652,6 +674,11 @@ const App: React.FC = () => {
         recipe: (currentTracks: Track[]) => Track[],
         options?: TrackMutationOptions
     ) => {
+        if (isReadOnly) {
+            console.warn("Project is read-only. Track mutation blocked.");
+            return;
+        }
+
         const commitMutation = (prevTracks: Track[]) => {
             const nextTracks = recipe(prevTracks);
             if (nextTracks === prevTracks) return prevTracks;
@@ -670,7 +697,7 @@ const App: React.FC = () => {
         setTracks(commitMutation, {
             groupKey: options?.historyGroupId || undefined
         });
-    }, [applyTrackGradientColors, setTracks, setTracksNoHistory]);
+    }, [applyTrackGradientColors, setTracks, setTracksNoHistory, isReadOnly]);
 
     const updateTrackById = useCallback((trackId: string, updates: Partial<Track>, options?: TrackMutationOptions) => {
         applyTrackMutation((prevTracks) => prevTracks.map((track) => (
@@ -1183,6 +1210,84 @@ const App: React.FC = () => {
     }, [collabActivity, collabCommandJournal, collabSessionId, collabUserName, projectCommandCount]);
 
     // Sync Tracks with Audio Engine
+    useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token');
+        const projectId = urlParams.get('project');
+
+        if (token) {
+            const loadSharedSession = async () => {
+                setLoadingProject(true);
+                setLoadingMessage('Resolviendo token de colaboración...');
+                try {
+                    const { data, error } = await supabase.rpc('get_project_by_share_token', { p_token: token });
+                    if (error || !data || data.length === 0) {
+                        alert('El enlace de colaboración es inválido o ha expirado.');
+                    } else {
+                        const sharedSession = data[0];
+                        if (sharedSession.access_level === 'viewer') {
+                            setIsReadOnly(true);
+                        }
+                        setProjectName(sharedSession.name);
+                        setCollabSessionId(sharedSession.project_id);
+                        
+                        // Si es viewer, alertar al usuario
+                        if (sharedSession.access_level === 'viewer') {
+                            alert('Has entrado en modo VISOR. No podrás guardar cambios en este proyecto.');
+                        } else {
+                            alert('Has entrado en modo EDITOR.');
+                        }
+
+                        // Load data if present
+                        if (sharedSession.data) {
+                            const integrityReport = await hydrateProjectData(sharedSession.data as unknown as ProjectData, sharedSession.name, {
+                                source: 'open-project',
+                                rememberReport: true
+                            });
+                            if (integrityReport.issueCount > 0) {
+                                console.warn('Project integrity repaired during open.', integrityReport);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error loading shared session:', e);
+                } finally {
+                    setLoadingProject(false);
+                }
+            };
+            loadSharedSession();
+        } else if (projectId) {
+            const loadCloudProject = async () => {
+                setLoadingProject(true);
+                setLoadingMessage('Cargando proyecto de la nube...');
+                try {
+                    const { data, error } = await supabase.from('projects').select('*').eq('id', projectId).single();
+                    if (error || !data) {
+                        alert('No se pudo encontrar el proyecto en la nube.');
+                    } else {
+                        setProjectName(data.name);
+                        setCollabSessionId(data.id);
+                        
+                        if (data.data && Object.keys(data.data).length > 0) {
+                            const integrityReport = await hydrateProjectData(data.data as unknown as ProjectData, data.name, {
+                                source: 'open-project',
+                                rememberReport: true
+                            });
+                            if (integrityReport.issueCount > 0) {
+                                console.warn('Project integrity repaired during open.', integrityReport);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error loading cloud project:', e);
+                } finally {
+                    setLoadingProject(false);
+                }
+            };
+            loadCloudProject();
+        }
+    }, []);
+
     useEffect(() => {
         latestTracksRef.current = tracks;
     }, [tracks]);
@@ -3569,7 +3674,7 @@ const App: React.FC = () => {
             notationOverrides: workspace.notationOverrides.map((override) => ({ ...override })),
             confidenceRegions: workspace.confidenceRegions.map((region) => ({ ...region }))
         })));
-        setProjectName(preferredName || projectData.name || 'Sin TÃ­tulo');
+        setProjectName(preferredName || projectData.name || 'Sin Título');
 
         engineAdapter.setBpm(normalizedTransport.bpm);
         engineAdapter.setMasterPitch(normalizedTransport.masterTranspose);
@@ -3666,11 +3771,45 @@ const App: React.FC = () => {
         return () => window.clearTimeout(timeoutId);
     }, [autosaveTransportSnapshot, createProjectDataSnapshot, projectCommandCount, projectName]);
 
+    // ── CLOUD AUTO-SAVE (every 30s when connected to cloud project) ──
+    const lastCloudSaveCommandRef = useRef(0);
+    useEffect(() => {
+        if (!collabSessionId || !user) return;
+
+        const intervalId = window.setInterval(async () => {
+            if (projectCommandCount <= lastCloudSaveCommandRef.current) return;
+            try {
+                const clockSnapshot = getTransportClockSnapshot();
+                const snapshot = createProjectDataSnapshot({
+                    ...transport,
+                    isPlaying: false,
+                    isRecording: false,
+                    currentBar: clockSnapshot.currentBar,
+                    currentBeat: clockSnapshot.currentBeat,
+                    currentSixteenth: clockSnapshot.currentSixteenth
+                }, projectName);
+                const integrityResult = repairProjectData(snapshot, { source: 'cloud-autosave' });
+
+                await supabase.from('projects').update({
+                    data: integrityResult.project as any,
+                    name: projectName,
+                    updated_at: new Date().toISOString()
+                }).eq('id', collabSessionId);
+
+                lastCloudSaveCommandRef.current = projectCommandCount;
+            } catch (err) {
+                console.warn('[CloudAutoSave] Silent save failed:', err);
+            }
+        }, 30000);
+
+        return () => window.clearInterval(intervalId);
+    }, [collabSessionId, user, projectCommandCount, transport, projectName, createProjectDataSnapshot]);
+
     // ... (Project management handlers remain same)
 
     const resetProjectToEmpty = useCallback(() => {
         replaceTracks([], { recolor: false });
-        setProjectName("Sin TÃ­tulo");
+        setProjectName("Sin Título");
         setSelectedTrackId(null);
         setSelectedClipId(null);
         setScoreWorkspaces([]);
@@ -3688,16 +3827,91 @@ const App: React.FC = () => {
             scaleRoot: 0,
             scaleType: 'minor'
         }));
+        setCollabSessionId(null);
+        window.history.pushState({}, '', window.location.pathname);
         setActiveModal(null);
         engineAdapter.stop(true);
         isPlayingRef.current = false;
         pauseResumeArmedRef.current = false;
-    }, [closeAllToolPanels, replaceTracks]);
+    }, [closeAllToolPanels, replaceTracks, setCollabSessionId]);
 
     const handleNewProject = useCallback(() => { setActiveModal('new-project-confirm'); }, []);
 
-    // Updated Open Project Handler using PlatformService
-    const handleOpenProject = async () => {
+    // Rename project handler — updates local state and syncs to cloud if connected
+    const handleRenameProject = useCallback(async (newName: string) => {
+        const trimmed = newName.trim();
+        if (!trimmed || trimmed === projectName) {
+            setIsRenamingProject(false);
+            return;
+        }
+        setProjectName(trimmed);
+        setIsRenamingProject(false);
+        // Sync rename to cloud if we have a session
+        if (collabSessionId && user) {
+            try {
+                await supabase.from('projects').update({ name: trimmed }).eq('id', collabSessionId);
+            } catch (e) {
+                console.error('[Rename] Cloud sync failed:', e);
+            }
+        }
+    }, [collabSessionId, projectName, user]);
+
+    // Open project browser — fetches cloud projects and shows the side panel
+    const handleOpenProjectBrowser = useCallback(async () => {
+        setShowFileMenu(false);
+        setShowProjectBrowser(true);
+        if (!user) return;
+        setLoadingCloudProjects(true);
+        try {
+            const { data: memberships } = await supabase
+                .from('workspace_members')
+                .select('workspace_id')
+                .eq('user_id', user.id);
+            if (memberships && memberships.length > 0) {
+                const wsIds = memberships.map(m => m.workspace_id);
+                const { data: projects } = await supabase
+                    .from('projects')
+                    .select('id, name, updated_at, data')
+                    .in('workspace_id', wsIds)
+                    .order('updated_at', { ascending: false });
+                if (projects) setCloudProjects(projects);
+            }
+        } catch (e) {
+            console.error('[ProjectBrowser] Error:', e);
+        } finally {
+            setLoadingCloudProjects(false);
+        }
+    }, [user]);
+
+    // Load a specific cloud project from the browser panel
+    const handleLoadCloudProject = useCallback(async (project: { id: string; name: string; data: any }) => {
+        setShowProjectBrowser(false);
+        setLoadingProject(true);
+        setLoadingMessage('Cargando proyecto...');
+        try {
+            setProjectName(project.name);
+            setCollabSessionId(project.id);
+            if (project.data && Object.keys(project.data).length > 0) {
+                const integrityReport = await hydrateProjectData(project.data as unknown as ProjectData, project.name, {
+                    source: 'open-project',
+                    rememberReport: true
+                });
+                if (integrityReport.issueCount > 0) {
+                    console.warn('Project integrity repaired during open.', integrityReport);
+                }
+            }
+        } catch (e) {
+            console.error('[LoadCloudProject] Error:', e);
+            alert('Error al cargar el proyecto.');
+        } finally {
+            setLoadingProject(false);
+            setLoadingMessage('');
+        }
+    }, [hydrateProjectData]);
+
+    // Import from local disk (.esp file)
+    const handleImportFromDisk = async () => {
+        setShowFileMenu(false);
         try {
             setLoadingProject(true);
             setLoadingMessage("Leyendo proyecto...");
@@ -3705,6 +3919,7 @@ const App: React.FC = () => {
             const result = await platformService.openProjectFile();
             if (!result) {
                 setLoadingProject(false);
+                setLoadingMessage("");
                 return; // User cancelled
             }
 
@@ -3723,16 +3938,55 @@ const App: React.FC = () => {
 
         } catch (err) {
             console.error("Open Project Error", err);
-            alert("Error crÃ­tico al leer el archivo. El formato puede estar corrupto.");
+            alert("Error crítico al leer el archivo. El formato puede estar corrupto.");
         } finally {
             setLoadingProject(false);
             setLoadingMessage("");
-            setShowFileMenu(false);
             closeAllToolPanels();
         }
     };
 
+    const handleDownloadProject = useCallback(async () => {
+        setLoadingProject(true);
+        setLoadingMessage("Preparando archivo local...");
+
+        setTimeout(async () => {
+            try {
+                if (transport.isPlaying) {
+                    engineAdapter.pause();
+                    setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
+                    isPlayingRef.current = false;
+                    pauseResumeArmedRef.current = false;
+                }
+                const clockSnapshot = getTransportClockSnapshot();
+                const projectMetadata = createProjectDataSnapshot({
+                    ...transport,
+                    isPlaying: false,
+                    isRecording: false,
+                    currentBar: clockSnapshot.currentBar,
+                    currentBeat: clockSnapshot.currentBeat,
+                    currentSixteenth: clockSnapshot.currentSixteenth
+                }, projectName);
+                const integrityResult = repairProjectData(projectMetadata, { source: 'save-project' });
+                rememberProjectIntegrityReport(integrityResult.report);
+                const jsonString = JSON.stringify(integrityResult.project, null, 2);
+
+                await platformService.saveProject(jsonString, projectName);
+            } catch (err) {
+                console.error("Error al descargar proyecto:", err);
+                alert("Hubo un error al intentar descargar el proyecto.");
+            } finally {
+                setLoadingProject(false);
+            }
+        }, 50);
+    }, [transport, projectName, createProjectDataSnapshot]);
+
     const handleSaveProject = useCallback(async () => {
+        if (isReadOnly) {
+            alert("No tienes permisos para guardar cambios en este proyecto.");
+            return;
+        }
+        
         setLoadingProject(true);
         setLoadingMessage("Guardando metadatos...");
 
@@ -3756,14 +4010,77 @@ const App: React.FC = () => {
                 const integrityResult = repairProjectData(projectMetadata, { source: 'save-project' });
                 rememberProjectIntegrityReport(integrityResult.report);
                 const jsonString = JSON.stringify(integrityResult.project, null, 2);
-                setLoadingMessage("Escribiendo disco...");
 
-                // FIX: Update Project Name from Save Result
-                const result = await platformService.saveProject(jsonString, projectName);
-                if (result.success && result.filePath) {
-                    setProjectName(result.filePath);
+                if (collabSessionId) {
+                    setLoadingMessage("Guardando en la nube...");
+                    try {
+                        const { error } = await supabase.from('projects').update({
+                            data: integrityResult.project as any,
+                            name: projectName,
+                            updated_at: new Date().toISOString()
+                        }).eq('id', collabSessionId);
+                        
+                        if (error) throw error;
+                    } catch (e) {
+                        console.error('Error saving to cloud:', e);
+                        alert("Error al guardar en la nube.");
+                    }
+                } else if (user) {
+                    setLoadingMessage("Creando proyecto en la nube...");
+                    try {
+                        const { data: memberships, error: wsError } = await supabase
+                            .from('workspace_members')
+                            .select('workspace_id')
+                            .eq('user_id', user.id)
+                            .limit(1);
+                        
+                        if (wsError || !memberships || memberships.length === 0) throw new Error("Workspace no encontrado");
+                        
+                        const workspaceId = memberships[0].workspace_id;
+                        const { data: newProjectId, error: createError } = await supabase.rpc('create_project_with_limit', {
+                            p_name: projectName,
+                            p_workspace_id: workspaceId,
+                            p_bpm: 120,
+                            p_sample_rate: 44100,
+                            p_is_public: false,
+                            p_data: integrityResult.project as any
+                        });
+                        
+                        if (createError) {
+                            if (createError.message.includes('limit reached')) {
+                                alert('Has alcanzado el límite de proyectos para la capa gratuita. Por favor actualiza tu plan o elimina un proyecto.');
+                            } else {
+                                throw createError;
+                            }
+                            // Don't fallback to local, just stop
+                            setLoadingProject(false);
+                            setLoadingMessage("");
+                            return;
+                        }
+                        
+                        if (!newProjectId) throw new Error("No se devolvió ID del proyecto");
+                        
+                        setCollabSessionId(newProjectId as string);
+                        window.history.pushState({}, '', `${window.location.pathname}?project=${newProjectId}`);
+                    } catch (e) {
+                        console.error('Error creating cloud project:', e);
+                        alert("Error al crear el proyecto en la nube. Se descargará localmente como respaldo.");
+                        const result = await platformService.saveProject(jsonString, projectName);
+                        if (result.success && result.filePath) {
+                            setProjectName(result.filePath);
+                        }
+                    }
+                } else {
+                    setLoadingMessage("Escribiendo disco...");
+                    // FIX: Update Project Name from Save Result
+                    const result = await platformService.saveProject(jsonString, projectName);
+                    if (result.success && result.filePath) {
+                        setProjectName(result.filePath);
+                    }
                 }
-                if (result.success && integrityResult.report.issueCount > 0) {
+                
+                // Fallback result for integrity report (using success always if cloud or fallback done without throw)
+                if (integrityResult.report.issueCount > 0) {
                     console.warn('Project integrity repaired during save.', integrityResult.report);
                     alert(summarizeProjectIntegrityReport(integrityResult.report, 'Proyecto guardado'));
                 }
@@ -3778,7 +4095,7 @@ const App: React.FC = () => {
                 setShowFileMenu(false);
             }
         }, 20);
-    }, [createProjectDataSnapshot, projectName, rememberProjectIntegrityReport, transport]);
+    }, [createProjectDataSnapshot, projectName, rememberProjectIntegrityReport, transport, isReadOnly]);
 
     const assignClipToSessionSlot = useCallback((track: Track, sceneIndex: number, clip: Clip): Track => {
         const safeSceneIndex = Math.max(0, Math.min(7, sceneIndex));
@@ -3914,13 +4231,13 @@ const App: React.FC = () => {
 
         const validTracks = importedTracks.filter((track): track is Track => track !== null);
         if (validTracks.length === 0) {
-            throw new Error('No se pudo decodificar ningÃºn archivo de audio.');
+            throw new Error('No se pudo decodificar ningún archivo de audio.');
         }
 
         appendTracks(validTracks, { reason: 'import-audio-files', recolor: true });
 
         if (validTracks.length < sources.length) {
-            alert('Algunos archivos no se pudieron importar, pero el resto se agregÃ³ correctamente.');
+            alert('Algunos archivos no se pudieron importar, pero el resto se agregó correctamente.');
         }
     }, [appendTracks, buildAudioClipFromBuffer, tracks.length, getProgressiveTrackColor]);
 
@@ -4775,14 +5092,15 @@ const App: React.FC = () => {
                 <div className="w-[50px] bg-[#1a1a1a] border-r border-daw-border flex flex-col items-center py-3 gap-3 z-[100] shrink-0 relative shadow-xl">
                     {/* ... Sidebar Icons (unchanged) ... */}
                     <div className="relative group" ref={fileMenuRef}>
-                        <button onClick={() => setShowFileMenu(!showFileMenu)} className={`w-10 h-10 flex items-center justify-center rounded-sm transition-all duration-100 relative ${showFileMenu ? 'bg-[#333] text-white' : 'text-gray-400 hover:text-white hover:bg-[#222]'}`} title="MenÃº de Proyecto">
+                        <button onClick={() => setShowFileMenu(!showFileMenu)} className={`w-10 h-10 flex items-center justify-center rounded-sm transition-all duration-100 relative ${showFileMenu ? 'bg-[#333] text-white' : 'text-gray-400 hover:text-white hover:bg-[#222]'}`} title="Menú de Proyecto">
                             <Folder size={20} strokeWidth={1.5} />
                         </button>
                         {showFileMenu && (
                             <div className="absolute left-[52px] top-0 w-56 bg-[#1a1a1a] border border-[#444] shadow-[0_5px_15px_rgba(0,0,0,0.5)] z-[101] flex flex-col py-1 animate-in slide-in-from-left-2 duration-100">
                                 <div className="px-4 py-2 text-[10px] font-bold text-gray-500 uppercase tracking-wider border-b border-white/5 mb-1">Archivo</div>
                                 <button onClick={handleNewProject} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Nuevo Proyecto</span></button>
-                                <button onClick={() => { handleOpenProject(); setShowFileMenu(false); }} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Abrir Proyecto...</span></button>
+                                <button onClick={handleOpenProjectBrowser} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Mis Proyectos</span></button>
+                                <button onClick={handleImportFromDisk} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Importar desde disco...</span></button>
                                 <button
                                     onClick={() => {
                                         setShowSettings(true);
@@ -4795,6 +5113,7 @@ const App: React.FC = () => {
 
                                 <div className="h-px bg-daw-border w-1/2 my-2"></div>
                                 <button onClick={handleSaveProject} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Guardar Proyecto</span><span className="opacity-50 text-[10px]">Ctrl+S</span></button>
+                                <button onClick={() => { handleDownloadProject(); setShowFileMenu(false); }} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Descargar Proyecto Local</span></button>
                                 <button onClick={() => setShowExportModal(true)} className="text-xs text-left px-4 py-2 text-gray-300 hover:bg-white/10 hover:text-white transition-colors flex justify-between group"><span>Exportar Audio</span></button>
                             </div>
                         )}
@@ -4808,14 +5127,14 @@ const App: React.FC = () => {
                     <div className="w-6 h-px bg-white/5 my-1"></div>
                     <div className="flex flex-col gap-2 w-full items-center">
                         <SidebarItem icon={LayoutGrid} label="Vista de Arreglo" active={mainView === 'arrange'} onClick={() => setMainView('arrange')} />
-                        <SidebarItem icon={PlayCircle} label="Vista de SesiÃ³n (Live)" active={mainView === 'session'} onClick={() => setMainView('session')} color="text-daw-ruby" />
+                        <SidebarItem icon={PlayCircle} label="Vista de Sesión (Live)" active={mainView === 'session'} onClick={() => setMainView('session')} color="text-daw-ruby" />
                         <SidebarItem icon={Sliders} label="Mezclador" active={mainView === 'mixer'} onClick={() => setMainView('mixer')} />
                     </div>
                     <div className="w-6 h-px bg-white/5 my-1"></div>
                     <div className="flex flex-col gap-2 w-full items-center">
                         <SidebarItem icon={Cpu} label="Rack de Dispositivos" onClick={() => setBottomView('devices')} active={bottomView === 'devices'} />
                         <SidebarItem icon={Layers} label="Editor de Notas/Audio" onClick={() => setBottomView('editor')} active={bottomView === 'editor'} />
-                        <button onClick={handleImportAudio} className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-white hover:bg-white/5 rounded-md transition-all" title="Importar RÃ¡pido">
+                        <button onClick={handleImportAudio} className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-white hover:bg-white/5 rounded-md transition-all" title="Importar Rápido">
                             <FolderInput size={18} />
                         </button>
                     </div>
@@ -4824,12 +5143,105 @@ const App: React.FC = () => {
                         <button onClick={redo} disabled={!canRedo} className={`w-8 h-8 flex items-center justify-center rounded-md transition-all ${!canRedo ? 'text-gray-700 cursor-not-allowed opacity-30' : 'text-gray-400 hover:text-white hover:bg-white/5'}`} title="Rehacer (Ctrl+Y)"><Redo2 size={16} /></button>
                     </div>
                     <div className="mt-auto flex flex-col gap-3 w-full items-center pb-3">
-                        <SidebarItem icon={Users} label="ColaboraciÃ³n" onClick={() => setActiveModal('collab')} active={activeModal === 'collab'} />
+                        <SidebarItem icon={Users} label="Colaboración" onClick={() => setActiveModal('collab')} active={activeModal === 'collab'} />
+                        <SidebarItem icon={Share2} label="Compartir Enlace" onClick={() => { if (collabSessionId) { setActiveModal('share'); } else { alert('Debes guardar el proyecto en la nube primero (Colaboración) antes de poder compartirlo.'); } }} active={activeModal === 'share'} color="text-gray-400 group-hover:text-blue-400" />
                         <SidebarItem icon={Settings} label="Preferencias de Audio/MIDI" onClick={() => setShowSettings(true)} active={showSettings} />
                     </div>
+
+                    {/* ── SESSION WIDGET ─────────────────────────────────────── */}
+                    <div className="w-full px-1 pb-2 mt-1 border-t border-white/5 pt-2 relative">
+                        {showSessionPopover && (
+                            <div className="absolute left-14 bottom-2 w-64 bg-[#0a0a0d] border border-white/10 rounded-lg shadow-[0_0_24px_rgba(0,0,0,0.8)] p-4 z-50 animate-in fade-in zoom-in-95"
+                                 // Se removió onMouseLeave para evitar que se cierre accidentalmente
+                            >
+                                {session ? (
+                                    <div className="flex flex-col gap-3">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-rose-500 flex items-center justify-center text-white font-bold text-lg">
+                                                {(user?.user_metadata?.full_name || user?.email || '?').charAt(0)}
+                                            </div>
+                                            <div className="flex flex-col min-w-0">
+                                                <span className="text-sm text-gray-200 font-medium truncate">{user?.user_metadata?.full_name || 'Usuario DAW'}</span>
+                                                <span className="text-[10px] text-gray-500 truncate">{user?.email}</span>
+                                            </div>
+                                        </div>
+                                        <div className="h-px bg-white/10 w-full my-1" />
+                                        <button onClick={() => { setShowSessionPopover(false); window.location.href = import.meta.env.PROD ? 'https://hollowbits.com/console' : '/console'; }} className="w-full py-2 text-xs text-gray-300 hover:bg-white/5 hover:text-white rounded text-left px-2 transition-colors flex items-center gap-2">
+                                            <span>Ir al Dashboard</span>
+                                        </button>
+                                        <button onClick={() => { setShowSessionPopover(false); authSignOut(); }} className="w-full py-2 text-xs text-rose-400 hover:bg-rose-500/10 rounded text-left px-2 transition-colors flex items-center gap-2">
+                                            <LogOut size={12} />
+                                            <span>Cerrar Sesión</span>
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col gap-3">
+                                        {sessionPopoverView === 'login' ? (
+                                            <MiniAuthPanel 
+                                                onSuccess={() => { setShowSessionPopover(false); setSessionPopoverView('main'); }} 
+                                                onBack={() => setSessionPopoverView('main')} 
+                                            />
+                                        ) : (
+                                            <>
+                                                <div className="flex flex-col items-center gap-2 text-center">
+                                                    <div className="w-12 h-12 rounded-full border border-white/10 bg-white/[0.03] flex items-center justify-center mb-1">
+                                                        <UserCircle2 size={24} className="text-gray-500" />
+                                                    </div>
+                                                    <h3 className="text-sm text-gray-200 font-medium">Modo Invitado</h3>
+                                                    <p className="text-xs text-gray-500 leading-relaxed">
+                                                        Tus proyectos no se guardarán en la nube. Inicia sesión para sincronizar.
+                                                    </p>
+                                                </div>
+                                                <div className="h-px bg-white/10 w-full my-1" />
+                                                <button 
+                                                    onClick={() => setSessionPopoverView('login')}
+                                                    className="w-full py-2 text-xs font-medium text-black bg-daw-cyan hover:bg-daw-cyan/90 rounded transition-colors text-center font-bold tracking-wider uppercase"
+                                                >
+                                                    Vincular Cuenta
+                                                </button>
+                                                <button 
+                                                    onClick={() => { setShowSessionPopover(false); window.location.href = import.meta.env.PROD ? 'https://hollowbits.com/login' : '/login'; }}
+                                                    className="w-full py-2 text-xs font-medium text-gray-400 hover:text-white bg-transparent border border-white/10 hover:bg-white/5 rounded transition-colors text-center"
+                                                >
+                                                    Ir al Portal de Login
+                                                </button>
+                                            </>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        
+                        {session ? (
+                            <button onClick={() => setShowSessionPopover(!showSessionPopover)} className="group relative flex flex-col items-center gap-1 w-full outline-none">
+                                {/* Avatar con iniciales */}
+                                <div className="relative w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-rose-500 flex items-center justify-center shadow-[0_0_10px_rgba(168,85,247,0.4)] ring-1 ring-white/10 cursor-pointer hover:ring-white/30 transition-all" title={(user?.user_metadata?.full_name || user?.email) ?? 'Sesión activa'}>
+                                    <span className="text-white text-[10px] font-bold uppercase select-none">
+                                        {(user?.user_metadata?.full_name || user?.email || '?').charAt(0)}
+                                    </span>
+                                    {/* Online dot */}
+                                    <span className="absolute bottom-0 right-0 w-2 h-2 rounded-full bg-green-400 ring-1 ring-[#1a1a1a]" />
+                                </div>
+                            </button>
+                        ) : (
+                            <button
+                                onClick={() => setShowSessionPopover(!showSessionPopover)}
+                                className="flex flex-col items-center gap-1 group cursor-pointer w-full outline-none"
+                                title="Estado de Sesión"
+                            >
+                                <div className="w-8 h-8 rounded-full border border-white/10 bg-white/[0.03] group-hover:bg-white/10 group-hover:border-purple-500/50 flex items-center justify-center transition-all duration-300">
+                                    <UserCircle2 size={16} className="text-gray-600 group-hover:text-purple-400 transition-colors duration-300" />
+                                </div>
+                                <span className="text-[8px] text-gray-700 group-hover:text-gray-400 uppercase tracking-wider transition-colors duration-300">Guest</span>
+                            </button>
+                        )}
+                    </div>
+                    {/* ─────────────────────────────────────────────────────────── */}
+
                     <input type="file" ref={fileInputRef} className="hidden" multiple accept=".wav,.mp3,.aif,.aiff,.ogg,.flac" onChange={handleFileImport} />
                     {/* Project Input removed in favor of platformService */}
                 </div>
+
 
                 {!isScannerImmersive && hasLoadedAISidebar && (
                     <React.Suspense fallback={null}>
@@ -5016,9 +5428,44 @@ const App: React.FC = () => {
             {!isScannerImmersive && (
                 <div className="h-8 bg-[#11131a]/96 border-t border-white/10 flex items-center justify-between px-4 select-none shrink-0 z-50 backdrop-blur-sm">
                     <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-2 px-2.5 h-5 rounded-sm border border-white/10 bg-white/[0.03] text-gray-300">
-                            <HardDrive size={11} className="text-daw-violet" />
-                            <span className="text-[9px] font-bold uppercase tracking-[0.14em]">{projectName}</span>
+                        <div
+                            className="flex items-center gap-2 px-2.5 h-5 rounded-sm border border-white/10 bg-white/[0.03] text-gray-300 cursor-pointer hover:border-daw-violet/50 hover:bg-white/[0.06] transition-all group/name"
+                            onClick={() => {
+                                if (!isRenamingProject) {
+                                    setRenameValue(projectName);
+                                    setIsRenamingProject(true);
+                                }
+                            }}
+                            title="Clic para renombrar proyecto"
+                        >
+                            {collabSessionId ? (
+                                <Cloud size={11} className="text-green-400" />
+                            ) : user ? (
+                                <CloudOff size={11} className="text-amber-400" />
+                            ) : (
+                                <HardDrive size={11} className="text-daw-violet" />
+                            )}
+                            {isRenamingProject ? (
+                                <input
+                                    autoFocus
+                                    type="text"
+                                    value={renameValue}
+                                    onChange={(e) => setRenameValue(e.target.value)}
+                                    onBlur={() => handleRenameProject(renameValue)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') handleRenameProject(renameValue);
+                                        if (e.key === 'Escape') setIsRenamingProject(false);
+                                        e.stopPropagation();
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="text-[9px] font-bold uppercase tracking-[0.14em] bg-transparent border-none outline-none text-white w-[120px] selection:bg-daw-violet/40"
+                                />
+                            ) : (
+                                <span className="text-[9px] font-bold uppercase tracking-[0.14em] group-hover/name:text-white transition-colors">{projectName}</span>
+                            )}
+                            {collabSessionId && (
+                                <span className="text-[8px] text-green-400/60 font-mono">NUBE</span>
+                            )}
                         </div>
                         {selectedTrack && (
                             <div className="flex items-center gap-2 px-2.5 h-5 rounded-sm border border-white/10 bg-white/[0.03]">
@@ -5107,6 +5554,92 @@ const App: React.FC = () => {
                     <ExportModal isOpen={showExportModal} onClose={() => setShowExportModal(false)} tracks={tracks} totalBars={200} bpm={transport.bpm} />
                 </React.Suspense>
             )}
+
+            {/* ====== PROJECT BROWSER SIDE PANEL ====== */}
+            {showProjectBrowser && (
+                <div className="fixed inset-0 z-[200] flex">
+                    {/* Backdrop */}
+                    <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={() => setShowProjectBrowser(false)} />
+                    {/* Panel */}
+                    <div className="relative w-[380px] max-w-[90vw] h-full bg-[#141619] border-r border-white/10 shadow-2xl flex flex-col animate-in slide-in-from-left duration-200">
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+                            <div>
+                                <h2 className="text-sm font-bold text-white tracking-wide">Mis Proyectos</h2>
+                                <p className="text-[10px] text-gray-500 mt-0.5">Selecciona un proyecto para abrirlo</p>
+                            </div>
+                            <button
+                                onClick={() => setShowProjectBrowser(false)}
+                                className="w-7 h-7 flex items-center justify-center rounded-sm text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+
+                        {/* Project List */}
+                        <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
+                            {!user && (
+                                <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                                    <CloudOff size={32} className="text-gray-600 mb-3" />
+                                    <p className="text-xs text-gray-400">Inicia sesión para acceder a tus proyectos en la nube.</p>
+                                </div>
+                            )}
+                            {user && loadingCloudProjects && (
+                                <div className="flex flex-col items-center justify-center h-40">
+                                    <div className="w-5 h-5 border-2 border-daw-violet/30 border-t-daw-violet rounded-full animate-spin" />
+                                    <p className="text-[10px] text-gray-500 mt-3 font-mono">Cargando proyectos...</p>
+                                </div>
+                            )}
+                            {user && !loadingCloudProjects && cloudProjects.length === 0 && (
+                                <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                                    <Folder size={32} className="text-gray-600 mb-3" />
+                                    <p className="text-xs text-gray-400">No tienes proyectos guardados aún.</p>
+                                    <p className="text-[10px] text-gray-600 mt-1">Guarda tu primer proyecto con Ctrl+S</p>
+                                </div>
+                            )}
+                            {user && !loadingCloudProjects && cloudProjects.map((proj) => (
+                                <button
+                                    key={proj.id}
+                                    onClick={() => handleLoadCloudProject(proj)}
+                                    className={`w-full text-left px-4 py-3 rounded-md border transition-all duration-150 group ${
+                                        proj.id === collabSessionId
+                                            ? 'border-daw-violet/50 bg-daw-violet/10 text-white'
+                                            : 'border-transparent hover:border-white/10 hover:bg-white/[0.04] text-gray-300'
+                                    }`}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className={`w-8 h-8 rounded-sm flex items-center justify-center shrink-0 ${
+                                            proj.id === collabSessionId ? 'bg-daw-violet/20' : 'bg-white/5 group-hover:bg-white/10'
+                                        } transition-colors`}>
+                                            <Folder size={14} className={proj.id === collabSessionId ? 'text-daw-violet' : 'text-gray-500 group-hover:text-gray-300'} />
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="text-xs font-semibold truncate">{proj.name}</div>
+                                            <div className="text-[10px] text-gray-500 mt-0.5 font-mono">
+                                                {new Date(proj.updated_at).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                            </div>
+                                        </div>
+                                        {proj.id === collabSessionId && (
+                                            <span className="text-[8px] font-bold text-daw-violet uppercase tracking-wider shrink-0">Actual</span>
+                                        )}
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="px-4 py-3 border-t border-white/10 flex flex-col gap-2">
+                            <button
+                                onClick={() => { setShowProjectBrowser(false); handleImportFromDisk(); }}
+                                className="w-full text-xs text-left px-3 py-2 text-gray-400 hover:text-white hover:bg-white/[0.05] rounded-sm transition-colors flex items-center gap-2"
+                            >
+                                <HardDrive size={12} />
+                                <span>Importar desde disco (.esp)</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
             <Modal isOpen={activeModal === 'recovery'} onClose={handleDiscardRecoverySnapshot} title="RecuperaciÃ³n automÃ¡tica">
                 <div className="flex flex-col gap-4">
                     <p className="text-xs text-gray-300 leading-relaxed">
@@ -5176,7 +5709,7 @@ const App: React.FC = () => {
                                         {entry.failureReason || lastPhase?.message || 'Sin detalle adicional.'}
                                     </div>
                                     <div className="mt-2 text-[10px] text-gray-500 font-mono">
-                                        Phase: {lastPhase?.phase || 'unknown'}{typeof lastPhase?.barTime === 'number' ? ` · bar ${lastPhase.barTime.toFixed(3)}` : ''}
+                                        Phase: {lastPhase?.phase || 'unknown'}{typeof lastPhase?.barTime === 'number' ? ` Â· bar ${lastPhase.barTime.toFixed(3)}` : ''}
                                     </div>
                                 </div>
                             );
@@ -5259,11 +5792,11 @@ const App: React.FC = () => {
                                             <span className={route.active ? 'text-emerald-300' : 'text-gray-500'}>
                                                 {route.active ? 'Active' : 'Idle'}
                                             </span>
-                                            <span className="text-gray-500">·</span>
+                                            <span className="text-gray-500">Â·</span>
                                             <span className="text-gray-300">{route.mode}</span>
                                             {route.pendingFinalize && (
                                                 <>
-                                                    <span className="text-gray-500">·</span>
+                                                    <span className="text-gray-500">Â·</span>
                                                     <span className="text-amber-200">Pending Finalize</span>
                                                 </>
                                             )}
@@ -5295,9 +5828,17 @@ const App: React.FC = () => {
                     </div>
                 </div>
             </Modal>
-            <Modal isOpen={activeModal === 'new-project-confirm'} onClose={() => setActiveModal(null)} title="Nuevo Proyecto"><div className="flex flex-col gap-6"><div className="flex items-start gap-4 text-white"><div className="p-3 bg-daw-ruby/20 rounded-full shrink-0"><AlertTriangle className="text-daw-ruby" size={24} /></div><div><h3 className="font-bold text-lg mb-1">Â¿Deseas guardar los cambios?</h3><p className="text-gray-400 text-xs leading-relaxed">Si continÃºas sin guardar, perderÃ¡s todo el trabajo actual para abrir un espacio de trabajo limpio.</p></div></div><div className="flex flex-col gap-2"><button onClick={async () => { await handleSaveProject(); resetProjectToEmpty(); }} className="w-full flex items-center justify-between px-4 py-3 bg-white text-black rounded-sm font-bold text-xs hover:bg-gray-200 transition-all group"><div className="flex items-center gap-3"><Save size={16} /><span>GUARDAR Y CREAR NUEVO</span></div></button><button onClick={resetProjectToEmpty} className="w-full flex items-center gap-3 px-4 py-3 bg-[#222] text-daw-ruby border border-daw-ruby/30 rounded-sm font-bold text-xs hover:bg-daw-ruby hover:text-white transition-all"><Trash2 size={16} /><span>CONTINUAR SIN GUARDAR</span></button><button onClick={() => setActiveModal(null)} className="w-full py-2 text-gray-500 hover:text-white text-[10px] font-bold uppercase tracking-widest mt-2">CANCELAR</button></div></div></Modal>
+            <Modal isOpen={activeModal === 'new-project-confirm'} onClose={() => setActiveModal(null)} title="Nuevo Proyecto"><div className="flex flex-col gap-6"><div className="flex items-start gap-4 text-white"><div className="p-3 bg-daw-ruby/20 rounded-full shrink-0"><AlertTriangle className="text-daw-ruby" size={24} /></div><div><h3 className="font-bold text-lg mb-1">Ã‚Â¿Deseas guardar los cambios?</h3><p className="text-gray-400 text-xs leading-relaxed">Si continúas sin guardar, perderás todo el trabajo actual para abrir un espacio de trabajo limpio.</p></div></div><div className="flex flex-col gap-2"><button onClick={async () => { await handleSaveProject(); resetProjectToEmpty(); }} className="w-full flex items-center justify-between px-4 py-3 bg-white text-black rounded-sm font-bold text-xs hover:bg-gray-200 transition-all group"><div className="flex items-center gap-3"><Save size={16} /><span>GUARDAR Y CREAR NUEVO</span></div></button><button onClick={resetProjectToEmpty} className="w-full flex items-center gap-3 px-4 py-3 bg-[#222] text-daw-ruby border border-daw-ruby/30 rounded-sm font-bold text-xs hover:bg-daw-ruby hover:text-white transition-all"><Trash2 size={16} /><span>CONTINUAR SIN GUARDAR</span></button><button onClick={() => setActiveModal(null)} className="w-full py-2 text-gray-500 hover:text-white text-[10px] font-bold uppercase tracking-widest mt-2">CANCELAR</button></div></div></Modal>
 
-            <Modal isOpen={activeModal === 'collab'} onClose={() => setActiveModal(null)} title="ColaboraciÃ³n">
+            {activeModal === 'share' && collabSessionId && (
+                <ShareProjectModal 
+                    projectId={collabSessionId} 
+                    projectName={projectName} 
+                    onClose={() => setActiveModal(null)} 
+                />
+            )}
+
+            <Modal isOpen={activeModal === 'collab'} onClose={() => setActiveModal(null)} title="Colaboración">
                 <CollabPanel
                     sessionId={collabSessionId}
                     userName={collabUserName}
@@ -5309,6 +5850,7 @@ const App: React.FC = () => {
                     onCopyInvite={handleCopyCollabInvite}
                 />
             </Modal>
+
         </div>
     );
 };
