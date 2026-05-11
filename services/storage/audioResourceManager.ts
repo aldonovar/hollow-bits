@@ -1,5 +1,6 @@
 import { localAudioCache } from './localAudioCache';
 import { cloudStorageService } from './cloudStorageService';
+import { projectOsService } from '../projectOsService';
 
 /**
  * Audio Resource Manager
@@ -86,8 +87,22 @@ class AudioResourceManager {
            uploadBlob = await this.compressToFlac(fileId, arrayBuffer);
         }
 
-        // Upload compressed FLAC to cloud
-        await cloudStorageService.uploadAudioToCloud(projectId, fileId, uploadBlob);
+        // Upload compressed FLAC to cloud only during explicit commit/save flows.
+        const cloudPath = await cloudStorageService.uploadAudioToCloud(projectId, fileId, uploadBlob);
+        await projectOsService.registerAsset({
+          bucket: 'project-audio',
+          path: cloudPath,
+          projectId,
+          sizeBytes: uploadBlob.size,
+          format: uploadBlob.type.includes('flac') ? 'flac' : 'wav',
+          sampleRate: 44100,
+          metadata: {
+            source: 'audioResourceManager.commitSessionAudio',
+            fileId,
+          },
+        }).catch((assetError) => {
+          console.warn('[Storage] Audio uploaded but asset indexing failed:', assetError);
+        });
         
       } catch (err) {
         console.error(`[Storage] Failed to compress/sync ${fileId} to cloud`, err);
