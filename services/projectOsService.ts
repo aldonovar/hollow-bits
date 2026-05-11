@@ -83,7 +83,7 @@ export interface CreateRenderJobInput {
 export interface RenderJobRecord {
   id: string;
   project_id: string;
-  workspace_id: string | null;
+  workspace_id: string;
   requested_by: string;
   kind: RenderKind;
   status: ProjectOsStatus;
@@ -236,13 +236,16 @@ class ProjectOsService {
   async registerAsset(input: RegisterProjectAssetInput): Promise<ProjectAssetRecord> {
     const userId = await this.requireUserId();
     assertAllowedBucket(input.bucket);
+    const workspaceId = input.projectId
+      ? await this.resolveWorkspaceId(input.projectId, input.workspaceId)
+      : input.workspaceId || null;
 
     const { data, error } = await table('project_assets')
       .upsert({
         bucket: input.bucket,
         path: input.path,
         project_id: input.projectId || null,
-        workspace_id: input.workspaceId || null,
+        workspace_id: workspaceId,
         owner_id: userId,
         hash: input.hash || null,
         size_bytes: input.sizeBytes || 0,
@@ -263,7 +266,7 @@ class ProjectOsService {
       await this.recordUsageEvent({
         metric: 'storage_bytes',
         quantity: input.sizeBytes,
-        workspaceId: input.workspaceId,
+        workspaceId,
         metadata: { bucket: input.bucket, path: input.path, projectId: input.projectId || null },
       });
     }
