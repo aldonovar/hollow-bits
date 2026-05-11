@@ -25,6 +25,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@hollowbits/core": [
+        "./hollowbits-core/index.ts"
       ]
     }
   },

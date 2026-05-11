@@ -8,6 +8,14 @@ import { useAuthStore } from '../../stores/authStore';
 
 type AuthStatus = 'idle' | 'loading' | 'success' | 'error';
 
+function getDesktopEmailRedirectUrl(): string {
+  const url = new URL('https://hollowbits.com/desktop-auth');
+  url.searchParams.set('source', 'desktop');
+  url.searchParams.set('mode', 'signup');
+  url.searchParams.set('return_to', 'hollowbits://auth/callback');
+  return url.toString();
+}
+
 interface DesktopAuthProps {
   type: 'login' | 'signup';
   onSuccess: () => void;
@@ -59,7 +67,7 @@ export function DesktopAuth({ type, onSuccess, onBack, onSwitchType }: DesktopAu
               full_name: fullName.trim(),
               username: username.trim(),
             },
-            emailRedirectTo: 'hollowbits://auth/callback',
+            emailRedirectTo: getDesktopEmailRedirectUrl(),
           },
         });
 

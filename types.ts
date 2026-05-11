@@ -141,6 +141,9 @@ export interface Device {
   id: string;
   name: string;
   type: 'instrument' | 'effect' | 'eq' | 'vst-loader';
+  latencyMs?: number;
+  /** Track ID whose post-fader signal feeds this device's sidechain input (key input). */
+  sidechainSourceTrackId?: string;
   params: {
     name: string;
     value: number;
@@ -318,6 +321,10 @@ export interface Track {
   vcaGroupId?: string;
   soloSafe?: boolean;
   automationMode?: AutomationMode;
+  /** When true, this track plays back a pre-rendered frozen buffer instead of processing live effects. */
+  isFrozen?: boolean;
+  /** The IndexedDB/source cache id of the frozen AudioBuffer. */
+  frozenBufferSourceId?: string;
   clips: Clip[];
   sessionClips: ClipSlot[];
   devices: Device[];
@@ -523,6 +530,8 @@ export interface ProjectData {
   transport: TransportState;
   audioSettings: AudioSettings;
   scoreWorkspaces?: ScoreWorkspaceState[];
+  assetRefs?: unknown[];
+  workspaceId?: string;
   createdAt: number;
   lastModified: number;
 }

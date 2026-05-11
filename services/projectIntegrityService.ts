@@ -375,6 +375,8 @@ const sanitizeDevices = (candidate: unknown): Device[] => {
             id: asNonEmptyString(device.id) || `device-${index + 1}`,
             name: asNonEmptyString(device.name) || `Device ${index + 1}`,
             type: VALID_DEVICE_TYPES.has(device.type as Device['type']) ? device.type as Device['type'] : 'effect',
+            latencyMs: isFiniteNumber(device.latencyMs) ? Math.max(0, Number(device.latencyMs)) : undefined,
+            sidechainSourceTrackId: asNonEmptyString(device.sidechainSourceTrackId) || undefined,
             params: sanitizeDeviceParams(device.params)
         }));
 };
@@ -808,6 +810,26 @@ const repairTrackRoutingReferences = (
             sendModes[targetId] = value === 'pre' ? 'pre' : 'post';
         });
 
+        const devices = track.devices.map((device) => {
+            const sourceTrackId = device.sidechainSourceTrackId;
+            if (!sourceTrackId || (trackById.has(sourceTrackId) && sourceTrackId !== track.id)) {
+                return device;
+            }
+
+            issues.push({
+                severity: 'warning',
+                code: 'routing.invalid-sidechain-reference',
+                message: `Se limpio un sidechain invalido en ${track.id}.`,
+                repaired: true,
+                trackId: track.id
+            });
+
+            return {
+                ...device,
+                sidechainSourceTrackId: undefined
+            };
+        });
+
         if (groupId) {
             const visited = new Set<string>([track.id]);
             let cursor = groupId;
@@ -839,6 +861,7 @@ const repairTrackRoutingReferences = (
             ...track,
             sends,
             sendModes,
+            devices,
             groupId,
             vcaGroupId
         };
@@ -918,6 +941,8 @@ const sanitizeTrack = (
         automationMode: VALID_AUTOMATION_MODES.has(candidate.automationMode as AutomationMode)
             ? candidate.automationMode as AutomationMode
             : 'read',
+        isFrozen: Boolean(candidate.isFrozen),
+        frozenBufferSourceId: asNonEmptyString(candidate.frozenBufferSourceId) || undefined,
         clips: allSourceClips,
         sessionClips: slots,
         devices: sanitizeDevices(candidate.devices),
@@ -972,6 +997,8 @@ export const repairProjectData = (
         transport: sanitizeTransport(candidate.transport),
         audioSettings: sanitizeAudioSettingsCandidate(candidate.audioSettings as Partial<AudioSettings> | undefined, DEFAULT_AUDIO_SETTINGS),
         scoreWorkspaces: sanitizeScoreWorkspaces(candidate.scoreWorkspaces),
+        assetRefs: Array.isArray(candidate.assetRefs) ? candidate.assetRefs : undefined,
+        workspaceId: asNonEmptyString(candidate.workspaceId) || undefined,
         createdAt: Math.max(0, asFiniteNumber(candidate.createdAt, now)),
         lastModified: Math.max(0, asFiniteNumber(candidate.lastModified, now))
     };

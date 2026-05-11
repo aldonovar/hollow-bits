@@ -100,6 +100,75 @@ describe('projectIntegrityService', () => {
         expect(result.report.issueCount).toBeGreaterThan(0);
     });
 
+    it('preserves sidechain and frozen-track contract fields across repair', () => {
+        const project = {
+            ...baseProject(),
+            tracks: [
+                {
+                    id: 'kick',
+                    name: 'Kick',
+                    type: TrackType.AUDIO,
+                    color: '#ff00aa',
+                    clips: [],
+                    sessionClips: [],
+                    devices: []
+                },
+                {
+                    id: 'bass',
+                    name: 'Bass',
+                    type: TrackType.AUDIO,
+                    color: '#00ffaa',
+                    clips: [],
+                    sessionClips: [],
+                    isFrozen: true,
+                    frozenBufferSourceId: 'frozen-bass-v1',
+                    devices: [{
+                        id: 'comp-1',
+                        name: 'Sidechain Compressor',
+                        type: 'effect',
+                        sidechainSourceTrackId: 'kick',
+                        params: []
+                    }]
+                }
+            ]
+        };
+
+        const result = repairProjectData(project, { source: 'unit-core-contract' });
+        const bass = result.project.tracks.find((track) => track.id === 'bass');
+
+        expect(bass?.isFrozen).toBe(true);
+        expect(bass?.frozenBufferSourceId).toBe('frozen-bass-v1');
+        expect(bass?.devices[0]?.sidechainSourceTrackId).toBe('kick');
+    });
+
+    it('removes invalid sidechain references without dropping the device', () => {
+        const project = {
+            ...baseProject(),
+            tracks: [{
+                id: 'bass',
+                name: 'Bass',
+                type: TrackType.AUDIO,
+                color: '#00ffaa',
+                clips: [],
+                sessionClips: [],
+                devices: [{
+                    id: 'comp-1',
+                    name: 'Sidechain Compressor',
+                    type: 'effect',
+                    sidechainSourceTrackId: 'ghost',
+                    params: []
+                }]
+            }]
+        };
+
+        const result = repairProjectData(project, { source: 'unit-invalid-sidechain' });
+        const bass = result.project.tracks[0];
+
+        expect(bass.devices[0]?.id).toBe('comp-1');
+        expect(bass.devices[0]?.sidechainSourceTrackId).toBeUndefined();
+        expect(result.report.issues.some((issue) => issue.code === 'routing.invalid-sidechain-reference')).toBe(true);
+    });
+
     it('repairs take references, preserves session-only clips and rebuilds comp clips', () => {
         const corruptedProject = {
             ...baseProject(),

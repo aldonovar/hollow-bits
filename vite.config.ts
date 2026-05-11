@@ -25,6 +25,7 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
+        '@hollowbits/core': path.resolve(__dirname, 'hollowbits-core/index.ts'),
       }
     }
   };

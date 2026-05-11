@@ -10,6 +10,7 @@
     "dev": "vite",
     "assets:performer": "python scripts/generate-performer-frames.py",
     "assets:performer:ffmpeg": "node scripts/generate-performer-frames.mjs",
+    "test:contract": "node scripts/verify-ecosystem-contract.mjs",
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",

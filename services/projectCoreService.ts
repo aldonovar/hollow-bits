@@ -23,6 +23,8 @@ interface CreateTrackOptions {
     vcaGroupId?: string;
     soloSafe?: boolean;
     automationMode?: Track['automationMode'];
+    isFrozen?: Track['isFrozen'];
+    frozenBufferSourceId?: Track['frozenBufferSourceId'];
     automationLanes?: Track['automationLanes'];
     recordingTakes?: Track['recordingTakes'];
     takeLanes?: Track['takeLanes'];
@@ -117,6 +119,8 @@ export const createTrack = (options: CreateTrackOptions): Track => {
         vcaGroupId: options.vcaGroupId,
         soloSafe: options.soloSafe ?? false,
         automationMode: options.automationMode ?? 'read',
+        isFrozen: options.isFrozen ?? false,
+        frozenBufferSourceId: options.frozenBufferSourceId,
         automationLanes: options.automationLanes ? [...options.automationLanes] : undefined,
         recordingTakes: cloneRecordingTakes(options.recordingTakes),
         takeLanes: cloneTakeLanes(options.takeLanes),
@@ -135,6 +139,8 @@ export const withTrackRuntimeDefaults = (track: Track): Track => {
         sendModes: track.sendModes || {},
         soloSafe: track.soloSafe ?? false,
         automationMode: track.automationMode ?? 'read',
+        isFrozen: track.isFrozen ?? false,
+        frozenBufferSourceId: track.frozenBufferSourceId,
         recordingTakes: cloneRecordingTakes(track.recordingTakes),
         takeLanes: cloneTakeLanes(track.takeLanes),
         activeCompLaneId: track.activeCompLaneId,
@@ -169,6 +175,11 @@ export const removeTrackRoutingReferences = (tracks: Track[], trackId: string): 
             ...track,
             sends: nextSends,
             sendModes: nextSendModes,
+            devices: track.devices.map((device) => (
+                device.sidechainSourceTrackId === trackId
+                    ? { ...device, sidechainSourceTrackId: undefined }
+                    : device
+            )),
             groupId: track.groupId === trackId ? undefined : track.groupId,
             vcaGroupId: track.vcaGroupId === trackId ? undefined : track.vcaGroupId
         };
