@@ -1239,20 +1239,16 @@ const App: React.FC = () => {
                             alert('Has entrado en modo EDITOR.');
                         }
 
-                        const { data: projectRow } = await supabase
-                            .from('projects')
-                            .select('data')
-                            .eq('id', sharedSession.project_id)
-                            .single();
-
-                        if (projectRow?.data) {
-                            const integrityReport = await hydrateProjectData(projectRow.data as unknown as ProjectData, sharedSession.name, {
+                        if (sharedSession.data) {
+                            const integrityReport = await hydrateProjectData(sharedSession.data as unknown as ProjectData, sharedSession.name, {
                                 source: 'open-project',
                                 rememberReport: true
                             });
                             if (integrityReport.issueCount > 0) {
                                 console.warn('Project integrity repaired during open.', integrityReport);
                             }
+                        } else {
+                            console.warn('Shared project token resolved without project data.');
                         }
                     }
                 } catch (e) {
