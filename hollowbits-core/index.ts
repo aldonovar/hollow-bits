@@ -348,6 +348,28 @@ export const getRequiredTierName = (flag: FeatureGate): Tier => {
   return 'studio';
 };
 
+export const getFeatureUpgradeTarget = (flag: FeatureGate): Tier => getRequiredTierName(flag);
+
+export const getUsageLimitForMetric = (tier: Tier, metric: UsageMetric): number => {
+  const limits = TIER_LIMITS[tier];
+  switch (metric) {
+    case 'storage_bytes':
+      return limits.storageBytes;
+    case 'ai_action':
+      return limits.aiRequestsPerMonth;
+    case 'render_minutes':
+      return limits.renderMinutesPerMonth;
+    case 'sample_claim':
+      return limits.sampleClaimsPerMonth;
+    case 'collaborator_seat':
+      return limits.maxCollaborators;
+    case 'snapshot':
+      return limits.snapshotRetentionDays === 0 ? 0 : -1;
+    default:
+      return 0;
+  }
+};
+
 export const isWithinQuota = (
   tier: Tier,
   metric: keyof Pick<TierLimits, 'aiRequestsPerMonth' | 'sampleDownloadsPerMonth' | 'renderMinutesPerMonth'>,
@@ -378,4 +400,11 @@ export const formatLimit = (value: number): string => {
   if (value === -1) return 'Ilimitado';
   if (value >= 1024 ** 2) return formatStorageLimit(value);
   return value.toLocaleString();
+};
+
+export const formatUsageMetric = (metric: UsageMetric, quantity: number): string => {
+  const safeQuantity = Number.isFinite(quantity) ? Math.max(0, quantity) : 0;
+  if (metric === 'storage_bytes') return formatStorageLimit(safeQuantity);
+  if (metric === 'render_minutes') return `${Number(safeQuantity.toFixed(1)).toLocaleString()} min`;
+  return safeQuantity.toLocaleString();
 };

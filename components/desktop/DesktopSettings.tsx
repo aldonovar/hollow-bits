@@ -21,7 +21,9 @@ import {
   User,
   X,
 } from 'lucide-react';
+import { formatCountLimit, formatStorageLimit, formatUsageMetric, getTierLimits, resolveTier } from '@hollowbits/core';
 import { supabase } from '../../services/supabase';
+import { projectOsService, type UsageSummary } from '../../services/projectOsService';
 import { useAuthStore } from '../../stores/authStore';
 
 type FeedbackStatus = 'idle' | 'saving' | 'success' | 'error';
@@ -41,6 +43,7 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
 
   const [license, setLicense] = useState<any>(null);
   const [sessions, setSessions] = useState<any[]>([]);
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   const [loadingExtra, setLoadingExtra] = useState(false);
 
   const [currentPassword, setCurrentPassword] = useState('');
@@ -115,6 +118,12 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
           .eq('user_id', user.id)
           .single();
         if (licenseData) setLicense(licenseData);
+
+        const usageData = await projectOsService.getUsageSummary().catch((error) => {
+          console.warn('[DesktopSettings] Project OS usage failed:', error);
+          return null;
+        });
+        if (usageData) setUsageSummary(usageData);
       } catch (error) {
         console.error('[DesktopSettings] Extra data failed:', error);
       } finally {
@@ -338,6 +347,22 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
 
   const avatarDisplay = avatarUrl
     || `https://ui-avatars.com/api/?name=${encodeURIComponent(fullName || 'U')}&background=8b7cf6&color=fff&size=128&bold=true`;
+  const currentTier = resolveTier(license?.tier || profile?.tier);
+  const tierLimits = getTierLimits(currentTier);
+  const measuredUsage = usageSummary || {
+    storage_bytes: 0,
+    ai_action: 0,
+    render_minutes: 0,
+    sample_claim: 0,
+    collaborator_seat: 0,
+    snapshot: 0,
+  };
+  const usageRows = [
+    { label: 'Storage cloud', value: `${formatUsageMetric('storage_bytes', measuredUsage.storage_bytes)} / ${formatStorageLimit(tierLimits.storageBytes)}` },
+    { label: 'Snapshots cloud', value: `${formatUsageMetric('snapshot', measuredUsage.snapshot)} / ${tierLimits.snapshotRetentionDays === 0 ? 'Solo local' : tierLimits.snapshotRetentionDays === -1 ? 'Ilimitado' : `${tierLimits.snapshotRetentionDays} dias`}` },
+    { label: 'Render cloud', value: `${formatUsageMetric('render_minutes', measuredUsage.render_minutes)} / ${tierLimits.renderMinutesPerMonth === 0 ? 'No incluido' : formatCountLimit(tierLimits.renderMinutesPerMonth, ' min/mes')}` },
+    { label: 'AI actions', value: `${formatUsageMetric('ai_action', measuredUsage.ai_action)} / ${formatCountLimit(tierLimits.aiRequestsPerMonth, '/mes')}` },
+  ];
 
   return (
     <div className="desktop-settings">
@@ -405,12 +430,22 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
           {loadingExtra ? (
             <p><Loader2 size={14} /> Cargando licencia...</p>
           ) : license ? (
-            <div className="desktop-row">
-              <div>
-                <h3 style={{ textTransform: 'capitalize' }}>{license.tier === 'free' ? 'Plan Basico' : `Plan ${license.tier}`}</h3>
-                <p>Estado: {license.status}{license.current_period_end ? ` · hasta ${new Date(license.current_period_end).toLocaleDateString()}` : ''}</p>
+            <div style={{ display: 'grid', gap: 14 }}>
+              <div className="desktop-row">
+                <div>
+                  <h3 style={{ textTransform: 'capitalize' }}>{currentTier === 'free' ? 'Plan Basico' : `Plan ${currentTier}`}</h3>
+                  <p>Estado: {license.status}{license.current_period_end ? ` · hasta ${new Date(license.current_period_end).toLocaleDateString()}` : ''}</p>
+                </div>
+                <span className="desktop-meta">{profile?.tier || license.tier}</span>
               </div>
-              <span className="desktop-meta">{profile?.tier || license.tier}</span>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {usageRows.map((row) => (
+                  <div key={row.label} className="desktop-row" style={{ padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                    <span>{row.label}</span>
+                    <span className="desktop-meta">{row.value}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : (
             <p>No se encontro informacion de licencia.</p>

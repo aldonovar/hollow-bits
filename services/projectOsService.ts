@@ -1,10 +1,8 @@
 import {
-  PROJECT_SCHEMA_VERSION,
   STORAGE_BUCKETS,
   type StorageBucket,
   type Tier,
   type UsageMetric,
-  resolveTier,
 } from '@hollowbits/core';
 import type { ProjectData } from '../types';
 import { supabase } from './supabase';
@@ -13,11 +11,13 @@ type ProjectOsStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelle
 type RenderKind = 'master' | 'stems' | 'preview';
 type RenderFormat = 'wav' | 'aiff' | 'flac' | 'mp3';
 
-type UntypedSupabaseTables = {
+type UntypedSupabase = {
   from: (table: string) => any;
+  rpc: (fn: string, args?: Record<string, unknown>) => Promise<{ data: any; error: any }>;
 };
 
-const table = (name: string) => (supabase as unknown as UntypedSupabaseTables).from(name);
+const db = supabase as unknown as UntypedSupabase;
+const table = (name: string) => db.from(name);
 
 export interface CreateProjectSnapshotInput {
   projectId: string;
@@ -119,11 +119,6 @@ const emptyUsageSummary = (): UsageSummary => ({
   snapshot: 0,
 });
 
-const jsonSizeBytes = (value: unknown): number => {
-  const encoded = JSON.stringify(value);
-  return new TextEncoder().encode(encoded).byteLength;
-};
-
 const currentMonthStart = (): string => {
   const now = new Date();
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
@@ -135,69 +130,22 @@ const assertAllowedBucket = (bucket: StorageBucket): void => {
   }
 };
 
+const firstRpcRow = <T>(data: T[] | T | null | undefined, label: string): T => {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) throw new Error(`${label} returned no data.`);
+  return row as T;
+};
+
 class ProjectOsService {
-  private async requireUserId(): Promise<string> {
-    const { data, error } = await supabase.auth.getUser();
-    if (error || !data.user) {
-      throw new Error('Authentication is required for Project OS operations.');
-    }
-
-    return data.user.id;
-  }
-
-  private async resolveWorkspaceId(projectId: string, workspaceId?: string | null): Promise<string> {
-    if (workspaceId) return workspaceId;
-
-    const { data, error } = await table('projects')
-      .select('workspace_id')
-      .eq('id', projectId)
-      .single();
-
-    if (error || !data?.workspace_id) {
-      throw new Error(`Unable to resolve workspace for project ${projectId}.`);
-    }
-
-    return data.workspace_id;
-  }
-
-  private async resolveTierAtEvent(userId: string, explicitTier?: Tier): Promise<Tier> {
-    if (explicitTier) return explicitTier;
-
-    const { data } = await table('profiles')
-      .select('tier')
-      .eq('id', userId)
-      .maybeSingle();
-
-    return resolveTier(data?.tier);
-  }
-
   async createSnapshot(input: CreateProjectSnapshotInput): Promise<ProjectSnapshotRecord> {
-    const userId = await this.requireUserId();
-    const workspaceId = await this.resolveWorkspaceId(input.projectId, input.workspaceId);
-    const schemaVersion = input.project.version || PROJECT_SCHEMA_VERSION;
-
-    const { data, error } = await table('project_snapshots')
-      .insert({
-        project_id: input.projectId,
-        workspace_id: workspaceId,
-        created_by: userId,
-        label: input.label || null,
-        schema_version: schemaVersion,
-        data: input.project,
-        size_bytes: jsonSizeBytes(input.project),
-      })
-      .select('*')
-      .single();
-
-    if (error) throw new Error(`Failed to create project snapshot: ${error.message}`);
-    await this.recordUsageEvent({
-      metric: 'snapshot',
-      quantity: 1,
-      workspaceId,
-      metadata: { projectId: input.projectId, snapshotId: data.id },
+    const { data, error } = await db.rpc('create_project_snapshot_with_limit', {
+      p_project_id: input.projectId,
+      p_label: input.label || null,
+      p_data: input.project as unknown as Record<string, unknown>,
     });
 
-    return data as ProjectSnapshotRecord;
+    if (error) throw new Error(`Failed to create project snapshot: ${error.message}`);
+    return firstRpcRow<ProjectSnapshotRecord>(data, 'Project snapshot');
   }
 
   async listSnapshots(projectId: string, limit = 30): Promise<ProjectSnapshotRecord[]> {
@@ -234,44 +182,23 @@ class ProjectOsService {
   }
 
   async registerAsset(input: RegisterProjectAssetInput): Promise<ProjectAssetRecord> {
-    const userId = await this.requireUserId();
     assertAllowedBucket(input.bucket);
-    const workspaceId = input.projectId
-      ? await this.resolveWorkspaceId(input.projectId, input.workspaceId)
-      : input.workspaceId || null;
-
-    const { data, error } = await table('project_assets')
-      .upsert({
-        bucket: input.bucket,
-        path: input.path,
-        project_id: input.projectId || null,
-        workspace_id: workspaceId,
-        owner_id: userId,
-        hash: input.hash || null,
-        size_bytes: input.sizeBytes || 0,
-        duration_seconds: input.durationSeconds || null,
-        format: input.format || null,
-        sample_rate: input.sampleRate || null,
-        license_state: input.licenseState || 'unknown',
-        metadata: input.metadata || {},
-        updated_at: new Date().toISOString(),
-      }, {
-        onConflict: 'bucket,path',
-      })
-      .select('*')
-      .single();
+    const { data, error } = await db.rpc('register_project_asset_with_limit', {
+      p_bucket: input.bucket,
+      p_path: input.path,
+      p_project_id: input.projectId || null,
+      p_workspace_id: input.workspaceId || null,
+      p_hash: input.hash || null,
+      p_size_bytes: input.sizeBytes || 0,
+      p_duration_seconds: input.durationSeconds || null,
+      p_format: input.format || null,
+      p_sample_rate: input.sampleRate || null,
+      p_license_state: input.licenseState || 'unknown',
+      p_metadata: input.metadata || {},
+    });
 
     if (error) throw new Error(`Failed to register project asset: ${error.message}`);
-    if (input.sizeBytes && input.sizeBytes > 0) {
-      await this.recordUsageEvent({
-        metric: 'storage_bytes',
-        quantity: input.sizeBytes,
-        workspaceId,
-        metadata: { bucket: input.bucket, path: input.path, projectId: input.projectId || null },
-      });
-    }
-
-    return data as ProjectAssetRecord;
+    return firstRpcRow<ProjectAssetRecord>(data, 'Project asset');
   }
 
   async listProjectAssets(projectId: string): Promise<ProjectAssetRecord[]> {
@@ -285,26 +212,17 @@ class ProjectOsService {
   }
 
   async createRenderJob(input: CreateRenderJobInput): Promise<RenderJobRecord> {
-    const userId = await this.requireUserId();
-    const workspaceId = await this.resolveWorkspaceId(input.projectId, input.workspaceId);
-
-    const { data, error } = await table('render_jobs')
-      .insert({
-        project_id: input.projectId,
-        workspace_id: workspaceId,
-        requested_by: userId,
-        kind: input.kind || 'master',
-        status: 'queued',
-        format: input.format || 'wav',
-        bit_depth: input.bitDepth || 24,
-        sample_rate: input.sampleRate || 48000,
-        input: input.input || {},
-      })
-      .select('*')
-      .single();
+    const { data, error } = await db.rpc('create_render_job_with_limit', {
+      p_project_id: input.projectId,
+      p_kind: input.kind || 'master',
+      p_format: input.format || 'wav',
+      p_bit_depth: input.bitDepth || 24,
+      p_sample_rate: input.sampleRate || 48000,
+      p_input: input.input || {},
+    });
 
     if (error) throw new Error(`Failed to create render job: ${error.message}`);
-    return data as RenderJobRecord;
+    return firstRpcRow<RenderJobRecord>(data, 'Render job');
   }
 
   async updateRenderJobStatus(
@@ -312,25 +230,15 @@ class ProjectOsService {
     status: ProjectOsStatus,
     patch: { outputAssetId?: string | null; error?: string | null } = {}
   ): Promise<RenderJobRecord> {
-    const now = new Date().toISOString();
-    const payload: Record<string, unknown> = {
-      status,
-      updated_at: now,
-    };
-
-    if (status === 'running') payload.started_at = now;
-    if (status === 'succeeded' || status === 'failed' || status === 'cancelled') payload.completed_at = now;
-    if (patch.outputAssetId !== undefined) payload.output_asset_id = patch.outputAssetId;
-    if (patch.error !== undefined) payload.error = patch.error;
-
-    const { data, error } = await table('render_jobs')
-      .update(payload)
-      .eq('id', renderJobId)
-      .select('*')
-      .single();
+    const { data, error } = await db.rpc('update_render_job_status_with_scope', {
+      p_render_job_id: renderJobId,
+      p_status: status,
+      p_output_asset_id: patch.outputAssetId ?? null,
+      p_error: patch.error ?? null,
+    });
 
     if (error) throw new Error(`Failed to update render job: ${error.message}`);
-    return data as RenderJobRecord;
+    return firstRpcRow<RenderJobRecord>(data, 'Render job');
   }
 
   async listRenderJobs(projectId: string, limit = 20): Promise<RenderJobRecord[]> {
@@ -345,36 +253,16 @@ class ProjectOsService {
   }
 
   async recordUsageEvent(input: RecordUsageEventInput): Promise<void> {
-    const userId = await this.requireUserId();
-    const tierAtEvent = await this.resolveTierAtEvent(userId, input.tierAtEvent);
-
-    const { error } = await table('usage_events')
-      .insert({
-        user_id: userId,
-        workspace_id: input.workspaceId || null,
-        metric: input.metric,
-        quantity: input.quantity ?? 1,
-        period_start: input.periodStart || currentMonthStart(),
-        tier_at_event: tierAtEvent,
-        metadata: input.metadata || {},
-      });
-
-    if (error) throw new Error(`Failed to record usage event: ${error.message}`);
+    void input;
+    console.warn('[ProjectOS] Usage events are recorded by backend RPCs only.');
   }
 
   async getUsageSummary(input: { workspaceId?: string | null; periodStart?: string } = {}): Promise<UsageSummary> {
-    const userId = await this.requireUserId();
-    const periodStart = input.periodStart || currentMonthStart();
+    const { data, error } = await db.rpc('get_project_os_usage', {
+      p_workspace_id: input.workspaceId || null,
+      p_period_start: input.periodStart || currentMonthStart(),
+    });
 
-    let query = table('usage_events')
-      .select('metric, quantity')
-      .eq('period_start', periodStart);
-
-    query = input.workspaceId
-      ? query.eq('workspace_id', input.workspaceId)
-      : query.eq('user_id', userId);
-
-    const { data, error } = await query;
     if (error) throw new Error(`Failed to load usage summary: ${error.message}`);
 
     const summary = emptyUsageSummary();

@@ -123,6 +123,7 @@ import {
 } from 'lucide-react';
 import { HardwareSettingsModal } from './components/HardwareSettingsModal';
 import { ShareProjectModal } from './components/ShareProjectModal';
+import { ProjectOsPanel } from './components/ProjectOsPanel';
 import { audioEngine } from './services/audioEngine';
 import { supabase } from './services/supabase';
 import {
@@ -130,6 +131,7 @@ import {
     setTransportClockSnapshot
 } from './services/transportClockStore';
 import { useAuthStore } from './stores/authStore';
+import { resolveTier } from '@hollowbits/core';
 
 const AISidebar = React.lazy(() => import('./components/AISidebar'));
 const PianoScoreWorkspace = React.lazy(() => import('./components/PianoScoreWorkspace'));
@@ -370,7 +372,7 @@ const App: React.FC = () => {
     // Menus & Modals
     const [showFileMenu, setShowFileMenu] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
-    const [activeModal, setActiveModal] = useState<'settings' | 'help' | 'collab' | 'auth' | 'new-project-confirm' | 'recovery' | 'recording-recovery' | 'monitoring-routes' | 'share' | null>(null);
+    const [activeModal, setActiveModal] = useState<'settings' | 'help' | 'collab' | 'auth' | 'new-project-confirm' | 'recovery' | 'recording-recovery' | 'monitoring-routes' | 'share' | 'project-os' | null>(null);
     const [isRenamingProject, setIsRenamingProject] = useState(false);
     const [renameValue, setRenameValue] = useState("");
     const [showProjectBrowser, setShowProjectBrowser] = useState(false);
@@ -3714,6 +3716,32 @@ const App: React.FC = () => {
         return integrityResult.report;
     }, [rememberProjectIntegrityReport, replaceTracks]);
 
+    const createProjectOsSnapshot = useCallback((): ProjectData => {
+        const clockSnapshot = getTransportClockSnapshot();
+        return createProjectDataSnapshot({
+            ...transport,
+            isPlaying: false,
+            isRecording: false,
+            currentBar: clockSnapshot.currentBar,
+            currentBeat: clockSnapshot.currentBeat,
+            currentSixteenth: clockSnapshot.currentSixteenth
+        }, projectName);
+    }, [createProjectDataSnapshot, projectName, transport]);
+
+    const handleRestoreProjectOsSnapshot = useCallback(async (project: ProjectData, preferredName?: string) => {
+        setLoadingProject(true);
+        setLoadingMessage('Restaurando Project OS...');
+        try {
+            await hydrateProjectData(project, preferredName || projectName, {
+                source: 'project-os-restore',
+                rememberReport: true
+            });
+        } finally {
+            setLoadingProject(false);
+            setLoadingMessage('');
+        }
+    }, [hydrateProjectData, projectName]);
+
     const handleRestoreRecoverySnapshot = useCallback(async () => {
         if (!recoverySnapshot) {
             setActiveModal(null);
@@ -5174,6 +5202,7 @@ const App: React.FC = () => {
                     </div>
                     <div className="mt-auto flex flex-col gap-3 w-full items-center pb-3">
                         <SidebarItem icon={Users} label="Colaboración" onClick={() => setActiveModal('collab')} active={activeModal === 'collab'} />
+                        <SidebarItem icon={HardDrive} label="Project OS" onClick={() => setActiveModal('project-os')} active={activeModal === 'project-os'} color="text-gray-400 group-hover:text-daw-cyan" />
                         <SidebarItem icon={Share2} label="Compartir Enlace" onClick={() => { if (collabSessionId) { setActiveModal('share'); } else { alert('Debes guardar el proyecto en la nube primero (Colaboración) antes de poder compartirlo.'); } }} active={activeModal === 'share'} color="text-gray-400 group-hover:text-blue-400" />
                         <SidebarItem icon={Settings} label="Preferencias de Audio/MIDI" onClick={() => setShowSettings(true)} active={showSettings} />
                     </div>
@@ -5859,6 +5888,17 @@ const App: React.FC = () => {
                 </div>
             </Modal>
             <Modal isOpen={activeModal === 'new-project-confirm'} onClose={() => setActiveModal(null)} title="Nuevo Proyecto"><div className="flex flex-col gap-6"><div className="flex items-start gap-4 text-white"><div className="p-3 bg-daw-ruby/20 rounded-full shrink-0"><AlertTriangle className="text-daw-ruby" size={24} /></div><div><h3 className="font-bold text-lg mb-1">Ã‚Â¿Deseas guardar los cambios?</h3><p className="text-gray-400 text-xs leading-relaxed">Si continúas sin guardar, perderás todo el trabajo actual para abrir un espacio de trabajo limpio.</p></div></div><div className="flex flex-col gap-2"><button onClick={async () => { await handleSaveProject(); resetProjectToEmpty(); }} className="w-full flex items-center justify-between px-4 py-3 bg-white text-black rounded-sm font-bold text-xs hover:bg-gray-200 transition-all group"><div className="flex items-center gap-3"><Save size={16} /><span>GUARDAR Y CREAR NUEVO</span></div></button><button onClick={resetProjectToEmpty} className="w-full flex items-center gap-3 px-4 py-3 bg-[#222] text-daw-ruby border border-daw-ruby/30 rounded-sm font-bold text-xs hover:bg-daw-ruby hover:text-white transition-all"><Trash2 size={16} /><span>CONTINUAR SIN GUARDAR</span></button><button onClick={() => setActiveModal(null)} className="w-full py-2 text-gray-500 hover:text-white text-[10px] font-bold uppercase tracking-widest mt-2">CANCELAR</button></div></div></Modal>
+
+            <Modal isOpen={activeModal === 'project-os'} onClose={() => setActiveModal(null)} title="Project OS">
+                <ProjectOsPanel
+                    projectId={collabSessionId}
+                    projectName={projectName}
+                    tier={resolveTier(profile?.tier)}
+                    buildSnapshot={createProjectOsSnapshot}
+                    onRestoreProject={handleRestoreProjectOsSnapshot}
+                    onUpgrade={() => { window.location.href = '/pricing'; }}
+                />
+            </Modal>
 
             {activeModal === 'share' && collabSessionId && (
                 <ShareProjectModal 

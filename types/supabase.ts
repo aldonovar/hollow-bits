@@ -323,6 +323,52 @@ export type Database = {
         }
         Returns: string
       }
+      create_project_snapshot_with_limit: {
+        Args: {
+          p_data?: Json
+          p_label?: string | null
+          p_project_id: string
+        }
+        Returns: {
+          created_at: string
+          created_by: string
+          data: Json
+          id: string
+          label: string | null
+          project_id: string
+          schema_version: string
+          size_bytes: number
+          workspace_id: string
+        }[]
+      }
+      create_render_job_with_limit: {
+        Args: {
+          p_bit_depth?: number
+          p_format?: string
+          p_input?: Json
+          p_kind?: string
+          p_project_id: string
+          p_sample_rate?: number
+        }
+        Returns: {
+          bit_depth: number
+          completed_at: string | null
+          created_at: string
+          error: string | null
+          format: string
+          id: string
+          input: Json
+          kind: string
+          output_asset_id: string | null
+          project_id: string
+          requested_by: string
+          sample_rate: number
+          started_at: string | null
+          status: string
+          updated_at: string
+          workspace_id: string
+        }[]
+      }
       get_active_sessions: {
         Args: never
         Returns: {
@@ -345,9 +391,77 @@ export type Database = {
           yjs_room_id: string
         }[]
       }
+      get_project_os_usage: {
+        Args: {
+          p_period_start?: string
+          p_workspace_id?: string | null
+        }
+        Returns: {
+          metric: string
+          quantity: number
+        }[]
+      }
+      register_project_asset_with_limit: {
+        Args: {
+          p_bucket: string
+          p_duration_seconds?: number | null
+          p_format?: string | null
+          p_hash?: string | null
+          p_license_state?: string
+          p_metadata?: Json
+          p_path: string
+          p_project_id?: string | null
+          p_sample_rate?: number | null
+          p_size_bytes?: number
+          p_workspace_id?: string | null
+        }
+        Returns: {
+          bucket: string
+          created_at: string
+          duration_seconds: number | null
+          format: string | null
+          hash: string | null
+          id: string
+          license_state: string
+          metadata: Json
+          owner_id: string
+          path: string
+          project_id: string | null
+          sample_rate: number | null
+          size_bytes: number
+          updated_at: string
+          workspace_id: string | null
+        }[]
+      }
       revoke_device_session: {
         Args: { target_session_id: string }
         Returns: boolean
+      }
+      update_render_job_status_with_scope: {
+        Args: {
+          p_error?: string | null
+          p_output_asset_id?: string | null
+          p_render_job_id: string
+          p_status: string
+        }
+        Returns: {
+          bit_depth: number
+          completed_at: string | null
+          created_at: string
+          error: string | null
+          format: string
+          id: string
+          input: Json
+          kind: string
+          output_asset_id: string | null
+          project_id: string
+          requested_by: string
+          sample_rate: number
+          started_at: string | null
+          status: string
+          updated_at: string
+          workspace_id: string
+        }[]
       }
     }
     Enums: {
