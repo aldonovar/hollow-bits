@@ -5200,15 +5200,25 @@ const App: React.FC = () => {
                         <button onClick={undo} disabled={!canUndo} className={`w-8 h-8 flex items-center justify-center rounded-md transition-all ${!canUndo ? 'text-gray-700 cursor-not-allowed opacity-30' : 'text-gray-400 hover:text-white hover:bg-white/5'}`} title="Deshacer (Ctrl+Z)"><Undo2 size={16} /></button>
                         <button onClick={redo} disabled={!canRedo} className={`w-8 h-8 flex items-center justify-center rounded-md transition-all ${!canRedo ? 'text-gray-700 cursor-not-allowed opacity-30' : 'text-gray-400 hover:text-white hover:bg-white/5'}`} title="Rehacer (Ctrl+Y)"><Redo2 size={16} /></button>
                     </div>
-                    <div className="mt-auto flex flex-col gap-3 w-full items-center pb-3">
+                    <div className="mt-auto flex flex-col gap-2 w-full items-center pb-3">
                         <SidebarItem icon={Users} label="Colaboración" onClick={() => setActiveModal('collab')} active={activeModal === 'collab'} />
                         <SidebarItem icon={HardDrive} label="Project OS" onClick={() => setActiveModal('project-os')} active={activeModal === 'project-os'} color="text-gray-400 group-hover:text-daw-cyan" />
                         <SidebarItem icon={Share2} label="Compartir Enlace" onClick={() => { if (collabSessionId) { setActiveModal('share'); } else { alert('Debes guardar el proyecto en la nube primero (Colaboración) antes de poder compartirlo.'); } }} active={activeModal === 'share'} color="text-gray-400 group-hover:text-blue-400" />
+                        <SidebarItem
+                            icon={UserCircle2}
+                            label="Cuenta"
+                            onClick={() => {
+                                setSessionPopoverView('main');
+                                setShowSessionPopover(!showSessionPopover);
+                            }}
+                            active={showSessionPopover}
+                            color="text-gray-400 group-hover:text-daw-violet"
+                        />
                         <SidebarItem icon={Settings} label="Preferencias de Audio/MIDI" onClick={() => setShowSettings(true)} active={showSettings} />
                     </div>
 
                     {/* ── SESSION WIDGET ─────────────────────────────────────── */}
-                    <div className="w-full px-1 pb-2 mt-1 border-t border-white/5 pt-2 relative">
+                    <div className="relative w-full h-0">
                         {showSessionPopover && (
                             <div className="absolute left-14 bottom-2 w-64 bg-[#0a0a0d] border border-white/10 rounded-lg shadow-[0_0_24px_rgba(0,0,0,0.8)] p-4 z-50 animate-in fade-in zoom-in-95"
                                  // Se removió onMouseLeave para evitar que se cierre accidentalmente
@@ -5272,7 +5282,7 @@ const App: React.FC = () => {
                         )}
                         
                         {session ? (
-                            <button onClick={() => setShowSessionPopover(!showSessionPopover)} className="group relative flex flex-col items-center gap-1 w-full outline-none">
+                            <button onClick={() => setShowSessionPopover(!showSessionPopover)} className="hidden">
                                 {/* Avatar con iniciales */}
                                 <div className="relative w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-rose-500 flex items-center justify-center shadow-[0_0_10px_rgba(168,85,247,0.4)] ring-1 ring-white/10 cursor-pointer hover:ring-white/30 transition-all" title={(profile?.full_name || profile?.username || user?.email) ?? 'Sesión activa'}>
                                     <span className="text-white text-[10px] font-bold uppercase select-none">
@@ -5285,7 +5295,7 @@ const App: React.FC = () => {
                         ) : (
                             <button
                                 onClick={() => setShowSessionPopover(!showSessionPopover)}
-                                className="flex flex-col items-center gap-1 group cursor-pointer w-full outline-none"
+                                className="hidden"
                                 title="Estado de Sesión"
                             >
                                 <div className="w-8 h-8 rounded-full border border-white/10 bg-white/[0.03] group-hover:bg-white/10 group-hover:border-purple-500/50 flex items-center justify-center transition-all duration-300">
